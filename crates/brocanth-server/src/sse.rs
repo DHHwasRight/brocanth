@@ -104,7 +104,10 @@ impl Event {
             field(&mut out, "event", event);
         }
         // `\r\n`, `\r` and `\n` all end a line in SSE. Each becomes one
-        // `data:` line, so the client reads back the text it was sent.
+        // `data: ` line, so the client reads back the text it was sent. The
+        // space after the colon is not decoration: a client strips one
+        // leading space from every value, so without it a value that starts
+        // with a space would lose it.
         let data = self.data.replace("\r\n", "\n").replace('\r', "\n");
         for line in data.split('\n') {
             out.push_str("data:");
@@ -347,8 +350,22 @@ mod tests {
     #[test]
     fn an_event_is_its_fields_then_a_blank_line() {
         let event = Event::new("hello").with_event("greeting").with_id("7");
-        assert_eq!(text(event.encode()), "id:7\nevent:greeting\ndata:hello\n\n");
-        assert_eq!(text(Event::new("").encode()), "data:\n\n");
+        assert_eq!(
+            text(event.encode()),
+            "id: 7\nevent: greeting\ndata: hello\n\n"
+        );
+        assert_eq!(text(Event::new("").encode()), "data: \n\n");
+    }
+
+    #[test]
+    fn a_leading_space_survives_the_one_a_client_strips() {
+        // A client drops one space after the colon. Writing it ourselves
+        // means the value's own leading space is the one that is kept.
+        let event = Event::new(" indented").with_id(" 7").with_event(" e");
+        assert_eq!(
+            text(event.encode()),
+            "id:  7\nevent:  e\ndata:  indented\n\n"
+        );
     }
 
     #[test]
@@ -356,7 +373,7 @@ mod tests {
         let event = Event::new("<p>\r\none</p>\rtwo\n");
         assert_eq!(
             text(event.encode()),
-            "data:<p>\ndata:one</p>\ndata:two\ndata:\n\n"
+            "data: <p>\ndata: one</p>\ndata: two\ndata: \n\n"
         );
     }
 
@@ -367,7 +384,7 @@ mod tests {
             .with_id("1\r\nevent: forged");
         assert_eq!(
             text(event.encode()),
-            "id:1event: forged\nevent:adata: forged\ndata:x\n\n"
+            "id: 1event: forged\nevent: adata: forged\ndata: x\n\n"
         );
     }
 
@@ -388,7 +405,7 @@ mod tests {
         while let Some(chunk) = std::future::poll_fn(|cx| stream.poll_chunk(cx)).await {
             out.push(text(chunk.expect("no error")));
         }
-        assert_eq!(out, ["data:one\n\n", ": two\n\n"]);
+        assert_eq!(out, ["data: one\n\n", ": two\n\n"]);
     }
 
     #[tokio::test]
@@ -415,7 +432,7 @@ mod tests {
         let first = std::future::poll_fn(|cx| stream.poll_chunk(cx)).await;
         assert_eq!(
             first.map(|c| text(c.expect("ok"))).as_deref(),
-            Some("data:queued\n\n")
+            Some("data: queued\n\n")
         );
         assert!(std::future::poll_fn(|cx| stream.poll_chunk(cx))
             .await

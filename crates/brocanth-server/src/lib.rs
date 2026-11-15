@@ -157,6 +157,10 @@ pub const BODY_TIMEOUT: Duration = Duration::from_secs(60);
 /// accepting until one closes, and the kernel's backlog holds the rest.
 pub const MAX_CONNECTIONS: usize = 1024;
 
+/// How long the accept loop waits after the process ran out of file
+/// descriptors or memory, before it accepts again.
+const EXHAUSTED_PAUSE: Duration = Duration::from_secs(1);
+
 /// Why a server could not start, or could not keep running.
 #[derive(Debug)]
 pub enum ServeError {
@@ -204,7 +208,12 @@ pub struct Request {
     /// The body, up to [`Server::max_body`]. Empty for the verbs that carry
     /// none.
     pub body: Bytes,
-    /// Who connected. `None` behind a proxy that did not say.
+    /// The TCP peer: the address at the other end of the socket.
+    ///
+    /// Behind a load balancer or a reverse proxy this is the proxy, not the
+    /// client. No forwarded header is read here; the client address behind a
+    /// trusted proxy is `brocanth-middleware`'s `proxy_headers`. `None` only
+    /// for a request built in process with [`Request::new`].
     pub peer: Option<SocketAddr>,
     headers: Vec<(String, String)>,
 }
@@ -679,6 +688,21 @@ impl Server {
                 // One failed handshake says nothing about the listener; a
                 // listener that is genuinely broken will fail again.
                 Err(e) if transient(&e) => continue,
+                // Out of file descriptors or memory. The listener is fine;
+                // the process is full. Wait for connections to close, then
+                // accept again, as hyper's and axum's examples do. Returning
+                // would stop a replica that is merely busy.
+                Err(e) if exhausted(&e) => {
+                    eprintln!(
+                        "brocanth-server: cannot accept a connection: {e}; \
+                         accepting again in {EXHAUSTED_PAUSE:?}"
+                    );
+                    tokio::select! {
+                        biased;
+                        () = self.stop.notified() => break,
+                        () = tokio::time::sleep(EXHAUSTED_PAUSE) => continue,
+                    }
+                }
                 Err(e) => return Err(ServeError::Accept(e)),
             };
 
@@ -760,6 +784,37 @@ fn terminated() -> std::io::Result<impl Future<Output = ()> + Send> {
         Ok(async {
             let _ = tokio::signal::ctrl_c().await;
         })
+    }
+}
+
+/// Whether an accept error says the process, not the listener, is out of a
+/// resource: file descriptors (`EMFILE`, `ENFILE`), socket buffers
+/// (`ENOBUFS`) or memory (`ENOMEM`). Each one passes when connections close.
+fn exhausted(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::OutOfMemory {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // The numbers are the same on Linux and the BSDs but for ENOBUFS.
+        const ENOMEM: i32 = 12;
+        const ENFILE: i32 = 23;
+        const EMFILE: i32 = 24;
+        const ENOBUFS: i32 = if cfg!(any(target_os = "linux", target_os = "android")) {
+            105
+        } else {
+            55
+        };
+        matches!(e.raw_os_error(), Some(ENOMEM | ENFILE | EMFILE | ENOBUFS))
+    }
+    #[cfg(windows)]
+    {
+        // WSAEMFILE and WSAENOBUFS.
+        matches!(e.raw_os_error(), Some(10024 | 10055))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
     }
 }
 
@@ -918,10 +973,29 @@ fn render(
 
     let mut out = hyper::Response::builder().status(response.status);
     for (name, value) in &response.headers {
+        // With the bytes in hand, the framing is this server's to state: a
+        // handler's own `content-length` would be a second one, or a wrong
+        // one. A stream keeps the handler's, because only it knows.
+        if length.is_some()
+            && (name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("transfer-encoding"))
+        {
+            continue;
+        }
         out = out.header(name, value);
     }
 
     let body = match (head_only, response.body) {
+        // HEAD on a route that upgrades. GET falls back for HEAD, so the
+        // page answered 101 -- but a HEAD switches nothing, and a 101 with
+        // no switch leaves the client holding a dead connection.
+        (true, Body::Stream(stream)) if stream.is_upgrade() => {
+            return hyper::Response::builder()
+                .status(405)
+                .header("allow", "GET")
+                .body(OutBody::once(Bytes::from_static(b"Method Not Allowed")))
+                .expect("a response built from literals always builds");
+        }
         // A HEAD still advertises the length the body would have had: one
         // advertising zero is worse than one advertising nothing. A stream
         // has no length to advertise, so it says nothing and the stream is
@@ -1056,6 +1130,34 @@ pub(crate) fn latin1_bytes(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_head_on_an_upgrade_route_is_a_405_and_not_a_101() {
+        let gate = StreamGate::new();
+        let out = render(Response::upgrade("echo", |_| async {}), true, &gate, None);
+        assert_eq!(out.status(), 405);
+        assert_eq!(gate.open_streams(), 0, "no socket, so no ticket");
+    }
+
+    #[test]
+    fn a_handler_content_length_is_not_a_second_one() {
+        let response = Response::text(200, "0123456789").with_header("content-length", "3");
+        let out = render(response, true, &StreamGate::new(), None);
+        let lengths: Vec<_> = out.headers().get_all("content-length").iter().collect();
+        assert_eq!(lengths, ["10"]);
+        let response = Response::text(200, "0123456789").with_header("Content-Length", "10");
+        let out = render(response, false, &StreamGate::new(), None);
+        assert_eq!(out.headers().get_all("content-length").iter().count(), 0);
+    }
+
+    #[test]
+    fn running_out_of_descriptors_is_exhaustion_and_not_a_broken_listener() {
+        use std::io::{Error, ErrorKind};
+        assert!(exhausted(&Error::from_raw_os_error(24)), "EMFILE");
+        assert!(exhausted(&Error::from_raw_os_error(23)), "ENFILE");
+        assert!(exhausted(&Error::from(ErrorKind::OutOfMemory)));
+        assert!(!exhausted(&Error::new(ErrorKind::AddrNotAvailable, "")));
+    }
 
     #[test]
     fn a_header_byte_past_ascii_survives_the_round_trip() {

@@ -205,7 +205,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Ordered<T> {
 pub enum OrderError {
     #[error(
         "`{first}` must run after `{second}`, and `{second}` must run after `{first}` \
-         (through {}); one of those two declarations has to go",
+         (through {})\n\
+         help: remove one `after` or `before` in that loop, or make it `_if_present`",
         .path.join(" -> ")
     )]
     Cycle {
@@ -218,7 +219,9 @@ pub enum OrderError {
     },
 
     #[error(
-        "`{hook}` declares `{relation} {depends_on}`, which nothing answers to{}; registered: {}",
+        "`{hook}` declares `{relation} {depends_on}`, which nothing answers to{}; registered: {}\n\
+         help: name a registered instance or `instance.hook`, or use `{relation}_if_present` \
+         for a plugin that may be absent",
         crate::plugin_order::order_hint(.suggestion),
         if .known.is_empty() { "nothing".to_string() } else { .known.join(", ") }
     )]
@@ -253,10 +256,9 @@ pub fn order_hint(suggestion: &Option<String>) -> String {
 /// [`OrderError::Unknown`] when a required `after`/`before` names nothing, and
 /// [`OrderError::Cycle`] when the declarations contradict each other.
 pub fn sort<T>(items: Vec<Ordered<T>>) -> Result<Vec<T>, OrderError> {
+    // No shortcut for a chain of one: its required targets resolve like any
+    // other's, so a typo fails the same way at every chain size.
     let n = items.len();
-    if n < 2 {
-        return Ok(items.into_iter().map(|o| o.value).collect());
-    }
 
     // Every name a declaration may legally use, and what it resolves to.
     let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
@@ -352,9 +354,8 @@ pub(crate) struct OnOffHook<'s> {
 /// Finds the first required dependency in `items` that resolves to nothing in
 /// the chain and to a hook in `off`.
 ///
-/// [`sort`] would report such a dependency as unknown, or, with fewer than
-/// two hooks, not at all. This check runs first, so the message can say why
-/// the hook is absent. `off` holds the skipped hooks of this chain only.
+/// [`sort`] would report such a dependency as unknown. This check runs
+/// first, so the message can say why the hook is absent. `off` holds the skipped hooks of this chain only.
 pub(crate) fn dependency_on_off_hook<'s, T>(
     items: &[Ordered<T>],
     off: &[(&'s str, &'s str)],
@@ -393,25 +394,40 @@ pub(crate) fn dependency_on_off_hook<'s, T>(
     None
 }
 
-/// Walks the remaining graph until it revisits a node, which is the cycle.
+/// Walks the remaining graph backwards until it revisits a node, which is
+/// the cycle.
+///
+/// Backwards, because `stuck` also holds the hooks downstream of a cycle,
+/// and walking forward from one of those can reach a hook with no stuck
+/// successor and stop short of the loop. Every stuck hook has a stuck
+/// predecessor -- that is why it is stuck -- so the walk back always ends
+/// on the loop.
 fn cycle_error<T>(items: &[Ordered<T>], edges: &[Vec<usize>], stuck: &[usize]) -> OrderError {
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+    for (from, tos) in edges.iter().enumerate() {
+        for &to in tos {
+            preds[to].push(from);
+        }
+    }
     let start = stuck[0];
     let mut path = vec![start];
     let mut seen = vec![false; items.len()];
     seen[start] = true;
     let mut cur = start;
-    while let Some(&next) = edges[cur].iter().find(|&&j| stuck.contains(&j)) {
-        if seen[next] {
+    while let Some(&prev) = preds[cur].iter().find(|&&j| stuck.contains(&j)) {
+        if seen[prev] {
             // Trim everything before the first visit, so the path is the loop.
-            let at = path.iter().position(|&p| p == next).unwrap_or(0);
+            let at = path.iter().position(|&p| p == prev).unwrap_or(0);
             path = path[at..].to_vec();
-            path.push(next);
+            path.push(prev);
             break;
         }
-        seen[next] = true;
-        path.push(next);
-        cur = next;
+        seen[prev] = true;
+        path.push(prev);
+        cur = prev;
     }
+    // Walked against the edges; read it with them.
+    path.reverse();
 
     let names: Vec<String> = path.iter().map(|&i| items[i].id.to_string()).collect();
     let first = names.first().cloned().unwrap_or_default();
@@ -573,9 +589,35 @@ mod tests {
     }
 
     #[test]
-    fn one_item_needs_no_graph() {
-        let got = sort(vec![item("a", "h", Order::new().after("nobody"))]).unwrap();
+    fn one_item_still_resolves_its_required_targets() {
+        let got = sort(vec![item("a", "h", Order::new())]).unwrap();
         assert_eq!(got, vec!["a.h"]);
+        let err = sort(vec![item("a", "h", Order::new().after("nobody"))]).unwrap_err();
+        assert!(matches!(err, OrderError::Unknown { .. }), "{err}");
+        let got = sort(vec![item(
+            "a",
+            "h",
+            Order::new().after_if_present("nobody"),
+        )])
+        .unwrap();
+        assert_eq!(got, vec!["a.h"]);
+    }
+
+    #[test]
+    fn a_cycle_names_only_the_hooks_in_it() {
+        // `c.h` is stuck because it waits on the loop, not because it is in it.
+        let err = sort(vec![
+            item("c", "h", Order::new().after("a")),
+            item("a", "h", Order::new().after("b")),
+            item("b", "h", Order::new().after("a")),
+        ])
+        .unwrap_err();
+        let OrderError::Cycle { path, .. } = &err else {
+            panic!("a cycle, not {err}");
+        };
+        assert!(!path.iter().any(|hook| hook == "c.h"), "{err}");
+        assert_eq!(path.first(), path.last(), "{err}");
+        assert_eq!(path.len(), 3, "{err}");
     }
 
     #[test]

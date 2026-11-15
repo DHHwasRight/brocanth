@@ -100,7 +100,7 @@ impl Module for OauthClient {
             "a tab at /admin/connections: every connection without its tokens, and a Revoke button",
             true,
         )
-        .option(Opt::text(
+        .option(Opt::mount(
             "mount_at",
             "/connections",
             "Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",

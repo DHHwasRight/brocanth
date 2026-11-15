@@ -755,3 +755,57 @@ executable, so neither applies to the generated layout.
 
 If a dependency ever ships a `#[cmd]` that a project does not want, the
 fallback is ADR 1's: a generated list in `src/commands/mod.rs`.
+
+### ADR 7 — The router decodes a route parameter once, after the match.
+
+**Status:** accepted (2026-11-15). **Touches:** §5, `brocanth::routing`.
+
+`RouteMatch::params` gives each captured value percent-decoded, once.
+The match runs on the raw path, so `%2F` stays inside its segment and
+selects the same route. A value that does not decode (a bad escape, or
+bytes that are not UTF-8) reaches the handler as it arrived.
+
+**Reason:** the URL helpers (`encode_segment`, `encode_catch_all`) encode
+every byte that is not unreserved, and a handler read the encoded text:
+`a/b` came back as `a%2Fb`. Decoding before the match would let `%2F`
+split a segment. Decoding in each handler would be one more rule a page
+can forget. `tests/param_round_trip.rs` holds the round trip. A plugin that
+parses the raw path itself (the admin reads its keys from the path) is
+not affected.
+
+### ADR 8 — A generated application runs its own pipeline; the bridge is for a hand-written `main`.
+
+**Status:** accepted (2026-11-15). **Touches:** §6, `brocanth-server`,
+the generated `src/app.rs`.
+
+A generated `handle` runs the request hooks, the route table, the async
+chain and the page inline on the worker. `brocanth_server::bridge::Bridge`
+is the pipeline for a hand-written `main` over a core `Router`. Both take
+the pieces that must not differ from the bridge module: `to_core`,
+`from_core` and the panic net `catch_unwind`. A panic in a hook, the
+chain or the page is a 500 that the response hooks still see.
+
+**Reason:** the generated pipeline needs the project's own `Ctx` and
+`Handler`, which the bridge cannot name, so it cannot be the bridge. It
+had no panic net, and a panic closed the socket with no status. The CLI's
+golden builds test the generated pipeline where it ships, with a page
+that panics.
+
+### ADR 9 — `after_dispatch` reaches every request hook; a plugin can make a hook required.
+
+**Status:** accepted (2026-11-15). **Touches:** §4, `brocanth::plugin_hooks`,
+`brocanth::plugin_app`.
+
+When a request hook stops the chain, the hooks after it skip
+`before_dispatch` and still get `after_dispatch`. A hook that reads, in
+`after_dispatch`, state its own `before_dispatch` wrote handles its
+absence. **Reason:** a request log needs the 401 or the 429 that an
+earlier hook answered, wherever it sits in the chain, and no hook in the
+workspace reads its own `before_dispatch` state. The onion rule (only the
+hooks that ran get the second half) was tried and dropped for that reason.
+
+`HookSource::REQUIRED` names hooks that `hooks_off` may not turn off; a
+build that tries gets `BuildError::HooksOffRequired`. **Reason:** a CSRF
+check or a session that authorization reads must not go away through a
+one-line list in the module file. The application can still leave the
+whole plugin out, which it does in plain sight.

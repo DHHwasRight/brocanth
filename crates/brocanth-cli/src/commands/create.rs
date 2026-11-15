@@ -854,7 +854,19 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 /// than as a project that compiles and is missing a piece.
 fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
     let known = all();
-    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known);
+    let mounts: Vec<(&str, &str)> = a
+        .picks
+        .iter()
+        .flat_map(|&key| {
+            about(key)
+                .options
+                .into_iter()
+                .filter(|option| option.mount)
+                .map(move |option| (key, option.key))
+        })
+        .collect();
+    let project =
+        brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known).with_mounts(&mounts);
     let order = brocanth_scaffold::order(&a.picks, |key| about(key).after).map_err(|stuck| {
         vec![Diagnostic::error(
             "cycle",
@@ -870,6 +882,7 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
         crate::modules::find(key)
             .unwrap_or_else(|| unreachable!("`{key}` is not a module this CLI has"))
             .contribute(&project, &mut built);
+        built.check_slots(key, &about(key).categories);
     }
     framework_settings(&mut built);
 
@@ -894,9 +907,9 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
     let mut wrong: Vec<Diagnostic> = built
         .problems()
         .iter()
-        .map(|problem| {
-            Diagnostic::error("module", problem.clone())
-                .help("this is a bug in a module; leave that module out and report it to brocanth")
+        .map(|problem| match problem.split_once("\nhelp: ") {
+            Some((what, help)) => Diagnostic::error("module", what).help(help),
+            None => Diagnostic::error("module", problem.clone()),
         })
         .collect();
     for owner in unpaired {
@@ -1108,13 +1121,25 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
     // with a path above is caught here rather than by whichever happened to
     // be written second.
     for (path, contents) in built.files() {
+        // Written below, after this loop, so the check against `files`
+        // cannot see it yet; without this the scaffold's brief would
+        // replace the module's file with no word.
+        if path == "AGENTS.md" {
+            return Err(vec![Diagnostic::error(
+                "module",
+                "a module writes AGENTS.md, which the scaffold writes from `Slot::AgentsSections`",
+            )
+            .help(
+                "write the module's section into `Slot::AgentsSections` instead of the file",
+            )]);
+        }
         if let Some((taken, _)) = files.iter().find(|(p, _)| p == path) {
             return Err(vec![Diagnostic::error(
                 "module",
                 format!("a module writes {taken}, which the scaffold already writes"),
             )
             .help(
-                "this is a bug in a module; leave that module out and report it to brocanth",
+                "give the module's file a path under the module's own directory",
             )]);
         }
         files.push((path.to_string(), contents.to_string()));
@@ -2114,6 +2139,12 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// `begin_async` and not `begin`: it runs a hook that waits as well as\n\
          /// one that does not. With no hook that waits, it is ready on its first\n\
          /// poll.\n\
+         ///\n\
+         /// A panic in a request hook, the chain or the page is a 500, and the\n\
+         /// response hooks still see it: a logger that never saw the 500 would\n\
+         /// not be a logger. Without the net the panic unwinds into the\n\
+         /// server's connection task and the client gets a closed socket with\n\
+         /// no status. The net catches nothing under `panic = \"abort\"`.\n\
          pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {\n\
         \x20   let Ok(mut request) = brocanth_server::bridge::to_core(request) else {\n\
         \x20       // The path and the query do not make a URI. The table was not\n\
@@ -2121,9 +2152,20 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20       return brocanth_server::Response::text(400, \"Bad Request\");\n\
         \x20   };\n\
         \x20   let mut state = RequestState::new();\n\
-        \x20   let outcome = match app.core.begin_async(&mut request, &mut state).await {\n\
-        \x20       Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),\n\
-        \x20       Begin::Answered(outcome) => outcome,\n\
+        \x20   let caught = brocanth_server::bridge::catch_unwind(std::panic::AssertUnwindSafe(async {\n\
+        \x20       match app.core.begin_async(&mut request, &mut state).await {\n\
+        \x20           Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),\n\
+        \x20           Begin::Answered(outcome) => outcome,\n\
+        \x20       }\n\
+        \x20   }))\n\
+        \x20   .await;\n\
+        \x20   let outcome = match caught {\n\
+        \x20       Ok(outcome) => outcome,\n\
+        \x20       Err(payload) => {\n\
+        \x20           let message = brocanth_server::bridge::panic_message(&*payload);\n\
+        \x20           plugins::say!(error, \"a request panicked: {message}\"; %message);\n\
+        \x20           Ok(sent(Response::new(500, \"Internal Server Error\")))\n\
+        \x20       }\n\
         \x20   };\n\
         \x20   let response = app.core.finish(&mut request, &mut state, outcome);\n\
         \x20   brocanth_server::bridge::from_core(response)\n\
@@ -6001,9 +6043,9 @@ mod tests {
             let lint = &["clippy", "--all-targets", "--", "-D", "warnings"][..];
             let has_db = picks.contains(&"db");
             let streams = if has_db {
-                &["test", "--", "pages::ticks", "pages::pinged"][..]
+                &["test", "--", "pages::ticks", "pages::boom", "pages::pinged"][..]
             } else {
-                &["test", "--", "pages::ticks"][..]
+                &["test", "--", "pages::ticks", "pages::boom"][..]
             };
             // A project with `db` and no config file reads `[db]` from the
             // environment: the same closed port and short timeout.
@@ -6029,6 +6071,8 @@ mod tests {
                     };
                     let ticks = localized(STREAM_PAGE, "/ticks");
                     std::fs::write(root.join("src/pages/ticks.rs"), ticks).unwrap();
+                    let boom = localized(PANIC_PAGE, "/boom");
+                    std::fs::write(root.join("src/pages/boom.rs"), boom).unwrap();
                     if has_db {
                         let pinged = localized(DB_PAGE, "/pinged");
                         std::fs::write(root.join("src/pages/pinged.rs"), pinged).unwrap();
@@ -6104,6 +6148,33 @@ pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 }
 "#;
 
+    /// A page that panics, and a test that the application answers 500 for
+    /// it: the panic does not reach the server's connection task.
+    const PANIC_PAGE: &str = r#"//! `/boom`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    if ctx.path.starts_with('/') {
+        panic!("the page broke");
+    }
+    Ok("never")
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn a_page_that_panics_is_a_500() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/boom")).await;
+        assert_eq!(response.status, 500);
+    }
+}
+"#;
+
     /// A page that answers with server-sent events from a channel, and a test
     /// that sends a request through the whole application -- the hooks, the
     /// table, `sent` -- and reads the stream that comes out.
@@ -6147,7 +6218,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            "event:tick\ndata:1\n\nevent:tick\ndata:2\n\nevent:tick\ndata:3\n\n"
+            "event: tick\ndata: 1\n\nevent: tick\ndata: 2\n\nevent: tick\ndata: 3\n\n"
         );
     }
 }

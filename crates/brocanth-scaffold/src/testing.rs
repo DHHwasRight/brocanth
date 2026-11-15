@@ -62,6 +62,82 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
+/// The manifest rules every module must keep, checked on `module`: what
+/// `brocanth create` would refuse, and what it cannot see.
+///
+/// It runs the module twice, once in a project of every key in `known`
+/// (pass the keys the CLI has, and the module's own) and once with only the
+/// module, what it needs and its parent, so each `has` branch is reached.
+/// Then it checks that the manifest names a category, that each slot written
+/// is open to one ([`crate::Scaffold::check_slots`]), that each `has` asked
+/// is declared with `adapts_to`, `needs` or `parent`, and that each
+/// `adapts_to` is asked. Each returned line is one broken rule; empty means
+/// none.
+///
+/// ```ignore
+/// let known: Vec<&str> = brocanth_cli::testing::modules()
+///     .iter()
+///     .map(|m| m.manifest())
+///     .filter(|m| m.blocked.is_none())
+///     .map(|m| m.key)
+///     .collect();
+/// let wrong = brocanth_scaffold::testing::check_module(&MyModule, &known);
+/// assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+/// ```
+pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
+    let m = module.manifest();
+    let mut wrong = Vec::new();
+    if m.categories.is_empty() {
+        wrong.push(format!(
+            "`{}` has no category: add `.category(Category::..)` to its manifest",
+            m.key
+        ));
+    }
+    if m.blocked.is_some() {
+        return wrong;
+    }
+    let mut everything: Vec<&str> = known.to_vec();
+    if !everything.contains(&m.key) {
+        everything.push(m.key);
+    }
+    let mut alone = vec![m.key];
+    alone.extend(m.needs.iter().map(|(need, _)| *need));
+    alone.extend(m.parent);
+
+    let mut asked: Vec<String> = Vec::new();
+    for on in [&everything, &alone] {
+        let project = crate::Project::new("my-blog", "My Blog", on, &everything);
+        let mut s = crate::Scaffold::new();
+        s.now_writing(m.key);
+        module.contribute(&project, &mut s);
+        s.check_slots(m.key, &m.categories);
+        wrong.extend(s.problems().iter().cloned());
+        asked.extend(project.asked_keys());
+    }
+    asked.sort();
+    asked.dedup();
+    let may = m.may_ask();
+    for key in &asked {
+        if key != m.key && !may.contains(&key.as_str()) {
+            wrong.push(format!(
+                "`{}` asks `project.has(\"{key}\")` and does not declare it: \
+                 add `.adapts_to(\"{key}\", \"<what changes>\")` to its manifest",
+                m.key
+            ));
+        }
+    }
+    for (key, _) in &m.adapts_to {
+        if !asked.iter().any(|k| k == key) {
+            wrong.push(format!(
+                "`{}` declares `adapts_to(\"{key}\")` and never asks about it",
+                m.key
+            ));
+        }
+    }
+    wrong.dedup();
+    wrong
+}
+
 /// A generated project: `(path, contents)` per file, in the order the
 /// generator wrote them.
 pub type Files = [(String, String)];

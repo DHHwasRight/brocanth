@@ -911,3 +911,33 @@ fn an_application_with_no_hooks_at_all_still_runs() {
     assert_eq!(response.body().buffered(), Some(&b"body:"[..]));
     assert!(app.pipeline().is_empty());
 }
+
+#[test]
+fn a_hook_after_the_one_that_stopped_the_chain_still_gets_after_dispatch() {
+    let rec = Rec::default();
+    let mut first = TraceConfig::new(&rec, "first");
+    first.fail_before = true;
+    let app = AppBuilder::new()
+        .plugin_hooking(Trace::new(first))
+        .plugin_hooking_as("second", Trace::new(TraceConfig::new(&rec, "second")))
+        .build()
+        .unwrap();
+
+    let _ = app.run(&mut request(), &mut RequestState::new(), ok_handler);
+
+    let seen = rec.take();
+    // The hook after the stopper never ran `before_dispatch`...
+    assert!(
+        !seen.iter().any(|s| s.starts_with("second:before")),
+        "{seen:?}"
+    );
+    // ...and still sees the response, as a request log must.
+    assert!(
+        seen.iter().any(|s| s.starts_with("second:after")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|s| s.starts_with("first:after")),
+        "{seen:?}"
+    );
+}

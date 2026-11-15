@@ -385,7 +385,14 @@ impl std::fmt::Debug for Flow {
 ///
 /// `before_dispatch` runs in declared order and may short-circuit;
 /// `after_dispatch` runs in reverse declared order, sees the finished
-/// response, and cannot change it. A logger implements both; a metrics plugin
+/// response, and cannot change it.
+///
+/// `after_dispatch` runs for every hook in the chain, for every response:
+/// also for the hooks after one that stopped the chain, whose
+/// `before_dispatch` never ran. A request log needs that: it sees the 401 or
+/// the 429 that an earlier hook answered, wherever it sits in the chain. So
+/// a hook that reads, in `after_dispatch`, a value its own `before_dispatch`
+/// put on the [`RequestState`] must handle its absence. A logger implements both; a metrics plugin
 /// implements both; a request-id plugin implements only the first.
 pub trait RequestHook: Send + Sync + 'static {
     /// Before the handler. Returning [`Flow::Respond`] stops the chain and the
@@ -889,6 +896,16 @@ pub trait HookSource: Plugin {
     /// name that this install did not register stops the build, because
     /// it is a typo as far as the core can tell.
     const HOOKS: &'static [&'static str] = &[];
+
+    /// The hooks [`AppBuilder::hooks_off`](crate::plugin_app::AppBuilder::hooks_off)
+    /// may not turn off. Empty by default.
+    ///
+    /// List a hook the plugin is not safe without: a CSRF check, a session
+    /// that authorization reads. Turning one off is then a
+    /// [`BuildError::HooksOffRequired`](crate::plugin_app::BuildError::HooksOffRequired),
+    /// not a quiet hole. The application can still leave the whole plugin
+    /// out; that is a decision it makes in plain sight.
+    const REQUIRED: &'static [&'static str] = &[];
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError>;
 }

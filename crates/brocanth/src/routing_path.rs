@@ -273,6 +273,31 @@ pub enum TemplateError {
         /// The reserved character that was found.
         character: char,
     },
+
+    /// A scope pattern has a parameter inside a segment, such as
+    /// `{name}.txt`. A scope matches whole segments only.
+    #[error(
+        "the scope `{pattern}` has the segment `{segment}`, and a scope parameter must be a whole segment\n\
+         help: write the segment as `{{name}}` or `{{*name}}`, or as a literal with no brace"
+    )]
+    ScopePartialSegment {
+        /// The rejected pattern.
+        pattern: String,
+        /// The segment with the brace in it.
+        segment: String,
+    },
+
+    /// A scope pattern has a catch-all that is not its last segment.
+    #[error(
+        "the scope `{pattern}` has the catch-all `{{*{name}}}` before its last segment\n\
+         help: move `{{*{name}}}` to the end; a catch-all takes every segment after it"
+    )]
+    ScopeCatchAllNotLast {
+        /// The rejected pattern.
+        pattern: String,
+        /// The catch-all's name.
+        name: String,
+    },
 }
 
 /// A file path that does not name a route.

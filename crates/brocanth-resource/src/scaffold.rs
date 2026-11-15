@@ -69,7 +69,7 @@ impl Module for Records {
             "middleware-csrf",
             "AGENTS.md says how a fetch caller and a non-browser client get past the CSRF check",
         )
-        .option(Opt::text(
+        .option(Opt::mount(
             "mount_at",
             "/api",
             "Where the records API answers. Every resource is under it.",

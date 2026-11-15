@@ -7,10 +7,13 @@
 //! panic or a default.
 //!
 //! Values borrow from the request path and from the router, so there is no
-//! copy and no ceiling on how many parameters a route may have.
+//! copy and no ceiling on how many parameters a route may have. A value with
+//! a `%XX` escape in it is the one exception: the router decodes it once, so
+//! a handler reads `a/b` where the path said `a%2Fb`.
 
 use core::fmt;
 use core::str::FromStr;
+use std::borrow::Cow;
 
 /// The parameters captured by a route match.
 ///
@@ -18,32 +21,55 @@ use core::str::FromStr;
 /// long as the match it came from.
 #[derive(Clone, Copy)]
 pub struct Params<'a> {
-    entries: &'a [(&'a str, &'a str)],
+    entries: Entries<'a>,
+}
+
+/// The pairs as given, or as the router decoded them.
+#[derive(Clone, Copy)]
+enum Entries<'a> {
+    Raw(&'a [(&'a str, &'a str)]),
+    Decoded(&'a [(&'a str, Cow<'a, str>)]),
 }
 
 impl<'a> Params<'a> {
-    /// Wrap a slice of name/value pairs.
+    /// Wrap a slice of name/value pairs. The values are used as given.
     #[must_use]
     pub const fn new(entries: &'a [(&'a str, &'a str)]) -> Self {
-        Self { entries }
+        Self {
+            entries: Entries::Raw(entries),
+        }
+    }
+
+    /// Wrap pairs whose values were already percent-decoded, as
+    /// [`RouteMatch::params`](crate::routing::RouteMatch::params) makes them.
+    #[must_use]
+    pub const fn decoded(entries: &'a [(&'a str, Cow<'a, str>)]) -> Self {
+        Self {
+            entries: Entries::Decoded(entries),
+        }
     }
 
     /// An empty set, for a route with no parameters.
     #[must_use]
     pub const fn empty() -> Self {
-        Self { entries: &[] }
+        Self {
+            entries: Entries::Raw(&[]),
+        }
     }
 
     /// How many parameters the route captured.
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.entries.len()
+        match self.entries {
+            Entries::Raw(entries) => entries.len(),
+            Entries::Decoded(entries) => entries.len(),
+        }
     }
 
     /// Whether the route captured nothing.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// The value of `name`, or [`None`] if the route has no such parameter.
@@ -52,10 +78,17 @@ impl<'a> Params<'a> {
     /// empty string in its place.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&'a str> {
-        self.entries
-            .iter()
+        self.pairs()
             .find(|(key, _)| *key == name)
-            .map(|(_, value)| *value)
+            .map(|(_, value)| value)
+    }
+
+    /// Every pair, borrowed for `'a`.
+    fn pairs(self) -> Pairs<'a> {
+        match self.entries {
+            Entries::Raw(entries) => Pairs::Raw(entries.iter()),
+            Entries::Decoded(entries) => Pairs::Decoded(entries.iter()),
+        }
     }
 
     /// Whether `name` was captured.
@@ -96,23 +129,78 @@ impl<'a> Params<'a> {
 
     /// Every captured pair, in the order the template declares them.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
-        self.entries.iter().copied()
+        self.pairs()
+    }
+}
+
+/// The iterator over a [`Params`]: each pair, in template order.
+pub enum Pairs<'a> {
+    #[doc(hidden)]
+    Raw(core::slice::Iter<'a, (&'a str, &'a str)>),
+    #[doc(hidden)]
+    Decoded(core::slice::Iter<'a, (&'a str, Cow<'a, str>)>),
+}
+
+impl<'a> Iterator for Pairs<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Raw(iter) => iter.next().copied(),
+            Self::Decoded(iter) => iter.next().map(|(key, value)| (*key, value.as_ref())),
+        }
     }
 }
 
 impl<'a> IntoIterator for Params<'a> {
     type Item = (&'a str, &'a str);
-    type IntoIter = core::iter::Copied<core::slice::Iter<'a, (&'a str, &'a str)>>;
+    type IntoIter = Pairs<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.entries.iter().copied()
+        self.pairs()
     }
 }
 
 impl fmt::Debug for Params<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.entries.iter().copied()).finish()
+        f.debug_map().entries(self.pairs()).finish()
     }
+}
+
+/// `value` with each `%XX` escape decoded, once.
+///
+/// Borrowed when there is no `%` to decode. A value whose decoded bytes are
+/// not UTF-8, or whose escape is malformed, is kept as it arrived: a handler
+/// that cannot have the text it was sent should see what was sent, not a
+/// replacement character.
+#[must_use]
+pub fn percent_decode(value: &str) -> Cow<'_, str> {
+    if !value.contains('%') {
+        return Cow::Borrowed(value);
+    }
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| (b as char).to_digit(16);
+            match (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            ) {
+                (Some(hi), Some(lo)) => {
+                    // Two hex digits make at most 0xFF.
+                    out.push(u8::try_from(hi * 16 + lo).unwrap_or(u8::MAX));
+                    i += 3;
+                    continue;
+                }
+                _ => return Cow::Borrowed(value),
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).map_or(Cow::Borrowed(value), Cow::Owned)
 }
 
 /// Why a parameter could not be delivered as the handler asked for it.

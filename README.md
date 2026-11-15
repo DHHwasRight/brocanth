@@ -155,9 +155,9 @@ puts the crate in a new project.
 | [`brocanth`](crates/brocanth/README.md) | The core: a router that hands a request and a context to a handler, plugin seams, two-phase shutdown | always |
 | [`brocanth-server`](crates/brocanth-server/README.md) | The HTTP entrypoint, on Tokio | always |
 | [`brocanth-pages`](crates/brocanth-pages/README.md) | `src/pages` read at compile time: the route table and the layouts | always |
-| [`brocanth-routes`](crates/brocanth-routes/README.md) | `routes!`: the whole route table in one file, an alternative to `src/pages` | |
+| [`brocanth-routes`](crates/brocanth-routes/README.md) | `routes!`: the whole route table in one file, an alternative to `src/pages` | library only: it replaces the page router a project already has |
 | [`brocanth-assets`](crates/brocanth-assets/README.md) | Static files embedded at compile time: fingerprinted assets and a verbatim public directory | with `rsx-tailwind` or `rsx-htmx` |
-| [`brocanth-bundle`](crates/brocanth-bundle/README.md) | JS and CSS bundles from `build.rs` (rolldown, lightningcss) | |
+| [`brocanth-bundle`](crates/brocanth-bundle/README.md) | JS and CSS bundles from `build.rs` (rolldown, lightningcss) | library only: `build.rs` calls it over a tree the project lays out |
 | [`brocanth-config`](crates/brocanth-config/README.md) | Layered config (TOML, JSON, YAML, environment, flags) with provenance and secret redaction | `config` |
 | [`brocanth-middleware`](crates/brocanth-middleware/README.md) | Proxy headers, method override, canonical host, content types, CORS, CSRF, security headers, rate limiting, conditional GET, compression | `middleware` and its children |
 | [`brocanth-gtag`](crates/brocanth-gtag/README.md) | Google Analytics 4 behind a consent banner: nothing sent before consent, privacy signals honoured, URLs scrubbed | `gtag` |

@@ -6,6 +6,16 @@
 //! application's `main` is a bind and a call rather than a hand-written
 //! dispatch.
 //!
+//! **A generated application does not use [`Bridge`] or [`serve`].** Its
+//! `src/app.rs` runs its own pipeline, `handle`: the request hooks, the
+//! route table, an async middleware chain and the page, all inline on the
+//! worker. From this module it takes the pieces that must not differ:
+//! [`to_core`], [`from_core`] and the panic net [`catch_unwind`]. [`Bridge`]
+//! is the pipeline for a hand-written `main` over a core [`Router`], and
+//! `tests/bridges.rs` tests that one. The generated pipeline is tested where
+//! it ships: the CLI's golden shapes build each generated project and run
+//! its own tests, a page that panics included.
+//!
 //! It is a separate feature because the standalone shape is worth keeping. An
 //! application that wants the socket and not the core gets exactly the crate
 //! it had before: with the feature off this file is not compiled and none of
@@ -254,6 +264,11 @@ pub enum BridgeError {
     /// Serving finished, and a plugin then failed to stop. The requests were
     /// all answered; something did not let go of a resource.
     Shutdown(ShutdownReport),
+    /// The drain ran out of time and a request still held the application
+    /// after it: a handler on a blocking thread, or an HTTP/2 stream that
+    /// had not ended. No plugin was stopped, because stopping one needs the
+    /// application to itself.
+    StillHeld,
 }
 
 impl std::fmt::Display for BridgeError {
@@ -268,6 +283,11 @@ impl std::fmt::Display for BridgeError {
                 }
                 Ok(())
             }
+            Self::StillHeld => write!(
+                f,
+                "a request still held the application after the drain, so no plugin stopped\n\
+                 help: raise `Server::drain_grace`, or end the handler that does not return"
+            ),
         }
     }
 }
@@ -625,15 +645,30 @@ fn block_on<F: Future>(future: F) -> F::Output {
 /// `catch_unwind` makes it do, so the assertion is spelled where it is made
 /// rather than hidden in here. The module header says what it asserts and what
 /// it does not cover.
-fn catch_unwind<F: Future>(future: F) -> CatchUnwind<F> {
+///
+/// Public because a generated application's `handle` runs its own pipeline
+/// inline, on the worker, and needs the same net: without it a panicking page
+/// unwinds into hyper's connection task and the client gets a closed socket
+/// with no status.
+pub fn catch_unwind<F: Future>(future: F) -> CatchUnwind<F> {
     CatchUnwind {
         future,
         finished: false,
     }
 }
 
+/// The text of a panic payload: the `&str` or `String` that `panic!` was
+/// given, or a fixed phrase for any other payload.
+pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic with a payload that is not text")
+}
+
 /// See [`catch_unwind`].
-struct CatchUnwind<F> {
+pub struct CatchUnwind<F> {
     future: F,
     finished: bool,
 }
@@ -871,12 +906,13 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             })
             .await;
 
-        // `run` returns after hyper's graceful drain, so every connection task
-        // has finished -- but a finished task can still be a few instructions
-        // from dropping its clone of this `Arc`, and `App::shutdown` needs
-        // `&mut`. Yielding a few times costs nothing and wins that race; if it
-        // somehow does not, the plugins keep running rather than being stopped
-        // through a reference somebody else holds.
+        // After a full drain every connection task has finished, but one
+        // can be a few instructions from dropping its clone of this `Arc`;
+        // yielding a few times wins that race. After a drain that ran out of
+        // time, a connection can still hold its clone. Either way, if the
+        // `Arc` stays shared, the plugins keep running rather than being
+        // stopped through a reference somebody else holds, and the caller
+        // hears so: `StillHeld`, not `Ok`.
         let mut report = None;
         for _ in 0..64 {
             match Arc::try_unwrap(bridge) {
@@ -893,8 +929,9 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
 
         outcome?;
         match report {
+            None => Err(BridgeError::StillHeld),
             Some(report) if !report.is_clean() => Err(BridgeError::Shutdown(report)),
-            _ => Ok(()),
+            Some(_) => Ok(()),
         }
     }
 }

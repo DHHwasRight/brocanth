@@ -776,23 +776,24 @@ for such a rename and prints the line to delete before it writes anything.
 
 ### Interaction with `brocanth remove` and module versions
 
-Another agent builds `brocanth remove` and module versions now. This
-design asks for the following, and builds none of it:
+`brocanth remove` exists (`crates/brocanth-cli/src/commands/remove.rs`).
+`docs/modules.md` §7, "Removing from a project", gives its rules. What it
+does with the files this design adds:
 
-- **`remove <key>` and the module file.** An unedited file (byte equal to
-  what the generator writes for the recorded version) is deleted. An
-  edited file stays, out of `mod.rs`, so it does not compile. `remove`
-  says: `kept src/modules/analytics.rs: your choices return with brocanth add analytics`.
-  `add` writes a file only when it is missing, so a re-add picks the old
-  choices up. This is item 1 of the module-system list in
-  `docs/module-catalog.md`: a rename survives a remove and a re-add.
+- **`remove <key>` and the module file.** An unedited module file is
+  deleted. An edited one stays, out of `src/modules/mod.rs`, so nothing
+  compiles it. `add` writes a module file only when it is missing, so a
+  re-add picks the old choices up: a rename survives a remove and a
+  re-add.
 - **`remove <host>`.** A guest's `integrate.<host>` stays and does
-  nothing. `remove` rewrites `src/plugins/mod.rs`, so `admin_panels` goes.
-- **Versions.** `brocanth.toml` records the version of each module. `add`
-  and an upgrade compare the old and the new `Manifest::hook`,
-  `integration` and `option` lists, and print each new or dropped field.
-  The module file can carry the version that wrote it in its header, for
-  the "unedited" test above.
+  nothing. `remove` generates every other module again, so `admin_panels`
+  and the other host slots lose the guest's lines.
+- **Versions.** Not built. The design still asks for this: `brocanth.toml`
+  records the version of each module, and `add` and an upgrade compare the
+  old and the new `Manifest::hook`, `integration` and `option` lists and
+  print each new or dropped field. Until then, a template change makes an
+  untouched file read as edited, and `add` refuses with the diff
+  (`docs/modules.md` §7).
 
 ## 5. Which file answers which question
 
@@ -1089,6 +1090,22 @@ run time. Without one, the test keeps the sorted literal array.
 **Reason:** as decision 1. The generator cannot sort a value that is
 known only at `cargo build`, so the test sorts it. A project without a
 mounted module keeps the shorter test.
+
+**Decision 7: a module that treats every mounted module alike reads the
+mounts, not a list of keys.** An option that is a mount path is declared
+with `Opt::mount`, not `Opt::text`: `admin`, `auth-oauth` and
+`oauth-client` declare `mount_at` so, and `storage-routes` its `path`.
+The CLI hands each chosen module's mount options to the view, and
+`Project::mounts()` lists them as `(module key, option key)`. `i18n-routing`
+keeps each of them unprefixed with `keep_unprefixed(module_ref(..))`; it
+names no module. **Reason:** the list of four keys in the `i18n` scaffold
+missed every module added after it, and each new mounted module had to
+edit `i18n`. Now a new module declares its option once. `analytics`,
+`gtag`, `robots` and `sitemap` still name `admin`'s `mount_at`, through
+decision 1: they exclude the backoffice in particular, not every mount.
+`brocanth.toml`'s `adapted_to` for `i18n` no longer lists the mounted
+modules. Nothing reads it for correctness: `remove` generates every other
+module again.
 
 The tests: each of `analytics`, `gtag` and `robots` (`sitemap` and
 `robots`) has a test in `tests/scaffold.rs` that checks the generated

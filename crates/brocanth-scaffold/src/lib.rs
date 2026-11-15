@@ -603,6 +603,11 @@ pub struct Opt {
     pub default: String,
     /// One line for the module file, above the field.
     pub help: &'static str,
+    /// The value is a path the module's routes answer under. Set with
+    /// [`Opt::mount()`]; [`Project::mounts`] lists every such option of the
+    /// chosen modules, so a module that treats routes it does not own
+    /// (i18n keeps them unprefixed) reads them all and names none.
+    pub mount: bool,
 }
 
 /// The type of an [`Opt`].
@@ -636,6 +641,15 @@ impl Opt {
         Self::new(key, OptKind::Text, format!("{default:?}"), help)
     }
 
+    /// A string that is a mount path: where the module's routes answer.
+    /// See the [`mount`](Opt#structfield.mount) field.
+    pub fn mount(key: &'static str, default: &str, help: &'static str) -> Self {
+        Self {
+            mount: true,
+            ..Self::text(key, default, help)
+        }
+    }
+
     /// A boolean.
     pub fn bool(key: &'static str, default: bool, help: &'static str) -> Self {
         Self::new(key, OptKind::Bool, default.to_string(), help)
@@ -657,6 +671,7 @@ impl Opt {
             kind,
             default,
             help,
+            mount: false,
         }
     }
 }
@@ -889,6 +904,7 @@ pub struct Project<'a> {
     pub title: &'a str,
     on: &'a [&'a str],
     known: &'a [&'a str],
+    mounts: &'a [(&'a str, &'a str)],
     /// Keys asked about that no module declares. Collected rather than
     /// answered `false`, because a typo that reads as "the user did not want
     /// it" is a bug that produces a working project with a piece missing.
@@ -907,9 +923,33 @@ impl<'a> Project<'a> {
             title,
             on,
             known,
+            mounts: &[],
             unknown: std::cell::RefCell::new(Vec::new()),
             asked: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Give the view the mount options of the modules: `(module key, option
+    /// key)` for each [`Opt::mount()`]. The CLI passes them from the
+    /// manifests; a view without them has no mounts.
+    pub fn with_mounts(mut self, mounts: &'a [(&'a str, &'a str)]) -> Self {
+        self.mounts = mounts;
+        self
+    }
+
+    /// Every mount option of a chosen module, as `(module key, option
+    /// key)`, in the order the CLI gave them: what to pass to
+    /// [`snippet::module_ref`] for the path.
+    ///
+    /// Not a question about one module, so it is not recorded as one: a
+    /// module that reads it treats every chosen module's routes alike,
+    /// and a module that adds a mount option is covered with no change
+    /// to the reader.
+    pub fn mounts(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        self.mounts
+            .iter()
+            .copied()
+            .filter(|(key, _)| self.on.contains(key))
     }
 
     /// Whether another choice is part of this project.
@@ -1484,6 +1524,39 @@ pub fn config_section(section: &str, settings: &[Setting]) -> String {
     out
 }
 
+/// `value` as a TOML basic string, quoted.
+///
+/// Not Rust's `{:?}`: it writes `\u{1b}` and `\0`, which TOML refuses.
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `value` as a TOML float: `nan`, `inf` and `-inf` as TOML spells them,
+/// and always with a fraction or an exponent, so it reads back as a float.
+fn toml_float(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "inf" } else { "-inf" }.to_string()
+    } else {
+        format!("{value:?}")
+    }
+}
+
 fn config_line(key: &str, setting: &Setting) -> String {
     let mut out = format!("# {}\n", setting.full_help());
     if !setting.note.is_empty() {
@@ -1564,8 +1637,22 @@ impl Scaffold {
     /// Two modules claiming one path is a problem rather than a last writer:
     /// which one won would otherwise depend on the order of an array in the
     /// CLI, and the loser's contribution would vanish in silence.
+    ///
+    /// The path is relative to the project root, with `/` between plain
+    /// segments. An absolute path, a `.` or `..` segment, an empty segment or
+    /// a backslash is a problem: it would write outside the project, or name
+    /// one file two ways and slip past the check above.
     pub fn file(&mut self, path: impl Into<String>, contents: impl Into<String>) {
         let path = path.into();
+        if let Some(why) = unsafe_path(&path) {
+            self.problems.push(format!(
+                "`{}` writes {path:?}, which {why}\n\
+                 help: give a path relative to the project root, such as \
+                 `src/plugins/{}/mod.rs`",
+                self.writing, self.writing
+            ));
+            return;
+        }
         let mine = Owned {
             by: self.writing.clone(),
             text: contents.into(),
@@ -1736,10 +1823,69 @@ impl Scaffold {
         self.bins.iter().map(|(_, bin)| bin)
     }
 
+    /// Check that `key` wrote only into slots one of its `categories`
+    /// opens ([`Category::allows`]), and record a problem for each slot it
+    /// had no right to.
+    ///
+    /// The CLI calls it after each module contributes, so a third-party
+    /// module that writes into a closed slot is refused at `brocanth create`
+    /// and not only in a test it may never run.
+    pub fn check_slots(&mut self, key: &str, categories: &[Category]) {
+        let mut wrong = Vec::new();
+        for (slot, lines) in &self.slots {
+            let writes = lines.iter().any(|owned| owned.by == key);
+            if writes && !categories.iter().any(|c| c.allows(*slot)) {
+                wrong.push(*slot);
+            }
+        }
+        for slot in wrong {
+            let open: Vec<&str> = slot.open_to().iter().map(|c| c.name()).collect();
+            self.problems.push(format!(
+                "`{key}` writes {slot}, which is open to {}, and `{key}` is {}\n\
+                 help: add the category to the manifest of `{key}` with \
+                 `.category(Category::..)`, or write into a slot its categories open",
+                open.join(", "),
+                if categories.is_empty() {
+                    "in no category".to_string()
+                } else {
+                    categories
+                        .iter()
+                        .map(|c| c.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+        }
+    }
+
     /// Everything that was wrong, in the order it was found.
     pub fn problems(&self) -> &[String] {
         &self.problems
     }
+}
+
+/// Why `path` is not a plain path relative to the project root, if it is
+/// not.
+fn unsafe_path(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("is empty");
+    }
+    if path.contains('\\') {
+        return Some("holds a backslash, and a path separator is `/`");
+    }
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
+        return Some("is absolute and would land outside the project");
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Some("has a `..` segment and can land outside the project");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == ".")
+    {
+        return Some("has an empty or `.` segment, so it names a file two ways");
+    }
+    None
 }
 
 /// The handle [`Scaffold::at`] returns. Each call appends one contribution.
@@ -1846,6 +1992,62 @@ mod tests {
         assert_eq!(toml_float(f64::NEG_INFINITY), "-inf");
         assert_eq!(toml_float(1.0), "1.0");
         assert_eq!(Setting::text("k", "it's", "h").value, "\"it's\"");
+    }
+
+    #[test]
+    fn a_default_is_written_as_toml_and_not_as_rust() {
+        assert_eq!(toml_string("a\"b\\c\nd"), r#""a\"b\\c\nd""#);
+        assert_eq!(toml_string("\u{1b}[0m\0"), r#""\u001B[0m\u0000""#);
+        assert_eq!(toml_float(f64::NAN), "nan");
+        assert_eq!(toml_float(f64::NEG_INFINITY), "-inf");
+        assert_eq!(toml_float(1.0), "1.0");
+        let list = Setting::list("k", &["\u{7f}"], "h");
+        assert_eq!(list.value, r#"["\u007F"]"#);
+    }
+
+    #[test]
+    fn a_path_outside_the_project_or_named_two_ways_is_a_problem() {
+        for bad in [
+            "/etc/passwd",
+            "../outside.rs",
+            "src/../../x",
+            "./src/main.rs",
+            "src//main.rs",
+            "src\\main.rs",
+            "C:/x",
+            "",
+        ] {
+            let mut s = Scaffold::new();
+            s.now_writing("evil");
+            s.file(bad, "x");
+            assert_eq!(s.files().count(), 0, "{bad:?} was written");
+            let problem = s.problems().first().expect("a problem");
+            assert!(problem.contains("\nhelp: "), "{problem}");
+        }
+        let mut s = Scaffold::new();
+        s.file("src/plugins/ok/mod.rs", "x");
+        assert!(s.problems().is_empty());
+    }
+
+    #[test]
+    fn a_slot_the_categories_do_not_open_is_a_problem() {
+        let mut s = Scaffold::new();
+        s.now_writing("pages-thing");
+        s.at(Slot::PagesRenderers).line("x");
+        s.at(Slot::PluginsMod).line("pub mod x;");
+        s.check_slots("pages-thing", &[Category::Routes]);
+        assert_eq!(s.problems().len(), 1, "{:?}", s.problems());
+        let problem = &s.problems()[0];
+        assert!(
+            problem.contains("PagesRenderers") || problem.contains("renderer"),
+            "{problem}"
+        );
+        assert!(problem.contains("\nhelp: "), "{problem}");
+        let mut s = Scaffold::new();
+        s.now_writing("r");
+        s.at(Slot::PagesRenderers).line("x");
+        s.check_slots("r", &[Category::Renderer]);
+        assert!(s.problems().is_empty());
     }
 
     const SETTINGS_RS: &str = "\
