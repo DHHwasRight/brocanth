@@ -126,7 +126,11 @@ pub fn refuse(&mut self, why: impl Into<String>)
 ```
 
 - `file` writes a whole file the module owns. Two modules writing one path
-  is an error that names both. Put a plugin in `src/plugins/<key>/mod.rs`,
+  is an error that names both. The path is relative to the project root,
+  with plain `/` segments: an absolute path, `.`, `..`, an empty segment
+  or a backslash is refused, because it could land outside the project or
+  name one file two ways past the clash check. `AGENTS.md` is the
+  scaffold's: write a section into `Slot::AgentsSections`. Put a plugin in `src/plugins/<key>/mod.rs`,
   never `src/plugins/<key>.rs`: a directory can be deleted whole, and a
   second file goes beside the first.
 - `at(slot)` returns a `Writer` with three methods:
@@ -1185,8 +1189,12 @@ A module in `ALL` must pass these:
 | `a_requirement_names_a_module_that_exists_and_says_what_breaks` | Each `needs` names a real key, not itself, with a reason. |
 | `a_module_nobody_can_choose_says_why_on_its_own_row` | `blocked` is at most 80 characters, one line, not `on_with_parent`, and has no `absent`. |
 | `every_module_says_what_it_costs` | `gist` is not empty and has no full stop. |
-| `a_module_asks_only_about_what_its_manifest_declares` | Each `project.has(k)` is declared (`adapts_to`, `needs`, parent), and each `adapts_to` is asked. The module runs twice: beside every module, and with only its needs. |
-| `a_module_writes_only_into_the_slots_its_categories_open` | The module has a category, and writes only into slots its categories open. |
+| `every_module_keeps_the_manifest_rules` | `brocanth_scaffold::testing::check_module` on each module: it has a category and writes only into slots its categories open; each `project.has(k)` is declared (`adapts_to`, `needs`, parent), and each `adapts_to` is asked. The module runs twice: beside every module, and with only its needs. |
+
+The slot rule also runs at `brocanth create` (`Scaffold::check_slots`,
+after each module contributes). **Reason:** a module from outside this
+repository is installed with a line and `cargo install`, which runs no
+test, so a rule held only by a test did not hold for it.
 | `a_conflict_names_a_module_that_exists_and_says_why` | Each `conflicts` and `adapts_to` names a real key, with a reason. |
 
 ### The generator tests in `crates/brocanth-cli/src/commands/create.rs`
@@ -1262,6 +1270,7 @@ fn the_module_writes_this_project() {
 | `brocanth_cli::testing::generate_for_build(..)` | The same, with path dependencies on the checkout the CLI was compiled from. |
 | `testing::assert_formatted(files)` | Fails when rustfmt changes a generated `.rs` file. Skips when rustfmt is not on `PATH`. |
 | `testing::snapshot(files)` | The project as one text, in the CLI's golden format. |
+| `testing::check_module(module, known)` | The manifest rules the CLI holds its own modules to, as a list of broken rules. Pass the keys of the CLI's available modules as `known`. |
 | `testing::golden(path, text)` | Compares with the file, or writes it under `BROCANTH_BLESS=1`. |
 | `testing::building()` / `testing::build(files)` | `BROCANTH_BUILD=1` turns the build on. `build` runs `cargo test` in a temporary directory, so the project builds and its own tests run. It deletes the directory when they pass. `BROCANTH_BUILD_TARGET=<dir>` shares one target directory between the builds, so the framework compiles once. |
 
