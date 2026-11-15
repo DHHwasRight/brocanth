@@ -1502,9 +1502,6 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
-            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: CSRF ------------------------------------
         //
@@ -1521,6 +1518,9 @@ macro_rules! register {
         // `token.hidden_field()` is the input a form carries.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::oauth_client::OauthClientPlugin>("oauth_client")
@@ -1542,9 +1542,9 @@ pub(crate) use register;
 /// plugins all provide nothing.
 type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
 type WithDb = After<crate::plugins::db::Database, WithAdmin>;
-type WithAuth = After<crate::plugins::auth::Auth, WithDb>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithAuth>;
-type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithMiddlewareCsrf>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithDb>;
+type WithAuth = After<crate::plugins::auth::Auth, WithMiddlewareCsrf>;
+type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithAuth>;
 pub type Installed = WithOauthClient;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
@@ -1788,6 +1788,42 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "auth.signing_key_env",
         help: "The name of the variable that holds the session signing key.",
         flag: true,
@@ -1829,42 +1865,6 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/auth.rs",
         flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "csrf.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.field",
-        help: "The form field the token comes back in.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.header",
-        help: "The header a fetch caller may send instead of the field. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -2224,8 +2224,8 @@ pub fn read_line() -> Result<bool, String> {
 fn defaults() -> Vec<(&'static str, String)> {
     let admin = crate::plugins::admin::Settings::default();
     let db = crate::plugins::db::Settings::default();
-    let auth = crate::plugins::auth::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
+    let auth = crate::plugins::auth::Settings::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
@@ -2246,6 +2246,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "auth.signing_key_env",
             format!("{:?}", auth.signing_key_env),
@@ -2257,10 +2261,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.absolute_timeout",
             format!("{:?}", auth.absolute_timeout),
         ),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "oauth_client.base_url",
             format!("{:?}", oauth_client.base_url),
@@ -2407,7 +2407,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: aa19e0f1230bf16a
+// brocanth-digest: 7e4f1ced51ca5f24
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3110,7 +3110,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -3118,8 +3119,24 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-app"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
+
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
 
 [auth]
 # The name of the variable that holds the session signing key.
@@ -3142,20 +3159,6 @@ secure = false
 idle_timeout = 28800
 # Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
-
-[csrf]
-# The cookie this hook owns.
-cookie = "csrf_token"
-# The form field the token comes back in.
-field = "_csrf_token"
-# The header a fetch caller may send instead of the field. Empty means none.
-# While it is set, the cookie is not HttpOnly: a script reads it.
-# header = "x-csrf-token"
-# Paths never checked, each with everything under it.
-# For a caller that is not a browser: a webhook, a device.
-exempt = []
-# Send the cookie over HTTPS only.
-secure = true
 
 [oauth_client]
 # The providers to offer, by id: github, google, microsoft, gitlab.
@@ -3765,7 +3768,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -3784,8 +3788,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -3811,12 +3816,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-app".to_string(),
@@ -4656,7 +4661,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
-adapted_to = ["config"]
+adapted_to = ["config", "db"]
 
 [modules.middleware]
 version = "0.1.0"
@@ -4698,4 +4703,4 @@ config = ["oauth_client"]
 crates = ["brocanth-oauth-client"]
 adapted_to = ["config", "middleware-csrf", "admin"]
 
-# brocanth-digest: 90293ffc6c8f6a97
+# brocanth-digest: 4707b4a77cefd4b1
