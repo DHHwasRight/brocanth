@@ -67,6 +67,7 @@ pub type SharedDocument = Arc<Document>;
 static INSTALLED: OnceLock<SharedDocument> = OnceLock::new();
 
 /// The document [`OpenApiPlugin::install`] installed, if one did.
+#[cfg(feature = "admin")]
 #[must_use]
 pub(crate) fn installed() -> Option<SharedDocument> {
     INSTALLED.get().cloned()
