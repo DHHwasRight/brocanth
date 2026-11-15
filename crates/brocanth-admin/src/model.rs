@@ -483,21 +483,39 @@ impl PrimaryKey {
         if columns.is_empty() {
             return None;
         }
-        let values: Vec<&str> = segment.split(',').collect();
-        if values.len() != columns.len() || values.iter().any(|v| v.is_empty()) {
+        let values: Vec<String> = segment
+            .split(',')
+            .map(crate::query::decode_segment)
+            .collect();
+        if values.len() != columns.len() || values.iter().any(String::is_empty) {
             return None;
         }
         Some(PrimaryKey {
             parts: columns
                 .iter()
                 .zip(values)
-                .map(|(c, v)| (c.name.clone(), v.to_string()))
+                .map(|(c, v)| (c.name.clone(), v))
                 .collect(),
         })
     }
 
-    /// The URL form.
+    /// The URL form: each part percent-encoded, joined by `,`.
+    ///
+    /// Encoded, so a text key that holds `,`, `/`, `?` or a space is one
+    /// path segment and [`PrimaryKey::parse`] reads back the same parts.
     pub fn to_segment(&self) -> String {
+        self.parts
+            .iter()
+            .map(|(_, v)| crate::query::percent_encode(v))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The stored values, not encoded, joined by `,`: `7`, `a/b`, or `1,2`
+    /// for a composite key. What a journal and a history record, the way
+    /// the model layer names a row. Not for a URL: see
+    /// [`PrimaryKey::to_segment`].
+    pub fn to_text(&self) -> String {
         self.parts
             .iter()
             .map(|(_, v)| v.as_str())

@@ -61,8 +61,10 @@ pub struct AdminWrite<'a> {
     /// The table, as the database spells it. The same word a
     /// `brocanth_events::RowChange` carries as its collection.
     pub table: &'a str,
-    /// The record's key, in its URL form: `7`, or `1,2` for a
-    /// composite key.
+    /// The record's key as stored, not URL-encoded: `7`, `a/b`, or `1,2`
+    /// for a composite key ([`PrimaryKey::to_text`]).
+    ///
+    /// [`PrimaryKey::to_text`]: crate::model::PrimaryKey::to_text
     pub key: &'a str,
     /// What the record is called on screen.
     pub label: &'a str,
@@ -103,7 +105,10 @@ pub struct RecordRef<'a> {
     pub model: &'a str,
     /// The table.
     pub table: &'a str,
-    /// The record's key, in its URL form.
+    /// The record's key as stored, not URL-encoded
+    /// ([`PrimaryKey::to_text`]). Encode it to put it in a link.
+    ///
+    /// [`PrimaryKey::to_text`]: crate::model::PrimaryKey::to_text
     pub key: &'a str,
 }
 

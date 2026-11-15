@@ -65,3 +65,28 @@ fn a_path_outside_the_mount_is_not_this_admins() {
         Some(Route::List("post"))
     );
 }
+
+#[test]
+fn a_text_key_with_a_comma_a_slash_and_a_space_round_trips_as_one_segment() {
+    use brocanth_admin::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey};
+    let model = ModelDescriptor {
+        key: "tag".into(),
+        module_path: "blog::tag".into(),
+        table: "tag".into(),
+        columns: vec![ColumnDescriptor::new("slug", ColumnKind::Text).primary_key()],
+    };
+    let key = PrimaryKey::single("slug", "a,b/c d+e");
+    let segment = key.to_segment();
+    assert!(
+        !segment.contains(',') && !segment.contains('/') && !segment.contains(' '),
+        "{segment}"
+    );
+    assert_eq!(key.to_text(), "a,b/c d+e");
+    let path = format!("/admin/tag/{segment}");
+    assert_eq!(
+        Route::parse("/admin", "GET", &path, &[]),
+        Some(Route::Detail("tag", segment.as_str()))
+    );
+    let back = PrimaryKey::parse(&model, &segment).expect("one key");
+    assert_eq!(back.get("slug"), Some("a,b/c d+e"));
+}

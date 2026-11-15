@@ -81,6 +81,10 @@ impl Module for Backoffice {
             "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
+        .recommends(
+            "middleware-csrf",
+            "the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row",
+        )
         .option(Opt::mount(
             "mount_at",
             "/admin",
@@ -121,6 +125,14 @@ impl Module for Backoffice {
                 .replace("@HOLD@", pick(HOLD_ORM, HOLD))
                 .replace("@OVER_ORM@", pick(OVER_ORM, ""))
                 .replace("@HELD@", pick("OverOrm", "Admin"))
+                .replace(
+                    "@WHO_LABEL@",
+                    if project.has("superuser") {
+                        WHO_LABEL_STAFF
+                    } else {
+                        ""
+                    },
+                )
                 .replace("@PANELS@", PANELS)
                 .replace(
                     "@SYNC@",
@@ -128,7 +140,7 @@ impl Module for Backoffice {
                 )
                 .replace(
                     "@PICK@",
-                    pick("            let admin = admin.for_request(ctx);\n", ""),
+                    pick("            let admin = admin.for_request(ctx)?;\n", ""),
                 )
                 .replace(
                     "@WHO@",
@@ -562,8 +574,11 @@ const OVER_ORM: &str = r#"
 /// that: the `db` plugin opens the pool in `before_start`, and the `model`
 /// plugin wraps it. So the admin cannot be built in `mount`. The first
 /// request after the start carries the ORM on its context, and the admin is
-/// built from it then. A row policy for a model that is not listed therefore
-/// panics on that first request, not at startup.
+/// built from it then.
+///
+/// A configuration the admin refuses -- a row policy for a model that is not
+/// listed, say -- is kept with its `help:` line, and every request answers
+/// with that error until the configuration is fixed.
 ///
 /// One per route table. The table `src/app.rs` builds only ever sees a
 /// request the application dispatched. A table a test builds sees a `Ctx`
@@ -571,7 +586,7 @@ const OVER_ORM: &str = r#"
 /// source, with the same configuration, and shows no rows.
 struct OverOrm {
     config: Mutex<Option<AdminConfig>>,
-    built: OnceLock<Arc<Admin>>,
+    built: OnceLock<Result<Arc<Admin>, String>>,
 }
 
 impl OverOrm {
@@ -582,23 +597,33 @@ impl OverOrm {
         }
     }
 
-    /// The admin, built by the first request that asks.
-    fn for_request(&self, ctx: &Ctx) -> Arc<Admin> {
-        Arc::clone(self.built.get_or_init(|| {
-            let config = self
+    /// The admin, built by the first request that asks, or the error that
+    /// build failed with.
+    fn for_request(&self, ctx: &Ctx) -> Result<Arc<Admin>, brocanth_admin::AdminError> {
+        let built = self.built.get_or_init(|| {
+            let Some(config) = self
                 .config
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
-                .expect("the admin is built once");
-            match ctx.provided::<brocanth_model::Orm, _>() {
-                Some(orm) => Arc::new(Admin::new(
+            else {
+                return Err("the admin's build stopped before it finished\n\
+                            help: read the first error the server printed"
+                    .to_string());
+            };
+            let admin = match ctx.provided::<brocanth_model::Orm, _>() {
+                Some(orm) => Admin::try_new(
                     Arc::new(models::Models::new(orm.connection().clone())),
                     config,
-                )),
-                None => Arc::new(Admin::new(Arc::new(Fixture::new()), config)),
-            }
-        }))
+                ),
+                None => Admin::try_new(Arc::new(Fixture::new()), config),
+            };
+            admin.map(Arc::new).map_err(|e| match e {
+                brocanth_admin::AdminError::Config(message) => message,
+                other => other.to_string(),
+            })
+        });
+        built.clone().map_err(brocanth_admin::AdminError::Config)
     }
 }
 "#;
@@ -706,7 +731,7 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-@PANELS@@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+@WHO_LABEL@@PANELS@@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
         routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
         routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
@@ -779,6 +804,22 @@ mod tests {
     }
 }
 "##;
+
+/// With `superuser`: who made a write, as the journal and the history name
+/// them. Without it every audited write would read "nobody signed in".
+const WHO_LABEL_STAFF: &str =
+    "    // Who made a write, as the change history names them: the member of
+    // staff's address, or their account id when they have none.
+    config = config.user_label(|principal| {
+        principal.downcast::<brocanth_auth::Staff>().map(|staff| {
+            let account = staff.account();
+            account
+                .email
+                .as_ref()
+                .map_or_else(|| account.id.to_string(), |email| email.to_string())
+        })
+    });
+";
 
 /// How `screen` asks who is asking, without `superuser`.
 const WHO: &str = "            let who = principal(ctx);\n";

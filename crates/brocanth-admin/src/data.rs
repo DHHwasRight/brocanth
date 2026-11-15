@@ -25,6 +25,7 @@
 //! | [`AdminData::count`] | `SELECT count(*) … WHERE <search> AND <scope>` |
 //! | [`AdminData::list`] | `SELECT … WHERE <search> AND <filter> AND <scope> ORDER BY … LIMIT … OFFSET …` |
 //! | [`AdminData::fetch`] | `SELECT … WHERE <pk> = ? AND <scope>` |
+//! | [`AdminData::fetch_many`] | `SELECT … WHERE <column> IN (…) AND <scope>` |
 //! | [`AdminData::update`] | the write, guarded by `<pk> = ? AND <scope>`; report rows changed |
 //! | [`AdminData::delete`] | the same, for a delete |
 //!
@@ -219,9 +220,65 @@ pub struct ListRequest<'a> {
     pub scope: Scope<'a>,
 }
 
+/// What a guarded write did: the rows it changed, and the row as the write
+/// read it, under its lock.
+///
+/// The admin journals `before` as the values before the write. A source
+/// that reads no row returns `None`, and the admin then journals the row it
+/// read before the write, which another write may have changed meanwhile.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Locked {
+    /// Rows changed. Zero means what it means for [`AdminData::update`].
+    pub rows: u64,
+    /// The row as the write found it, when the source read one.
+    pub before: Option<Row>,
+}
+
+impl Locked {
+    /// `rows` changed, and the row the write found.
+    pub fn new(rows: u64, before: Option<Row>) -> Locked {
+        Locked { rows, before }
+    }
+}
+
+/// Who a request is for, as a data source may need it: to open its
+/// connection as that person, for a database that applies its own row
+/// rules (`SET ROLE`, a session variable an RLS policy reads).
+///
+/// `#[non_exhaustive]`, so a field can be added -- a database identity the
+/// application resolved, a request id -- without a change to the sources
+/// that do not read it.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct RequestCx<'a> {
+    /// The person, as the policy sees them.
+    pub principal: crate::policy::Principal<'a>,
+}
+
+impl<'a> RequestCx<'a> {
+    /// The context of a request made by `principal`.
+    pub fn new(principal: crate::policy::Principal<'a>) -> RequestCx<'a> {
+        RequestCx { principal }
+    }
+}
+
 /// Everything the admin needs from the layer that stores rows.
 #[async_trait]
 pub trait AdminData: Send + Sync + 'static {
+    /// The source one request reads and writes through, or `None` for this
+    /// one.
+    ///
+    /// The admin asks before each read and write of a request, and sends
+    /// that call to the source returned. A source over a database that
+    /// applies its own row rules returns one bound to the person's database
+    /// identity. The default returns `None`: every request shares this
+    /// source.
+    fn for_request(&self, cx: &RequestCx<'_>) -> Option<SharedData> {
+        let _ = cx;
+        None
+    }
+
     /// Every model this source holds, before the admin's discovery filter.
     ///
     /// Synchronous, because an entity registry is read out of the binary and
@@ -249,6 +306,30 @@ pub trait AdminData: Send + Sync + 'static {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<Option<Row>, DataError>;
+
+    /// The rows whose `column` holds one of `keys`, under the scope:
+    /// `SELECT … WHERE <column> IN (…) AND <scope>`.
+    ///
+    /// The admin reads the labels of a page's foreign keys with it, one call
+    /// per column. A key that matches nothing, or that the scope refuses, is
+    /// left out. The default calls [`AdminData::fetch`] once per key; a SQL
+    /// source overrides it with one query.
+    async fn fetch_many(
+        &self,
+        model: &ModelDescriptor,
+        column: &str,
+        keys: &[String],
+        scope: Scope<'_>,
+    ) -> Result<Vec<Row>, DataError> {
+        let mut out = Vec::new();
+        for key in keys {
+            let key = PrimaryKey::single(column, key);
+            if let Some(row) = self.fetch(model, &key, scope).await? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
 
     /// Writes a new row and returns its key.
     ///
@@ -285,6 +366,33 @@ pub trait AdminData: Send + Sync + 'static {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<u64, DataError>;
+
+    /// [`AdminData::update`], and the row as the write read it under its
+    /// lock: the journal's "before". The admin calls this one. The default
+    /// calls `update` and reads no row.
+    async fn update_locked(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(
+            self.update(model, key, values, scope).await?,
+            None,
+        ))
+    }
+
+    /// [`AdminData::delete`], and the row as the write read it under its
+    /// lock. The default calls `delete` and reads no row.
+    async fn delete_locked(
+        &self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(self.delete(model, key, scope).await?, None))
+    }
 
     /// Opens a unit of work: writes that are kept all together or not at
     /// all.
@@ -330,6 +438,32 @@ pub trait AdminTransaction: Send {
         key: &PrimaryKey,
         scope: Scope<'_>,
     ) -> Result<u64, DataError>;
+
+    /// [`AdminTransaction::update`], and the row it read under its lock.
+    /// See [`AdminData::update_locked`].
+    async fn update_locked(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        values: &[(String, Value)],
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(
+            self.update(model, key, values, scope).await?,
+            None,
+        ))
+    }
+
+    /// [`AdminTransaction::delete`], and the row it read under its lock.
+    /// See [`AdminData::delete_locked`].
+    async fn delete_locked(
+        &mut self,
+        model: &ModelDescriptor,
+        key: &PrimaryKey,
+        scope: Scope<'_>,
+    ) -> Result<Locked, DataError> {
+        Ok(Locked::new(self.delete(model, key, scope).await?, None))
+    }
 
     /// Keeps every write. An error means that none is kept.
     async fn commit(self: Box<Self>) -> Result<(), DataError>;

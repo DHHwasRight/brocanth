@@ -138,3 +138,37 @@ fn the_principal_comes_out_of_the_request_state() {
         "the value the application put there, unchanged"
     );
 }
+
+/// Mounted through the plugin beside the CSRF hook, every form that posts
+/// carries the token, so the admin's own forms are not refused.
+#[test]
+fn the_plugin_stamps_the_csrf_token_into_every_form_that_posts() {
+    use brocanth_middleware::{Csrf, CsrfConfig};
+    use brocanth_test::{TestClient, TestRequest};
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    let config = AdminConfig::new()
+        .at("/admin")
+        .discovering(Discovery::new().under("blog::models"))
+        .unscoped_rows_unsafe_for_development()
+        .with_policy(brocanth_admin::policy::AllowAllUnsafeForDevelopment);
+    let mut app = AppBuilder::new()
+        .plugin_hooking(Csrf::new(CsrfConfig::default()))
+        .plugin(AdminPlugin::new(AdminSetup::new(
+            Arc::new(Fixture::blog()),
+            config,
+        )))
+        .build()
+        .expect("an application");
+    app.mount_routes::<AdminPlugin>("/admin")
+        .expect("the routes");
+    let client = TestClient::new(app);
+    let page = client.send(
+        TestRequest::get("/admin/post/1/edit").header("cookie", &format!("csrf_token={TOKEN}")),
+    );
+    assert_eq!(page.status(), 200);
+    let html = page.html();
+    let field = html.field("_csrf_token").expect("the token field");
+    assert_eq!(field.attr("value"), Some(TOKEN));
+}

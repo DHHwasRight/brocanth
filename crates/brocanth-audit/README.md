@@ -47,7 +47,14 @@ post.insert_published(ctx.orm(), &crate::plugins::audit::sink(ctx)).await?;
 ```
 
 With `admin`, a History tab at `/admin/history` and a History link on
-every record.
+every record. The tab shows an entry's values only to a person the admin
+lets read that record (`ViewDetail` and the model's view rule); anyone
+else with `history` sees when, who, the table, the key and the column
+names.
+
+With the `postgres` feature and no `db` plugin before it, the start
+stops with a `help:` line. Attach a `MemoryStore` to
+`AuditPlugin::trail()` before the start for a history in memory.
 
 ## Features
 

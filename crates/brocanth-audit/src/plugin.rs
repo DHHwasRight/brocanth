@@ -13,12 +13,16 @@ use brocanth::plugin_shutdown::ShutdownCx;
 use brocanth_events::RowChange;
 use brocanth_model::plugin::RowWritten;
 
+#[cfg(not(feature = "postgres"))]
 use crate::store::MemoryStore;
 use crate::trail::Trail;
 
 /// The first trail built in this process, for a panel the admin mounts
 /// before a plugin can hand it one. See [`AuditPlugin::installed`].
 static INSTALLED: OnceLock<Trail> = OnceLock::new();
+
+/// Whether the warning about a second plugin was printed: once per process.
+static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Seconds between two purges: once a day.
 const PURGE_EVERY: u64 = 86_400;
@@ -59,10 +63,12 @@ impl Default for AuditConfig {
 /// - A task that writes the queue every `flush_secs` and purges entries
 ///   older than `retention_days` once a day.
 ///
-/// The store is picked in `before_start`: a `brocanth_db::Db` in the
-/// application's services (the `db` plugin, registered before this one)
-/// gives a [`PgStore`](crate::PgStore); without one the history is kept in
-/// memory and lost at restart.
+/// The store is picked in `before_start`, unless one was attached to
+/// [`AuditPlugin::trail`] before: with the `postgres` feature, a
+/// `brocanth_db::Db` in the application's services (the `db` plugin,
+/// registered before this one) gives a [`PgStore`](crate::PgStore), and no
+/// `Db` stops the start with a `help:` line. Without the feature, the
+/// history is kept in memory and lost at restart.
 pub struct AuditPlugin {
     config: AuditConfig,
     trail: Trail,
@@ -78,8 +84,11 @@ impl AuditPlugin {
     /// The trail of the first `AuditPlugin` built in this process.
     ///
     /// A generated admin mounts its routes before any plugin can hand it a
-    /// value, so its panel and its journal ask here. A process builds one
-    /// application, so "the first" is "the one".
+    /// value, so its panel and its journal ask here. A process that builds
+    /// one application has one trail, so "the first" is "the one". A second
+    /// `AuditPlugin` does not replace it: the process prints a warning once,
+    /// and an admin of the second application should take its trail with
+    /// [`crate::admin::install_with`].
     pub fn installed() -> Option<Trail> {
         INSTALLED.get().cloned()
     }
@@ -94,7 +103,16 @@ impl Plugin for AuditPlugin {
 
     fn new(config: AuditConfig) -> Self {
         let trail = Trail::new(config.retention_days);
-        let _ = INSTALLED.set(trail.clone());
+        if INSTALLED.set(trail.clone()).is_err()
+            && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!(
+                "warning: [audit] a second AuditPlugin was built in this process; \
+                 `AuditPlugin::installed` keeps the first trail\n\
+                 help: give the second application's admin its own trail with \
+                 `brocanth_audit::admin::install_with(config, plugin.trail())`"
+            );
+        }
         AuditPlugin {
             config,
             trail,
@@ -104,7 +122,7 @@ impl Plugin for AuditPlugin {
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if !self.trail.has_store() {
-            self.attach_store(lc);
+            self.attach_store(lc)?;
         }
         // No runtime: a test or a tool that builds the application without
         // serving it, which calls `flush` itself.
@@ -135,10 +153,14 @@ impl Plugin for AuditPlugin {
     }
 
     fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
-        if let Some(worker) = self.worker.take() {
+        // Stopped, then awaited below: a flush the abort cuts off puts its
+        // batch back when its future is dropped, and the last flush must
+        // not look at the queue before that.
+        let worker = self.worker.take();
+        if let Some(worker) = &worker {
             worker.abort();
         }
-        if self.trail.pending() == 0 {
+        if worker.is_none() && self.trail.pending() == 0 {
             return Ok(());
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -147,6 +169,12 @@ impl Plugin for AuditPlugin {
         let trail = self.trail.clone();
         let remaining = sd.remaining();
         let last = async move {
+            if let Some(worker) = worker {
+                let _ = worker.await;
+            }
+            if trail.pending() == 0 {
+                return;
+            }
             match remaining {
                 Some(left) => {
                     let _ = tokio::time::timeout(left, trail.flush()).await;
@@ -157,10 +185,21 @@ impl Plugin for AuditPlugin {
             }
         };
         // The same rule as the analytics plugin: on a current-thread
-        // runtime a blocking wait would stall the only thread.
+        // runtime a blocking wait would stall the only thread. The flush
+        // is spawned and may not run before the runtime stops, so the
+        // entries it holds are reported as at risk.
         if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            let at_risk = self.trail.pending();
             runtime.spawn(last);
-            return Ok(());
+            if at_risk == 0 {
+                return Ok(());
+            }
+            return Err(PluginError::new(format!(
+                "[audit] {at_risk} changes may be lost: on a current-thread runtime the \
+                 shutdown cannot wait for the last write of the history\n\
+                 help: serve on a multi-thread runtime (`#[tokio::main]`), or await \
+                 `Trail::flush` before the shutdown"
+            )));
         }
         std::thread::scope(|scope| {
             scope.spawn(|| runtime.block_on(last)).join().map_err(|_| {
@@ -179,15 +218,21 @@ impl Plugin for AuditPlugin {
 
 impl AuditPlugin {
     #[cfg(feature = "postgres")]
-    fn attach_store(&mut self, lc: &mut Lifecycle<'_>) {
+    fn attach_store(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // No `Db`: a history kept in memory would be lost at the next
+        // deploy with nothing said. Stop instead, and say how to fix it.
         let Some(db) = lc.services().get::<brocanth_db::Db>().cloned() else {
-            self.trail.attach(Arc::new(MemoryStore::new()));
-            return;
+            return Err(PluginError::new(
+                "[audit] no database: the `db` plugin is not registered, or is registered \
+                 after `audit`\n\
+                 help: register `brocanth_db`'s plugin before `AuditPlugin`; for a history in \
+                 memory, attach `MemoryStore` to `AuditPlugin::trail()` before the start",
+            ));
         };
         let store = Arc::new(crate::postgres::PgStore::new(db));
         self.trail.attach(store.clone());
         if !self.config.migrate {
-            return;
+            return Ok(());
         }
         let migrated = Arc::new(tokio::sync::OnceCell::new());
         lc.ready_when(move || {
@@ -207,11 +252,13 @@ impl AuditPlugin {
                     })
             }
         });
+        Ok(())
     }
 
     #[cfg(not(feature = "postgres"))]
-    fn attach_store(&mut self, _lc: &mut Lifecycle<'_>) {
+    fn attach_store(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         self.trail.attach(Arc::new(MemoryStore::new()));
+        Ok(())
     }
 }
 
@@ -237,6 +284,7 @@ impl ModelHook<RowWritten> for Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::MemoryStore;
     use brocanth::plugin_app::AppBuilder;
     use brocanth_events::ChangeSink;
     use brocanth_model::plugin::HookSink;
@@ -262,6 +310,7 @@ mod tests {
     fn the_record_hook_turned_off_records_nothing() {
         let plugin = AuditPlugin::new(AuditConfig::default());
         let trail = plugin.trail();
+        trail.attach(Arc::new(MemoryStore::new()));
         let app = AppBuilder::new()
             .plugin_hooking(plugin)
             .hooks_off("audit", ["record"])
@@ -284,10 +333,23 @@ mod tests {
         assert!(built.is_err());
     }
 
+    #[test]
+    fn without_a_database_the_start_stops_with_a_help_line() {
+        let plugin = AuditPlugin::new(AuditConfig::default());
+        let built = AppBuilder::new().plugin_hooking(plugin).build();
+        let Err(error) = built else {
+            panic!("an audit plugin with no Db must not start");
+        };
+        let text = error.to_string();
+        assert!(text.contains("no database"), "{text}");
+        assert!(text.contains("help:"), "{text}");
+    }
+
     #[tokio::test]
-    async fn without_a_database_the_history_is_kept_in_memory() {
+    async fn a_memory_store_attached_before_the_start_keeps_the_history() {
         let plugin = AuditPlugin::new(AuditConfig::default());
         let trail = plugin.trail();
+        trail.attach(Arc::new(MemoryStore::new()));
         let mut app = AppBuilder::new()
             .plugin_hooking(plugin)
             .build()
@@ -331,6 +393,7 @@ mod tests {
     fn a_change_published_through_the_hooks_reaches_the_trail() {
         let plugin = AuditPlugin::new(AuditConfig::default());
         let trail = plugin.trail();
+        trail.attach(Arc::new(MemoryStore::new()));
         let app = AppBuilder::new()
             .plugin_hooking(plugin)
             .build()

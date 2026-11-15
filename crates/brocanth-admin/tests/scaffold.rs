@@ -75,3 +75,28 @@ fn a_moved_admin_passes_the_route_table_test_with_no_other_edit() {
         testing::build(&files).unwrap_or_else(|e| panic!("{e}"));
     }
 }
+
+/// With `superuser`, the admin names who made each write, so the journal
+/// and the change history are not anonymous. Without it there is nobody to
+/// name.
+#[test]
+fn with_superuser_the_admin_labels_each_write_with_the_staff_member() {
+    let admin_file = |picks: &[&'static str]| {
+        let files =
+            brocanth_cli::testing::generate("my-blog", picks, brocanth_cli::testing::modules())
+                .unwrap_or_else(|e| panic!("{e}"));
+        files
+            .into_iter()
+            .find(|(path, _)| path == "src/plugins/admin/mod.rs")
+            .map(|(_, text)| text)
+            .expect("src/plugins/admin/mod.rs is generated")
+    };
+    let staffed = admin_file(&["config", "db", "auth", "superuser", "admin"]);
+    assert!(
+        staffed.contains("config = config.user_label(|principal| {")
+            && staffed.contains("principal.downcast::<brocanth_auth::Staff>()"),
+        "{staffed}"
+    );
+    let alone = admin_file(&["config", "admin"]);
+    assert!(!alone.contains("user_label"), "{alone}");
+}

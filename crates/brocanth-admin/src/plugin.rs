@@ -225,11 +225,22 @@ impl AdminPlugin {
                 // `Principal<'a>` rather than an owned value: the admin
                 // hands it to the policy and never looks inside.
                 let who = principal(request, cx.state());
+                // With the CSRF hook on, it refuses a POST without the
+                // token, and the admin renders forms that do not know it.
+                // So the field goes into every form that posts here.
+                let token = cx.state().get::<brocanth_middleware::CsrfToken>();
 
                 let answer = admin
                     .dispatch(who, &method, &path, &query, &submission)
                     .await
                     .map_err(HandlerError::new)?;
+                let answer = match (answer, token) {
+                    (AdminResponse::Page { status, html }, Some(token)) => AdminResponse::Page {
+                        status,
+                        html: token.stamp_forms(&html),
+                    },
+                    (answer, _) => answer,
+                };
                 Ok(http_response(answer))
             })
         })

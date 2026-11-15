@@ -2750,8 +2750,11 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 /// that: the `db` plugin opens the pool in `before_start`, and the `model`
 /// plugin wraps it. So the admin cannot be built in `mount`. The first
 /// request after the start carries the ORM on its context, and the admin is
-/// built from it then. A row policy for a model that is not listed therefore
-/// panics on that first request, not at startup.
+/// built from it then.
+///
+/// A configuration the admin refuses -- a row policy for a model that is not
+/// listed, say -- is kept with its `help:` line, and every request answers
+/// with that error until the configuration is fixed.
 ///
 /// One per route table. The table `src/app.rs` builds only ever sees a
 /// request the application dispatched. A table a test builds sees a `Ctx`
@@ -2759,7 +2762,7 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 /// source, with the same configuration, and shows no rows.
 struct OverOrm {
     config: Mutex<Option<AdminConfig>>,
-    built: OnceLock<Arc<Admin>>,
+    built: OnceLock<Result<Arc<Admin>, String>>,
 }
 
 impl OverOrm {
@@ -2770,23 +2773,33 @@ impl OverOrm {
         }
     }
 
-    /// The admin, built by the first request that asks.
-    fn for_request(&self, ctx: &Ctx) -> Arc<Admin> {
-        Arc::clone(self.built.get_or_init(|| {
-            let config = self
+    /// The admin, built by the first request that asks, or the error that
+    /// build failed with.
+    fn for_request(&self, ctx: &Ctx) -> Result<Arc<Admin>, brocanth_admin::AdminError> {
+        let built = self.built.get_or_init(|| {
+            let Some(config) = self
                 .config
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
-                .expect("the admin is built once");
-            match ctx.provided::<brocanth_model::Orm, _>() {
-                Some(orm) => Arc::new(Admin::new(
+            else {
+                return Err("the admin's build stopped before it finished\n\
+                            help: read the first error the server printed"
+                    .to_string());
+            };
+            let admin = match ctx.provided::<brocanth_model::Orm, _>() {
+                Some(orm) => Admin::try_new(
                     Arc::new(models::Models::new(orm.connection().clone())),
                     config,
-                )),
-                None => Arc::new(Admin::new(Arc::new(Fixture::new()), config)),
-            }
-        }))
+                ),
+                None => Admin::try_new(Arc::new(Fixture::new()), config),
+            };
+            admin.map(Arc::new).map_err(|e| match e {
+                brocanth_admin::AdminError::Config(message) => message,
+                other => other.to_string(),
+            })
+        });
+        built.clone().map_err(brocanth_admin::AdminError::Config)
     }
 }
 
@@ -2799,7 +2812,7 @@ fn screen(admin: Arc<OverOrm>) -> Handler {
         let admin = Arc::clone(&admin);
         Box::pin(async move {
             let ctx = &*ctx;
-            let admin = admin.for_request(ctx);
+            let admin = admin.for_request(ctx)?;
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -3362,6 +3375,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 
 - `observability-logs`, for `config`: $<APP>_ENV picks the environment; only observability-logs writes JSON when it is production
 - `observability-health`, for `db`: its readiness check, `Db::ping`, is read only by /readyz; without it a deploy sends traffic to an instance whose database is down
+- `middleware-csrf`, for `admin`: the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row
 
 ## House style
 
@@ -3379,7 +3393,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 5f507dce717b52a4 -->
+<!-- brocanth-digest: 6496681563e03874 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

@@ -398,3 +398,348 @@ async fn a_source_with_no_entities_is_a_source() {
     let out = models.count(&model, no_search(), Scope::Unscoped).await;
     assert!(matches!(out, Err(DataError::UnknownModel(_))), "{out:?}");
 }
+
+mod keyed {
+    pub mod token {
+        use brocanth_model::prelude::*;
+        use serde::{Deserialize, Serialize};
+
+        #[sea_orm::model]
+        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+        #[sea_orm(table_name = "token")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: sea_orm::prelude::Uuid,
+            pub name: String,
+        }
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    pub mod note {
+        use brocanth_model::prelude::*;
+        use serde::{Deserialize, Serialize};
+
+        #[sea_orm::model]
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+        #[sea_orm(table_name = "note")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: i32,
+            pub body: String,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub data: sea_orm::prelude::Json,
+        }
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+}
+
+admin_source! {
+    /// A UUID key, and a text column beside a JSON one.
+    pub struct Keyed;
+    "keyed::token" => keyed::token::Entity,
+    "keyed::note" => keyed::note::Entity,
+}
+
+const TOKEN: &str = "6f1c1f9e-2b1a-4c3d-9e8f-0a1b2c3d4e5f";
+
+async fn keyed() -> Option<(Keyed, Harness)> {
+    let harness = isolated().await?;
+    for statement in [
+        "CREATE TABLE token (id uuid PRIMARY KEY, name TEXT NOT NULL)",
+        "CREATE TABLE note (id SERIAL PRIMARY KEY, body TEXT NOT NULL, data JSONB NOT NULL)",
+    ] {
+        harness
+            .conn()
+            .execute_unprepared(statement)
+            .await
+            .expect("schema");
+    }
+    let models = Keyed::new(harness.conn().clone());
+    Some((models, harness))
+}
+
+fn token_model() -> ModelDescriptor {
+    ModelDescriptor {
+        key: "token".into(),
+        module_path: "keyed::token".into(),
+        table: "token".into(),
+        columns: vec![
+            ColumnDescriptor::new("id", ColumnKind::Uuid).primary_key(),
+            ColumnDescriptor::new("name", ColumnKind::Text),
+        ],
+    }
+}
+
+fn note_model() -> ModelDescriptor {
+    ModelDescriptor {
+        key: "note".into(),
+        module_path: "keyed::note".into(),
+        table: "note".into(),
+        columns: vec![
+            ColumnDescriptor::new("id", ColumnKind::Integer).primary_key(),
+            ColumnDescriptor::new("body", ColumnKind::LongText),
+            ColumnDescriptor::new("data", ColumnKind::Json),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn a_uuid_key_reads_writes_and_deletes_and_a_bad_one_is_no_row() {
+    let Some((models, h)) = keyed().await else {
+        return;
+    };
+    h.conn()
+        .execute_unprepared(&format!(
+            "INSERT INTO token (id, name) VALUES ('{TOKEN}', 'deploy')"
+        ))
+        .await
+        .expect("seed");
+    let model = token_model();
+    let key = PrimaryKey::single("id", TOKEN);
+    let row = models
+        .fetch(&model, &key, Scope::Unscoped)
+        .await
+        .expect("a uuid key binds as a uuid")
+        .expect("a row");
+    assert_eq!(
+        row.get("name").map(|v| v.as_input()).as_deref(),
+        Some("deploy")
+    );
+
+    let changed = models
+        .update(
+            &model,
+            &key,
+            &[("name".into(), Value::Text("release".into()))],
+            Scope::Unscoped,
+        )
+        .await
+        .expect("update");
+    assert_eq!(changed, 1);
+
+    let bad = models
+        .fetch(
+            &model,
+            &PrimaryKey::single("id", "not-a-uuid"),
+            Scope::Unscoped,
+        )
+        .await;
+    assert!(
+        matches!(bad, Ok(None)),
+        "a malformed uuid is no row: {bad:?}"
+    );
+
+    assert_eq!(
+        models
+            .delete(&model, &key, Scope::Unscoped)
+            .await
+            .expect("delete"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_key_an_integer_column_cannot_hold_is_no_row_and_not_an_error() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    let abc = PrimaryKey::single("id", "abc");
+    let out = models.fetch(&user_model(), &abc, Scope::Unscoped).await;
+    assert!(matches!(out, Ok(None)), "{out:?}");
+    let out = models.delete(&user_model(), &abc, Scope::Unscoped).await;
+    assert!(matches!(out, Ok(0)), "{out:?}");
+}
+
+#[tokio::test]
+async fn a_text_column_that_looks_like_json_stays_text_and_a_json_column_stays_json() {
+    let Some((models, _h)) = keyed().await else {
+        return;
+    };
+    let model = note_model();
+    let key = models
+        .insert(
+            &model,
+            &[
+                ("body".into(), Value::Text("[1]".into())),
+                ("data".into(), Value::Text(r#"{"a":1}"#.into())),
+            ],
+        )
+        .await
+        .expect("a text column holding `[1]` saves");
+    models
+        .update(
+            &model,
+            &key,
+            &[("body".into(), Value::Text("{}".into()))],
+            Scope::Unscoped,
+        )
+        .await
+        .expect("and `{}` too");
+    let row = models
+        .fetch(&model, &key, Scope::Unscoped)
+        .await
+        .expect("fetch")
+        .expect("a row");
+    assert_eq!(row.get("body").map(|v| v.as_input()).as_deref(), Some("{}"));
+    assert_eq!(
+        row.get("data").map(|v| v.as_input()).as_deref(),
+        Some(r#"{"a":1}"#)
+    );
+}
+
+#[tokio::test]
+async fn a_validation_failure_is_invalid_with_the_field_named() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    let bad = models
+        .insert(
+            &user_model(),
+            &[
+                ("name".into(), Value::Text("Ada Lovelace".into())),
+                ("email".into(), Value::Text("not-an-address".into())),
+            ],
+        )
+        .await;
+    let Err(DataError::Invalid(errors)) = bad else {
+        panic!("a model validation is a form error: {bad:?}");
+    };
+    assert!(errors.on("email").next().is_some(), "{errors:?}");
+}
+
+async fn three_users(models: &Models) {
+    for name in ["Ada Lovelace", "Grace Hopper", "Alan Turing"] {
+        models
+            .insert(
+                &user_model(),
+                &[
+                    ("name".into(), Value::Text(name.into())),
+                    ("email".into(), Value::Text("x@example.com".into())),
+                ],
+            )
+            .await
+            .expect("insert");
+    }
+}
+
+#[tokio::test]
+async fn a_page_with_no_sort_is_in_key_order() {
+    let Some((models, h)) = source().await else {
+        return;
+    };
+    let model = user_model();
+    three_users(&models).await;
+    // An update writes a new tuple at the end of the heap, so a scan with
+    // no ORDER BY returns the first row last.
+    h.conn()
+        .execute_unprepared(r#"UPDATE "user" SET name = 'Ada King' WHERE id = 1"#)
+        .await
+        .expect("update");
+    let rows = models
+        .list(ListRequest {
+            model: &model,
+            offset: 0,
+            limit: 10,
+            search: no_search(),
+            sort: None,
+            filter: None,
+            scope: Scope::Unscoped,
+        })
+        .await
+        .expect("list");
+    let ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("id").map(|v| v.as_input()))
+        .collect();
+    assert_eq!(ids, ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn a_percent_in_the_search_term_matches_itself() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    let model = user_model();
+    for name in ["100% sure", "1000 sure", "a_b", "axb"] {
+        models
+            .insert(
+                &model,
+                &[
+                    ("name".into(), Value::Text(name.into())),
+                    ("email".into(), Value::Text("x@example.com".into())),
+                ],
+            )
+            .await
+            .expect("insert");
+    }
+    let columns = vec!["name".to_string()];
+    for (term, expected) in [("100%", 1), ("a_b", 1), ("sure", 2)] {
+        let found = models
+            .count(
+                &model,
+                Search {
+                    term,
+                    columns: &columns,
+                },
+                Scope::Unscoped,
+            )
+            .await
+            .expect("count");
+        assert_eq!(found, expected, "term {term:?}");
+    }
+}
+
+#[tokio::test]
+async fn fetch_many_reads_a_batch_and_skips_a_key_the_column_cannot_hold() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    three_users(&models).await;
+    let keys = ["1".to_string(), "3".to_string(), "abc".to_string()];
+    let rows = models
+        .fetch_many(&user_model(), "id", &keys, Scope::Unscoped)
+        .await
+        .expect("one query");
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("name").map(|v| v.as_input()))
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Ada Lovelace", "Alan Turing"]);
+}
+
+#[tokio::test]
+async fn a_guarded_write_returns_the_row_it_locked() {
+    let Some((models, _h)) = source().await else {
+        return;
+    };
+    three_users(&models).await;
+    let key = PrimaryKey::single("id", 1);
+    let done = models
+        .update_locked(
+            &user_model(),
+            &key,
+            &[("name".into(), Value::Text("Ada King".into()))],
+            Scope::Unscoped,
+        )
+        .await
+        .expect("update");
+    assert_eq!(done.rows, 1);
+    let before = done.before.expect("the locked row");
+    assert_eq!(
+        before.get("name").map(|v| v.as_input()).as_deref(),
+        Some("Ada Lovelace")
+    );
+    let gone = models
+        .delete_locked(&user_model(), &key, Scope::Unscoped)
+        .await
+        .expect("delete");
+    assert_eq!(gone.rows, 1);
+    assert_eq!(
+        gone.before
+            .and_then(|r| r.get("name").map(|v| v.as_input())),
+        Some("Ada King".to_string())
+    );
+}

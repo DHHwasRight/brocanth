@@ -557,6 +557,7 @@ async fn the_admin_tab_lists_connections_without_tokens_and_hides_the_button_fro
                         can_act,
                         submission,
                         mount: "/admin/connections",
+                        access: None,
                     })
                     .await
                     .unwrap()

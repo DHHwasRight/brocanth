@@ -133,8 +133,8 @@ through the `ActiveModel`. Zero rows changed is a failure, not a success.
 
 - **No joins.** Declare a foreign key with `ModelAdmin::foreign_key`. The
   admin resolves it with a second read.
-- **No composite-key writes.** A composite key reads. `update` and `delete`
-  refuse it by name, because `find_by_id` with a tuple has no dynamic form.
+- **No composite keys.** A row is addressed by one key column, for a read
+  and for a write. A composite key is refused by name, with a `help:` line.
 
 ## Testing
 

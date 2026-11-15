@@ -21,7 +21,10 @@
 //! # What a panel may not do
 //!
 //! It renders a body and returns it. It cannot replace the layout, reach
-//! the policy, see other panels, or touch a model. A panel that wants the
+//! the policy, see other panels, or touch a model. A panel that shows the
+//! values of the admin's own records -- the change history does -- asks
+//! [`PanelRequest::access`] per record, and the admin answers with its own
+//! policy and row rules. A panel that wants the
 //! whole page is an application replacing [`Views::layout`](crate::Views),
 //! which is a different and already-supported thing.
 //!
@@ -84,12 +87,30 @@ pub trait Panel: Send + Sync {
     async fn render(&self, request: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError>;
 }
 
+/// Whether the person on a request may read one of the admin's records.
+///
+/// The admin hands one to every panel on [`PanelRequest::access`]. A panel
+/// that prints the values of a record of another table asks it first, so
+/// the panel's own key does not grant a read of every table.
+#[async_trait]
+pub trait RecordAccess: Send + Sync {
+    /// Whether this person may read record `key` of `table`, values
+    /// included: the screen policy allows
+    /// [`Action::ViewDetail`](crate::policy::Action::ViewDetail) on its
+    /// model, and the model's view rule admits the row.
+    ///
+    /// `key` is the stored value, `,` between the parts of a composite key
+    /// ([`PrimaryKey::to_text`]). `false` for a table the admin does not
+    /// show, and for a row that is gone, unless the view rule admits every
+    /// row.
+    async fn may_read(&self, table: &str, key: &str) -> bool;
+}
+
 /// One request, as a panel sees it.
 ///
 /// The path is already relative to the panel, because a panel should not
 /// have to know where the admin is mounted or what it is called. `""` is
 /// the panel's own index.
-#[derive(Debug)]
 pub struct PanelRequest<'a> {
     /// `""` for the panel's index, `"retries"` for `{base}/{key}/retries`.
     pub path: &'a str,
@@ -116,9 +137,36 @@ pub struct PanelRequest<'a> {
     /// Where this panel is mounted, so a panel can write its own links:
     /// `{base}/{key}`, with no trailing slash.
     pub mount: &'a str,
+    /// What this person may read of the admin's records. The admin always
+    /// sets it; `None` is a request built by hand, such as a test, and a
+    /// panel then shows no record's values.
+    pub access: Option<&'a dyn RecordAccess>,
+}
+
+impl std::fmt::Debug for PanelRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PanelRequest")
+            .field("path", &self.path)
+            .field("query", &self.query)
+            .field("post", &self.post)
+            .field("can_act", &self.can_act)
+            .field("submission", &self.submission)
+            .field("mount", &self.mount)
+            .field("access", &self.access.is_some())
+            .finish()
+    }
 }
 
 impl PanelRequest<'_> {
+    /// Whether this person may read record `key` of `table`. `false` when
+    /// the request carries no [`RecordAccess`]. See [`RecordAccess::may_read`].
+    pub async fn may_read(&self, table: &str, key: &str) -> bool {
+        match self.access {
+            Some(access) => access.may_read(table, key).await,
+            None => false,
+        }
+    }
+
     /// A link to a sub-path of this panel.
     pub fn url(&self, path: &str) -> String {
         match path.is_empty() {

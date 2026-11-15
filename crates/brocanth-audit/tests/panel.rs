@@ -408,3 +408,108 @@ fn without_the_plugin_the_installed_tab_says_so_and_a_write_still_works() {
     let gone = send(&admin, "POST", "/admin/post/1/delete", "", "");
     assert_eq!(gone.status(), 303);
 }
+
+#[test]
+fn the_tab_hides_the_values_of_a_record_this_person_may_not_view() {
+    let trail = trail();
+    // May open the history and edit posts, but not read a post's detail.
+    let policy = policy_fn(|_: &Principal<'_>, r: Request<'_>| {
+        !(r.action == Action::ViewDetail && r.model == "post")
+    });
+    let config = AdminConfig::new()
+        .with_policy(policy)
+        .at("/admin")
+        .discovering(Discovery::new().under("blog::models"))
+        .unscoped_rows_unsafe_for_development();
+    let admin = Admin::new(
+        Arc::new(Fixture::blog()),
+        brocanth_audit::admin::install_with(config, trail.clone()),
+    );
+    trail.record(Entry {
+        id: 0,
+        at: 0,
+        actor: Some("ada".into()),
+        source: "admin".into(),
+        table: "post".into(),
+        row: "2".into(),
+        label: "Secret title".into(),
+        kind: Kind::Updated,
+        fields: vec![Field {
+            name: "title".into(),
+            before: Some("Secret title".into()),
+            after: Some("Other secret".into()),
+        }],
+    });
+    trail.record(Entry {
+        id: 0,
+        at: 0,
+        actor: Some("ada".into()),
+        source: "admin".into(),
+        table: "user".into(),
+        row: "1".into(),
+        label: "Ada Lovelace".into(),
+        kind: Kind::Updated,
+        fields: vec![Field {
+            name: "name".into(),
+            before: Some("Ada".into()),
+            after: Some("Ada Lovelace".into()),
+        }],
+    });
+    let page = html(&send(&admin, "GET", "/admin/history", "", ""));
+    let text = page.text();
+    assert!(!text.contains("Secret title"), "{text}");
+    assert!(!text.contains("Other secret"), "{text}");
+    page.assert_text("title").assert_text("values hidden");
+    page.assert_text("Ada Lovelace");
+}
+
+#[test]
+fn a_request_built_by_hand_shows_no_values() {
+    use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
+    let trail = trail();
+    trail.by("ada").publish(&RowChange::created("post", 9_i64));
+    trail.record(Entry {
+        id: 0,
+        at: 0,
+        actor: None,
+        source: "admin".into(),
+        table: "post".into(),
+        row: "9".into(),
+        label: "Hidden".into(),
+        kind: Kind::Created,
+        fields: vec![Field {
+            name: "title".into(),
+            before: None,
+            after: Some("Hidden".into()),
+        }],
+    });
+    let panel = brocanth_audit::admin::AuditPanel::new(trail);
+    let submission = Submission::default();
+    let page = block_on(panel.render(PanelRequest {
+        path: "",
+        query: "",
+        post: false,
+        can_act: false,
+        submission: &submission,
+        mount: "/admin/history",
+        access: None,
+    }))
+    .unwrap();
+    let Some(PanelPage::Body { html, .. }) = page else {
+        panic!("a page");
+    };
+    assert!(!html.contains("Hidden"), "{html}");
+}
+
+#[test]
+fn the_tab_says_how_many_changes_were_dropped() {
+    let trail = Trail::new(0);
+    for n in 0..(brocanth_audit::MAX_PENDING as i64 + 2) {
+        trail.publish(&RowChange::created("post", n));
+    }
+    trail.attach(Arc::new(MemoryStore::new()));
+    let admin = admin(&trail);
+    let page = html(&send(&admin, "GET", "/admin/history", "", ""));
+    page.assert_text("2 changes were not recorded")
+        .assert_text("kept in memory");
+}

@@ -36,6 +36,9 @@ pub struct Trail {
 struct Inner {
     store: OnceLock<Arc<dyn AuditStore>>,
     pending: Mutex<Vec<Entry>>,
+    /// Held over one flush, from the take to the end of the append, so two
+    /// flushes never write at once: a later batch never gets lower ids.
+    flushing: tokio::sync::Mutex<()>,
     dropped: Mutex<u64>,
     last_error: Mutex<Option<String>>,
     retention_days: u32,
@@ -71,6 +74,7 @@ impl Trail {
             inner: Arc::new(Inner {
                 store: OnceLock::new(),
                 pending: Mutex::new(Vec::new()),
+                flushing: tokio::sync::Mutex::new(()),
                 dropped: Mutex::new(0),
                 last_error: Mutex::new(None),
                 retention_days,
@@ -95,6 +99,12 @@ impl Trail {
     /// Whether a store is attached.
     pub fn has_store(&self) -> bool {
         self.inner.store.get().is_some()
+    }
+
+    /// Whether the attached store keeps the history across a restart.
+    /// `false` with no store, and with a [`MemoryStore`](crate::MemoryStore).
+    pub fn is_durable(&self) -> bool {
+        self.inner.store.get().is_some_and(|s| s.is_durable())
     }
 
     /// Seconds since 1970, by this trail's clock.
@@ -165,6 +175,13 @@ impl Trail {
 
     /// Writes the queue to the store and says how many entries it wrote.
     ///
+    /// One flush at a time: a second waits for the first, so the store
+    /// gets the batches in the order they were queued.
+    ///
+    /// Cancel-safe. A flush that is dropped while the store writes -- a
+    /// timeout, an aborted task, a request whose client went away -- puts
+    /// its batch back at the front of the queue, as a failed one does.
+    ///
     /// # Errors
     ///
     /// The store failed. The entries go back to the front of the queue, so
@@ -173,27 +190,36 @@ impl Trail {
         let Some(store) = self.inner.store.get() else {
             return Ok(0);
         };
-        let batch = std::mem::take(&mut *lock(&self.inner.pending));
-        if batch.is_empty() {
+        let _one_at_a_time = self.inner.flushing.lock().await;
+        let mut batch = InFlight {
+            trail: self,
+            batch: std::mem::take(&mut *lock(&self.inner.pending)),
+        };
+        if batch.batch.is_empty() {
             return Ok(0);
         }
-        match store.append(&batch).await {
+        match store.append(&batch.batch).await {
             Ok(()) => {
                 self.note(None);
-                Ok(batch.len())
+                Ok(std::mem::take(&mut batch.batch).len())
             }
             Err(e) => {
                 self.note(Some(e.to_string()));
-                let mut pending = lock(&self.inner.pending);
-                let newer = std::mem::replace(&mut *pending, batch);
-                let room = MAX_PENDING.saturating_sub(pending.len());
-                if newer.len() > room {
-                    *lock(&self.inner.dropped) += (newer.len() - room) as u64;
-                }
-                pending.extend(newer.into_iter().take(room));
                 Err(e)
             }
         }
+    }
+
+    /// Puts `batch` back in front of the queue. Past [`MAX_PENDING`], the
+    /// newest entries are dropped and counted.
+    fn requeue(&self, batch: Vec<Entry>) {
+        let mut pending = lock(&self.inner.pending);
+        let newer = std::mem::replace(&mut *pending, batch);
+        let room = MAX_PENDING.saturating_sub(pending.len());
+        if newer.len() > room {
+            *lock(&self.inner.dropped) += (newer.len() - room) as u64;
+        }
+        pending.extend(newer.into_iter().take(room));
     }
 
     /// The entries `query` matches, newest first. Flushes first.
@@ -249,6 +275,21 @@ impl Trail {
 
     fn note(&self, error: Option<String>) {
         *lock(&self.inner.last_error) = error;
+    }
+}
+
+/// A batch on its way to the store. Dropped with entries still in it --
+/// the append failed, or the flush was cancelled -- it puts them back.
+struct InFlight<'a> {
+    trail: &'a Trail,
+    batch: Vec<Entry>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if !self.batch.is_empty() {
+            self.trail.requeue(std::mem::take(&mut self.batch));
+        }
     }
 }
 
@@ -534,6 +575,81 @@ mod tests {
             ..Query::default()
         };
         assert_eq!(trail.find(&row_only).await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_flush_puts_its_batch_back() {
+        struct Never;
+        #[async_trait]
+        impl AuditStore for Never {
+            async fn append(&self, _: &[Entry]) -> Result<(), StoreError> {
+                std::future::pending().await
+            }
+            async fn find(&self, _: &Query) -> Result<Vec<Entry>, StoreError> {
+                Ok(Vec::new())
+            }
+            async fn purge(&self, _: i64) -> Result<u64, StoreError> {
+                Ok(0)
+            }
+        }
+        let trail = Trail::with_store(Arc::new(Never), 0);
+        trail.publish(&RowChange::created("post", 1_i64));
+        trail.publish(&RowChange::created("post", 2_i64));
+        let timed_out =
+            tokio::time::timeout(std::time::Duration::from_millis(20), trail.flush()).await;
+        assert!(timed_out.is_err(), "the store never answers");
+        assert_eq!(trail.pending(), 2, "the batch is queued again");
+        assert_eq!(trail.dropped(), 0);
+    }
+
+    #[tokio::test]
+    async fn two_flushes_write_one_after_the_other_in_queue_order() {
+        use std::sync::atomic::AtomicUsize;
+        /// Slow, and fails the test if two appends overlap.
+        struct Slow {
+            inner: MemoryStore,
+            busy: AtomicUsize,
+        }
+        #[async_trait]
+        impl AuditStore for Slow {
+            async fn append(&self, entries: &[Entry]) -> Result<(), StoreError> {
+                assert_eq!(self.busy.fetch_add(1, Ordering::SeqCst), 0, "overlap");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let out = self.inner.append(entries).await;
+                self.busy.fetch_sub(1, Ordering::SeqCst);
+                out
+            }
+            async fn find(&self, q: &Query) -> Result<Vec<Entry>, StoreError> {
+                self.inner.find(q).await
+            }
+            async fn purge(&self, before: i64) -> Result<u64, StoreError> {
+                self.inner.purge(before).await
+            }
+        }
+        let store = Arc::new(Slow {
+            inner: MemoryStore::new(),
+            busy: AtomicUsize::new(0),
+        });
+        let trail = Trail::with_store(store.clone(), 0);
+        trail.publish(&RowChange::created("post", 1_i64));
+        let first = {
+            let trail = trail.clone();
+            tokio::spawn(async move { trail.flush().await })
+        };
+        tokio::task::yield_now().await;
+        trail.publish(&RowChange::created("post", 2_i64));
+        let second = trail.flush().await.unwrap();
+        first.await.unwrap().unwrap();
+        assert!(second <= 1);
+        let rows: Vec<String> = store
+            .inner
+            .find(&Query::recent())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.row)
+            .collect();
+        assert_eq!(rows, ["2", "1"], "the newer entry has the higher id");
     }
 
     #[test]

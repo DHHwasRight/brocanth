@@ -16,7 +16,8 @@ use thiserror::Error;
 use crate::actions::{ActionCx, BulkAction, Run, Selected, MAX_SELECTED};
 use crate::config::{AdminConfig, ModelAdmin};
 use crate::data::{
-    AdminData, AdminTransaction, DataError, Equals, ListRequest, Search, SharedData,
+    AdminData, AdminTransaction, DataError, Equals, FieldErrors, ListRequest, Locked, Search,
+    SharedData,
 };
 use crate::discovery::discover;
 use crate::form::{Choice, Form, Submission};
@@ -24,7 +25,7 @@ use crate::inline::Inline;
 use crate::journal::{AdminWrite, FieldChange, Journal, RecordLinkFn, RecordRef, Written};
 use crate::model::{ColumnDescriptor, ColumnKind, ModelDescriptor, PrimaryKey, Row, Value};
 use crate::paging::Pager;
-use crate::panel::{PageCx, Panel, PanelPage, PanelRequest};
+use crate::panel::{PageCx, Panel, PanelPage, PanelRequest, RecordAccess};
 use crate::policy::{Action, Principal, Request};
 use crate::query::{Direction, ListQuery};
 use crate::rows::{Gate, Guard, RowAction, RowRules, Rules, Write};
@@ -58,6 +59,12 @@ pub enum AdminError {
     /// resource and the model describe different tables.
     #[error("admin row policy does not match its model: {0}")]
     Mask(MaskViolation),
+    /// The configuration cannot build an admin: a row policy for a model the
+    /// admin does not show, two pages with one key, an inline with no
+    /// column. Found by [`Admin::try_new`], before any request. The message
+    /// ends with a `help:` line.
+    #[error("the admin's configuration is not valid: {0}")]
+    Config(String),
 }
 
 /// What a screen produced.
@@ -170,10 +177,10 @@ impl Writer<'_> {
         key: &PrimaryKey,
         values: &[(String, Value)],
         scope: crate::data::Scope<'_>,
-    ) -> Result<u64, DataError> {
+    ) -> Result<Locked, DataError> {
         match self {
-            Writer::Direct(data) => data.update(model, key, values, scope).await,
-            Writer::Transaction(tx) => tx.update(model, key, values, scope).await,
+            Writer::Direct(data) => data.update_locked(model, key, values, scope).await,
+            Writer::Transaction(tx) => tx.update_locked(model, key, values, scope).await,
         }
     }
 
@@ -182,10 +189,10 @@ impl Writer<'_> {
         model: &ModelDescriptor,
         key: &PrimaryKey,
         scope: crate::data::Scope<'_>,
-    ) -> Result<u64, DataError> {
+    ) -> Result<Locked, DataError> {
         match self {
-            Writer::Direct(data) => data.delete(model, key, scope).await,
-            Writer::Transaction(tx) => tx.delete(model, key, scope).await,
+            Writer::Direct(data) => data.delete_locked(model, key, scope).await,
+            Writer::Transaction(tx) => tx.delete_locked(model, key, scope).await,
         }
     }
 
@@ -287,7 +294,27 @@ impl Admin {
     /// Discovery runs once, here: the entity registry is read out of the
     /// binary and cannot change while the process runs, so reading it per
     /// request would buy nothing.
-    pub fn new(data: SharedData, mut config: AdminConfig) -> Admin {
+    ///
+    /// # Panics
+    ///
+    /// The configuration is not valid; the message says what and ends with
+    /// a `help:` line. [`Admin::try_new`] returns the error instead.
+    pub fn new(data: SharedData, config: AdminConfig) -> Admin {
+        match Admin::try_new(data, config) {
+            Ok(admin) => admin,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// [`Admin::new`], with a configuration error returned rather than
+    /// raised. A server builds its admin with this at startup, so a
+    /// mistake stops the start and not every request.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError::Config`], with a `help:` line.
+    pub fn try_new(data: SharedData, mut config: AdminConfig) -> Result<Admin, AdminError> {
+        let invalid = |message: String| Err(AdminError::Config(message));
         let descriptors = discover(data.registry(), &config.discovery);
         let mut configured = config.take_models();
         let resources = config.take_resources();
@@ -299,21 +326,28 @@ impl Admin {
         for (index, resource) in resources.iter().enumerate() {
             let model = resource.model();
             let Some(descriptor) = descriptors.iter().find(|d| d.key == model) else {
-                panic!(
+                return invalid(format!(
                     "the admin has a row policy for `{model}`, but the data source holds no \
-                     model with that key, or discovery left it out"
-                );
+                     model with that key, or discovery left it out\nhelp: set \
+                     `AdminResource::MODEL` to a model key the admin shows, or check \
+                     `AdminConfig::discovering`"
+                ));
             };
             if descriptor.table != resource.table() {
-                panic!(
+                return invalid(format!(
                     "the admin's row policy for `{model}` is written for table `{}`, but the \
-                     model's table is `{}`",
+                     model's table is `{}`\nhelp: write the policy's `entity … in \"{}\"` for \
+                     the model's own table",
                     resource.table(),
+                    descriptor.table,
                     descriptor.table
-                );
+                ));
             }
             if resources[..index].iter().any(|r| r.model() == model) {
-                panic!("the admin has two row policies for `{model}`");
+                return invalid(format!(
+                    "the admin has two row policies for `{model}`\nhelp: register one \
+                     `AdminConfig::resource` per model"
+                ));
             }
         }
         let entries: Vec<Entry> = descriptors
@@ -340,12 +374,13 @@ impl Admin {
             for action in entry.admin.own_actions() {
                 for column in action.columns() {
                     if entry.descriptor.column(column).is_none() {
-                        panic!(
+                        return invalid(format!(
                             "the admin action `{}` on `{}` sets `{column}`, which is not a column \
-                             of that model",
+                             of that model\nhelp: name a column of `{}` in the action",
                             action.key(),
+                            entry.descriptor.key,
                             entry.descriptor.key
-                        );
+                        ));
                     }
                 }
             }
@@ -355,16 +390,16 @@ impl Admin {
         for entry in &entries {
             let pages = entry.admin.pages();
             for (index, page) in pages.iter().enumerate() {
-                check_page(&entry.descriptor.key, page);
+                check_page(&entry.descriptor.key, page).map_err(AdminError::Config)?;
                 if pages[..index]
                     .iter()
                     .any(|other| other.record == page.record && other.key == page.key)
                 {
-                    panic!(
+                    return invalid(format!(
                         "the admin has two pages called `{}` under `{}`.\nhelp: give each page \
                          its own key",
                         page.key, entry.descriptor.key
-                    );
+                    ));
                 }
             }
         }
@@ -372,31 +407,26 @@ impl Admin {
         // Resolved now, so a misspelt model or an ambiguous column stops the
         // build of the admin and not the first edit form.
         let mut entries = entries;
-        let resolved: Vec<Vec<(String, String)>> = entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .admin
-                    .inlines()
+        let mut resolved: Vec<Vec<(String, String)>> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let inlines = entry.admin.inlines();
+            let mut columns = Vec::with_capacity(inlines.len());
+            for (index, inline) in inlines.iter().enumerate() {
+                if inlines[..index]
                     .iter()
-                    .enumerate()
-                    .map(|(index, inline)| {
-                        if entry.admin.inlines()[..index]
-                            .iter()
-                            .any(|other| other.model == inline.model)
-                        {
-                            panic!(
-                                "the admin has two inlines of `{}` on `{}`.\nhelp: keep one: an \
-                                 inline's rows post under the child model's key, so two would \
-                                 collide",
-                                inline.model, entry.descriptor.key
-                            );
-                        }
-                        resolve_inline(&entries, entry, inline)
-                    })
-                    .collect()
-            })
-            .collect();
+                    .any(|other| other.model == inline.model)
+                {
+                    return invalid(format!(
+                        "the admin has two inlines of `{}` on `{}`.\nhelp: keep one: an \
+                         inline's rows post under the child model's key, so two would \
+                         collide",
+                        inline.model, entry.descriptor.key
+                    ));
+                }
+                columns.push(resolve_inline(&entries, entry, inline).map_err(AdminError::Config)?);
+            }
+            resolved.push(columns);
+        }
         for (entry, columns) in entries.iter_mut().zip(resolved) {
             for (inline, (fk, parent_column)) in entry.admin.inlines_mut().iter_mut().zip(columns) {
                 inline.fk = Some(fk);
@@ -411,13 +441,13 @@ impl Admin {
         // wrong screen. Two modules claiming one path is an error that
         // names both, and a panel shadowing a model is the same mistake.
         if let Some((panel, model)) = collision(&panels, &entries) {
-            panic!(
+            return invalid(format!(
                 "the admin has a panel and a model both called `{panel}`: the panel would \
-                 shadow the model at the same URL. Rename the panel, or hide the model with \
-                 `Discovery::without`. (model discovered as `{model}`)"
-            );
+                 shadow the model at the same URL (model discovered as `{model}`)\nhelp: \
+                 rename the panel, or hide the model with `Discovery::without`"
+            ));
         }
-        Admin {
+        Ok(Admin {
             unscoped_rows,
             data,
             header: config.header.unwrap_or_else(|| config.title.clone()),
@@ -435,7 +465,7 @@ impl Admin {
             actions,
             journal,
             record_links,
-        }
+        })
     }
 
     /// The keys of every panel the admin shows.
@@ -537,12 +567,15 @@ impl Admin {
             term: &query.search,
             columns: &search_columns,
         };
-        let total = self.data.count(descriptor, search, scope).await?;
+        let total = self
+            .source(principal)
+            .count(descriptor, search, scope)
+            .await?;
         let page = admin
             .page_limits()
             .page(query.page, query.per_page, total as u64);
         let rows = self
-            .data
+            .source(principal)
             .list(ListRequest {
                 model: descriptor,
                 offset: usize::try_from(page.offset()).unwrap_or(usize::MAX),
@@ -655,7 +688,11 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::ViewDetail);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let admin = &entry.admin;
@@ -690,7 +727,7 @@ impl Admin {
             .then(|| self.delete_url(model, &record)),
             rows,
             links: {
-                let key = record.to_segment();
+                let key = record.to_text();
                 // The pages under this record first, then the links other
                 // crates add, such as its history.
                 let pages =
@@ -749,7 +786,7 @@ impl Admin {
             return Ok(refused);
         }
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
         self.lock(principal, entry, Write::Create, &mut form);
@@ -785,12 +822,21 @@ impl Admin {
             return Ok(refused);
         }
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, None, &choices);
         self.lock(principal, entry, Write::Create, &mut form);
         form.accept(submission);
-        let valid = form.validate();
+        let mut valid = form.validate();
+        if valid {
+            let refused = self
+                .refused_targets(principal, entry, None, &form.values())
+                .await?;
+            if !refused.is_empty() {
+                form.reject(&refused);
+                valid = false;
+            }
+        }
         let mut built = match self
             .inlines(principal, entry, None, Some(submission))
             .await?
@@ -802,7 +848,8 @@ impl Admin {
             return self.form_page(principal, entry, form, None, sets(built), 422);
         }
         let values = form.values();
-        let mut writer = self.writer(&built).await?;
+        let data = self.source(principal);
+        let mut writer = Admin::writer(data.as_ref(), &built).await?;
         let key = match writer.insert(&entry.descriptor, &values).await {
             Ok(key) => key,
             Err(DataError::Invalid(errors)) => {
@@ -861,11 +908,15 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::Update);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[&row])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
         self.lock(principal, entry, Write::Update, &mut form);
@@ -911,7 +962,7 @@ impl Admin {
             return Ok(refused);
         }
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, &record, pending.scope())
             .await?;
         let Some(row) = found else {
@@ -921,12 +972,21 @@ impl Admin {
             return self.missing(principal);
         };
         let choices = self
-            .choices(principal, &entry.admin, &entry.descriptor)
+            .choices(principal, &entry.admin, &entry.descriptor, &[&row])
             .await?;
         let mut form = Form::build(&entry.descriptor, &entry.admin, Some(&row), &choices);
         self.lock(principal, entry, Write::Update, &mut form);
         form.accept(submission);
-        let valid = form.validate();
+        let mut valid = form.validate();
+        if valid {
+            let refused = self
+                .refused_targets(principal, entry, Some(&row), &form.values())
+                .await?;
+            if !refused.is_empty() {
+                form.reject(&refused);
+                valid = false;
+            }
+        }
         let mut built = match self
             .inlines(principal, entry, Some(&row), Some(submission))
             .await?
@@ -938,13 +998,14 @@ impl Admin {
             return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
         }
         let values = form.values();
-        let mut writer = self.writer(&built).await?;
+        let data = self.source(principal);
+        let mut writer = Admin::writer(data.as_ref(), &built).await?;
         let written = writer
             .update(&entry.descriptor, &record, &values, guard.scope())
             .await;
-        match written.map(|rows| guard.applied(rows)) {
-            Ok(Ok(_)) => {}
-            Ok(Err(_lost)) => {
+        let locked = match written.map(|done| (guard.applied(done.rows), done.before)) {
+            Ok((Ok(_), before)) => before,
+            Ok((Err(_lost), _)) => {
                 writer.rollback().await?;
                 return self.conflict(principal);
             }
@@ -954,13 +1015,16 @@ impl Admin {
                 return self.form_page(principal, entry, form, Some(&record), sets(built), 422);
             }
             Err(other) => return Err(abandon(writer, other).await),
-        }
+        };
+        // The row the write locked, when the source says: the earlier
+        // read may be older.
+        let before = locked.as_ref().unwrap_or(&row);
         let mut told = vec![Told {
             entry,
             key: record.clone(),
-            label: entry.admin.label_for(&entry.descriptor, &row),
+            label: entry.admin.label_for(&entry.descriptor, before),
             kind: Written::Updated,
-            fields: crate::journal::changes(Some(&row), &values),
+            fields: crate::journal::changes(Some(before), &values),
         }];
         let mut after = row.clone();
         for (name, value) in &values {
@@ -999,7 +1063,11 @@ impl Admin {
         let Some(scope) = gate.scope() else {
             return self.refuse(principal, Action::Delete);
         };
-        let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+        let Some(row) = self
+            .source(principal)
+            .fetch(&entry.descriptor, &record, scope)
+            .await?
+        else {
             return self.missing(principal);
         };
         let label = entry.admin.label_for(&entry.descriptor, &row);
@@ -1048,20 +1116,20 @@ impl Admin {
             return self.refuse(principal, Action::Delete);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, &record, pending.scope())
             .await?;
         let Ok(guard) = pending.resolve(usize::from(found.is_some())) else {
             return self.missing(principal);
         };
         let removed = self
-            .data
-            .delete(&entry.descriptor, &record, guard.scope())
+            .source(principal)
+            .delete_locked(&entry.descriptor, &record, guard.scope())
             .await?;
-        if guard.applied(removed).is_err() {
+        if guard.applied(removed.rows).is_err() {
             return self.conflict(principal);
         }
-        if let Some(row) = &found {
+        if let Some(row) = removed.before.as_ref().or(found.as_ref()) {
             let label = entry.admin.label_for(&entry.descriptor, row);
             let fields = crate::journal::removed(row);
             self.tell(principal, entry, &record, &label, Written::Deleted, &fields);
@@ -1149,6 +1217,10 @@ impl Admin {
             return self.refuse(principal, Action::ActOnPanel);
         }
         let mount = self.panel_url(key);
+        let reader = Reader {
+            admin: self,
+            principal,
+        };
         let request = PanelRequest {
             path: rest,
             query,
@@ -1156,6 +1228,7 @@ impl Admin {
             can_act,
             submission,
             mount: &mount,
+            access: Some(&reader),
         };
         match panel.render(request).await? {
             // The panel's own 404, rendered as the admin's, so a panel does
@@ -1266,7 +1339,11 @@ impl Admin {
                 let Some(scope) = gate.scope() else {
                     return self.refuse(principal, Action::ViewDetail);
                 };
-                let Some(row) = self.data.fetch(&entry.descriptor, &record, scope).await? else {
+                let Some(row) = self
+                    .source(principal)
+                    .fetch(&entry.descriptor, &record, scope)
+                    .await?
+                else {
                     return self.missing(principal);
                 };
                 let screen = entry.admin.allows_update()
@@ -1289,6 +1366,10 @@ impl Admin {
         if route.post && !can_act {
             return self.refuse(principal, Action::Update);
         }
+        let reader = Reader {
+            admin: self,
+            principal,
+        };
         let cx = PageCx {
             admin: self,
             model,
@@ -1300,6 +1381,7 @@ impl Admin {
                 can_act,
                 submission,
                 mount: &mount,
+                access: Some(&reader),
             },
             key: record.as_ref().map(|(key, _)| key),
             record: record.as_ref().map(|(_, row)| row),
@@ -1715,8 +1797,48 @@ impl Admin {
                     Request::new(Action::Create, &child.descriptor.key),
                 )
                 && self.creates(principal, child);
+
+            // The existing children, read under the child's list rule with
+            // the parent's key in the query.
+            let mut existing = Vec::new();
+            let mut more = false;
+            if let Some(value) = &parent_value {
+                let gate = self.gate(principal, child, RowAction::List)?;
+                let Some(scope) = gate.scope() else {
+                    return self.refuse(principal, Action::ViewList).map(Err);
+                };
+                let sort =
+                    child
+                        .descriptor
+                        .key_columns()
+                        .first()
+                        .map(|column| crate::query::Sort {
+                            column: column.name.clone(),
+                            direction: Direction::Ascending,
+                        });
+                let mut rows = self
+                    .source(principal)
+                    .list(ListRequest {
+                        model: &child.descriptor,
+                        offset: 0,
+                        limit: inline.max + 1,
+                        search: Search {
+                            term: "",
+                            columns: &[],
+                        },
+                        sort: sort.as_ref(),
+                        filter: Some(Equals { column: fk, value }),
+                        scope,
+                    })
+                    .await?;
+                more = rows.len() > inline.max;
+                rows.truncate(inline.max);
+                existing = rows;
+            }
+
+            let current: Vec<&Row> = existing.iter().collect();
             let choices = self
-                .choices(principal, &child.admin, &child.descriptor)
+                .choices(principal, &child.admin, &child.descriptor, &current)
                 .await?;
             let names: Vec<String> = match inline.fields.is_empty() {
                 true => child
@@ -1746,44 +1868,6 @@ impl Admin {
                 self.lock(principal, child, write, &mut form);
                 form
             };
-
-            // The existing children, read under the child's list rule with
-            // the parent's key in the query.
-            let mut existing = Vec::new();
-            let mut more = false;
-            if let Some(value) = &parent_value {
-                let gate = self.gate(principal, child, RowAction::List)?;
-                let Some(scope) = gate.scope() else {
-                    return self.refuse(principal, Action::ViewList).map(Err);
-                };
-                let sort =
-                    child
-                        .descriptor
-                        .key_columns()
-                        .first()
-                        .map(|column| crate::query::Sort {
-                            column: column.name.clone(),
-                            direction: Direction::Ascending,
-                        });
-                let mut rows = self
-                    .data
-                    .list(ListRequest {
-                        model: &child.descriptor,
-                        offset: 0,
-                        limit: inline.max + 1,
-                        search: Search {
-                            term: "",
-                            columns: &[],
-                        },
-                        sort: sort.as_ref(),
-                        filter: Some(Equals { column: fk, value }),
-                        scope,
-                    })
-                    .await?;
-                more = rows.len() > inline.max;
-                rows.truncate(inline.max);
-                existing = rows;
-            }
 
             let mut rows: Vec<InlineRow> = Vec::new();
             let mut befores: Vec<Option<(PrimaryKey, Row)>> = Vec::new();
@@ -1892,6 +1976,13 @@ impl Admin {
                         if !changed(&before, &values) {
                             continue;
                         }
+                        let refused = self
+                            .refused_targets(principal, child, Some(&before), &values)
+                            .await?;
+                        if !refused.is_empty() {
+                            rows[at].form.reject(&refused);
+                            continue;
+                        }
                         match self
                             .admit(
                                 principal,
@@ -1935,7 +2026,16 @@ impl Admin {
                         }
                         let mut form = build(None);
                         form.accept(&row.fields);
-                        let valid = form.validate();
+                        let mut valid = form.validate();
+                        if valid {
+                            let refused = self
+                                .refused_targets(principal, child, None, &form.values())
+                                .await?;
+                            if !refused.is_empty() {
+                                form.reject(&refused);
+                                valid = false;
+                            }
+                        }
                         let at = rows.len();
                         if valid {
                             ops.push(Op::Insert {
@@ -2008,7 +2108,7 @@ impl Admin {
             return Ok(false);
         };
         Ok(self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, scope)
             .await?
             .is_some())
@@ -2030,7 +2130,7 @@ impl Admin {
             return Ok(None);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&child.descriptor, key, pending.scope())
             .await?;
         let belongs = found
@@ -2045,11 +2145,22 @@ impl Admin {
     /// Where a save writes. A save with inline writes opens one
     /// transaction, so the parent and its children are kept together or not
     /// at all. A save of one row writes straight to the data source.
-    async fn writer(&self, built: &[Built<'_>]) -> Result<Writer<'_>, DataError> {
+    async fn writer<'d>(
+        data: &'d dyn AdminData,
+        built: &[Built<'_>],
+    ) -> Result<Writer<'d>, DataError> {
         if built.iter().all(|b| b.ops.is_empty()) {
-            return Ok(Writer::Direct(self.data.as_ref()));
+            return Ok(Writer::Direct(data));
         }
-        Ok(Writer::Transaction(self.data.begin().await?))
+        Ok(Writer::Transaction(data.begin().await?))
+    }
+
+    /// The source this principal's request reads and writes through:
+    /// [`AdminData::for_request`], or the admin's own.
+    fn source(&self, principal: Principal<'_>) -> SharedData {
+        self.data
+            .for_request(&crate::data::RequestCx::new(principal))
+            .unwrap_or_else(|| Arc::clone(&self.data))
     }
 
     /// Runs the inline writes after the parent's own, then keeps or
@@ -2109,10 +2220,11 @@ impl Admin {
                         let removed = writer
                             .delete(&child.descriptor, &key, guard.scope())
                             .await?;
-                        if guard.applied(removed).is_err() {
+                        if guard.applied(removed.rows).is_err() {
                             built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
                             return Ok(false);
                         }
+                        let before = removed.before.unwrap_or(before);
                         told.push(Told {
                             entry: child,
                             label: child.admin.label_for(&child.descriptor, &before),
@@ -2131,15 +2243,18 @@ impl Admin {
                         let written = writer
                             .update(&child.descriptor, &key, &values, guard.scope())
                             .await;
-                        match written.map(|rows| guard.applied(rows)) {
-                            Ok(Ok(_)) => told.push(Told {
-                                entry: child,
-                                label: child.admin.label_for(&child.descriptor, &before),
-                                fields: crate::journal::changes(Some(&before), &values),
-                                kind: Written::Updated,
-                                key,
-                            }),
-                            Ok(Err(_lost)) => {
+                        match written.map(|done| (guard.applied(done.rows), done.before)) {
+                            Ok((Ok(_), locked)) => {
+                                let before = locked.unwrap_or(before);
+                                told.push(Told {
+                                    entry: child,
+                                    label: child.admin.label_for(&child.descriptor, &before),
+                                    fields: crate::journal::changes(Some(&before), &values),
+                                    kind: Written::Updated,
+                                    key,
+                                })
+                            }
+                            Ok((Err(_lost), _)) => {
                                 built.set.rows[row].form.add_error(CHANGED_MEANWHILE);
                                 return Ok(false);
                             }
@@ -2187,12 +2302,20 @@ impl Admin {
     /// a configuration decision, and the data layer has no idea.
     ///
     /// The options are read under the **target** model's list rule, so a
-    /// picker never offers a record this person may not list.
+    /// picker never offers a record this person may not list. They are in
+    /// key order, so the first `choices_shown` are the same on every form.
+    ///
+    /// The value each row in `current` holds is always an option, past the
+    /// limit too: a picker without it would select another record, or
+    /// none, and a save of an unrelated field would change the relation.
+    /// Its label is read under the target's view rule; a target this
+    /// person may not view shows its stored value.
     async fn choices(
         &self,
         principal: Principal<'_>,
         admin: &ModelAdmin,
         descriptor: &ModelDescriptor,
+        current: &[&Row],
     ) -> Result<Vec<(String, Vec<Choice>)>, AdminError> {
         let mut out = Vec::new();
         for column in admin.form_for(descriptor) {
@@ -2207,8 +2330,12 @@ impl Admin {
                 continue;
             };
             let limit = target.admin.choices_shown();
+            let sort = crate::query::Sort {
+                column: relation.target_column.clone(),
+                direction: Direction::Ascending,
+            };
             let rows = self
-                .data
+                .source(principal)
                 .list(ListRequest {
                     model: &target.descriptor,
                     offset: 0,
@@ -2217,12 +2344,12 @@ impl Admin {
                         term: "",
                         columns: &[],
                     },
-                    sort: None,
+                    sort: Some(&sort),
                     filter: None,
                     scope,
                 })
                 .await?;
-            let choices = rows
+            let mut choices: Vec<Choice> = rows
                 .iter()
                 .filter_map(|row| {
                     let value = row.get(&relation.target_column)?;
@@ -2232,9 +2359,108 @@ impl Admin {
                     ))
                 })
                 .collect();
+            let mut missing: Vec<String> = Vec::new();
+            for row in current {
+                let Some(value) = row.get(&column.name).filter(|v| !v.is_null()) else {
+                    continue;
+                };
+                let text = value.as_input();
+                if !choices.iter().any(|c| c.value == text) && !missing.contains(&text) {
+                    missing.push(text);
+                }
+            }
+            if !missing.is_empty() {
+                let view = self.gate(principal, target, RowAction::View)?;
+                let found = match view.scope() {
+                    Some(scope) => {
+                        self.source(principal)
+                            .fetch_many(
+                                &target.descriptor,
+                                &relation.target_column,
+                                &missing,
+                                scope,
+                            )
+                            .await?
+                    }
+                    None => Vec::new(),
+                };
+                for text in missing {
+                    let label = found
+                        .iter()
+                        .find(|row| {
+                            row.get(&relation.target_column)
+                                .is_some_and(|v| v.as_input() == text)
+                        })
+                        .map_or_else(
+                            || text.clone(),
+                            |row| target.admin.label_for(&target.descriptor, row),
+                        );
+                    choices.push(Choice::new(text, label));
+                }
+            }
             out.push((column.name.clone(), choices));
         }
         Ok(out)
+    }
+
+    /// The foreign-key values of a write that point at a record this person
+    /// may not pick, as field errors.
+    ///
+    /// The picker offers only rows the target's list rule admits, but a
+    /// POST can send any value. Each submitted value is read under that
+    /// same rule, and one it does not find is refused beside its field. A
+    /// value the row already held is kept without a read: changing another
+    /// field must not fail because the current target is hidden.
+    async fn refused_targets(
+        &self,
+        principal: Principal<'_>,
+        entry: &Entry,
+        before: Option<&Row>,
+        values: &[(String, Value)],
+    ) -> Result<FieldErrors, AdminError> {
+        let mut errors = FieldErrors::new();
+        for (name, value) in values {
+            if value.is_null() {
+                continue;
+            }
+            let Some(column) = entry.descriptor.column(name) else {
+                continue;
+            };
+            let Some(relation) = entry.admin.relation_for(column) else {
+                continue;
+            };
+            let Some(target) = self.entry(&relation.target) else {
+                continue;
+            };
+            let text = value.as_input();
+            let held = before
+                .and_then(|row| row.get(name))
+                .is_some_and(|stored| stored.as_input() == text);
+            if held {
+                continue;
+            }
+            let gate = self.gate(principal, target, RowAction::List)?;
+            if matches!(gate, Gate::Unscoped) {
+                continue;
+            }
+            let found = match gate.scope() {
+                Some(scope) => !self
+                    .source(principal)
+                    .fetch_many(
+                        &target.descriptor,
+                        &relation.target_column,
+                        std::slice::from_ref(&text),
+                        scope,
+                    )
+                    .await?
+                    .is_empty(),
+                None => false,
+            };
+            if !found {
+                errors.add(name.clone(), "is not a record you may choose");
+            }
+        }
+        Ok(errors)
     }
 
     /// Resolves every foreign key appearing in `rows` to a label.
@@ -2264,6 +2490,9 @@ impl Admin {
             let Some(scope) = gate.scope() else {
                 continue;
             };
+            // One read per column, not per row: every distinct value the
+            // page holds that no earlier column resolved.
+            let mut keys: Vec<String> = Vec::new();
             for row in rows {
                 let Some(value) = row.get(&column.name) else {
                     continue;
@@ -2272,14 +2501,26 @@ impl Admin {
                     continue;
                 }
                 let text = value.as_input();
-                let slot = (relation.target.clone(), text.clone());
-                if out.contains_key(&slot) {
+                if out.contains_key(&(relation.target.clone(), text.clone()))
+                    || keys.contains(&text)
+                {
                     continue;
                 }
-                let key = PrimaryKey::single(&relation.target_column, &text);
-                if let Some(found) = self.data.fetch(&target.descriptor, &key, scope).await? {
-                    out.insert(slot, target.admin.label_for(&target.descriptor, &found));
-                }
+                keys.push(text);
+            }
+            if keys.is_empty() {
+                continue;
+            }
+            let found = self
+                .source(principal)
+                .fetch_many(&target.descriptor, &relation.target_column, &keys, scope)
+                .await?;
+            for row in found {
+                let Some(value) = row.get(&relation.target_column) else {
+                    continue;
+                };
+                let slot = (relation.target.clone(), value.as_input());
+                out.insert(slot, target.admin.label_for(&target.descriptor, &row));
             }
         }
         Ok(out)
@@ -2529,7 +2770,11 @@ impl Admin {
                 skipped += 1;
                 continue;
             }
-            match self.data.fetch(&entry.descriptor, &record, scope).await? {
+            match self
+                .source(principal)
+                .fetch(&entry.descriptor, &record, scope)
+                .await?
+            {
                 Some(row) => selected.push(Selected {
                     label: entry.admin.label_for(&entry.descriptor, &row),
                     key: record,
@@ -2619,7 +2864,14 @@ impl Admin {
             return;
         };
         let who = self.user_label.as_ref().and_then(|name| name(&principal));
-        let key = key.to_segment();
+        let key = key.to_text();
+        // An excluded column is kept out of every screen, so its values are
+        // kept out of the journal too: a delete reads the whole row.
+        let fields: Vec<FieldChange> = fields
+            .iter()
+            .filter(|f| !entry.admin.is_excluded(&f.name))
+            .cloned()
+            .collect();
         journal.record(&AdminWrite {
             who: who.as_deref(),
             model: &entry.descriptor.key,
@@ -2627,7 +2879,7 @@ impl Admin {
             key: &key,
             label,
             kind,
-            fields,
+            fields: &fields,
         });
     }
 
@@ -2802,7 +3054,7 @@ impl Admin {
             return Ok(false);
         };
         let Some(row) = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, pending.scope())
             .await?
         else {
@@ -2811,18 +3063,19 @@ impl Admin {
         let Ok(guard) = pending.resolve(1) else {
             return Ok(false);
         };
-        let rows = match self
-            .data
-            .update(&entry.descriptor, key, values, guard.scope())
+        let done = match self
+            .source(principal)
+            .update_locked(&entry.descriptor, key, values, guard.scope())
             .await
         {
-            Ok(rows) => rows,
+            Ok(done) => done,
             Err(DataError::Invalid(_)) => return Ok(false),
             Err(other) => return Err(other.into()),
         };
-        if guard.applied(rows).is_err() {
+        if guard.applied(done.rows).is_err() {
             return Ok(false);
         }
+        let row = done.before.unwrap_or(row);
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::changes(Some(&row), values);
         self.tell(principal, entry, key, &label, Written::Updated, &fields);
@@ -2853,7 +3106,7 @@ impl Admin {
             return Ok(false);
         };
         let found = self
-            .data
+            .source(principal)
             .fetch(&entry.descriptor, key, pending.scope())
             .await?;
         let Some(row) = found else {
@@ -2863,12 +3116,13 @@ impl Admin {
             return Ok(false);
         };
         let removed = self
-            .data
-            .delete(&entry.descriptor, key, guard.scope())
+            .source(principal)
+            .delete_locked(&entry.descriptor, key, guard.scope())
             .await?;
-        if guard.applied(removed).is_err() {
+        if guard.applied(removed.rows).is_err() {
             return Ok(false);
         }
+        let row = removed.before.unwrap_or(row);
         let label = entry.admin.label_for(&entry.descriptor, &row);
         let fields = crate::journal::removed(&row);
         self.tell(principal, entry, key, &label, Written::Deleted, &fields);
@@ -2980,39 +3234,44 @@ struct PageRoute<'a> {
 
 /// Refuses a page key that is empty, holds a slash, or is a segment the
 /// admin's own screens use at that place.
-fn check_page(model: &str, page: &crate::config::ModelPage) {
+fn check_page(model: &str, page: &crate::config::ModelPage) -> Result<(), String> {
     let key = page.key.as_str();
     let (method, reserved): (&str, &[&str]) = match page.record {
         false => ("page", &["new", "actions"]),
         true => ("record_page", &["edit", "delete"]),
     };
     if key.is_empty() || key.contains('/') {
-        panic!(
+        return Err(format!(
             "the admin's page `{key}` under `{model}` is not one path segment.\nhelp: give \
              `ModelAdmin::{method}` a key with no slash, such as `report`"
-        );
+        ));
     }
     if reserved.contains(&key) {
-        panic!(
+        return Err(format!(
             "the admin's page `{key}` under `{model}` takes a path the admin uses.\nhelp: \
              `ModelAdmin::{method}` cannot use {}; choose another key",
             reserved.join(" or ")
-        );
+        ));
     }
+    Ok(())
 }
 
 /// The child column an inline reads and the parent column it holds.
 ///
-/// Panics with a `help:` line when the child is not shown or no single
+/// An error with a `help:` line when the child is not shown or no single
 /// column points at the parent.
-fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String, String) {
+fn resolve_inline(
+    entries: &[Entry],
+    parent: &Entry,
+    inline: &Inline,
+) -> Result<(String, String), String> {
     let parent_key = &parent.descriptor.key;
     let Some(child) = entries.iter().find(|e| e.descriptor.key == inline.model) else {
-        panic!(
+        return Err(format!(
             "the admin's inline `{}` on `{parent_key}` names no model the admin shows.\nhelp: \
              use the key of a discovered model that is not hidden",
             inline.model
-        );
+        ));
     };
     let points_here = |column: &ColumnDescriptor| {
         child
@@ -3024,12 +3283,12 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
     match &inline.fk {
         Some(name) => {
             let Some(column) = child.descriptor.column(name) else {
-                panic!(
+                return Err(format!(
                     "the admin's inline `{}` on `{parent_key}` names `{name}`, which is not a \
                      column of `{}`.\nhelp: name the column of `{}` that holds the `{parent_key}` \
                      key",
                     inline.model, inline.model, inline.model
-                );
+                ));
             };
             // A column the schema does not relate holds the parent's one
             // key column.
@@ -3043,14 +3302,14 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
                 }
             });
             let Some(parent_column) = parent_column else {
-                panic!(
+                return Err(format!(
                     "the admin's inline `{}` on `{parent_key}` reads `{name}`, which points at \
                      another model.\nhelp: name the column of `{}` that holds the `{parent_key}` \
                      key",
                     inline.model, inline.model
-                );
+                ));
             };
-            (name.clone(), parent_column)
+            Ok((name.clone(), parent_column))
         }
         None => {
             let found: Vec<(String, String)> = child
@@ -3062,20 +3321,61 @@ fn resolve_inline(entries: &[Entry], parent: &Entry, inline: &Inline) -> (String
                 })
                 .collect();
             match found.as_slice() {
-                [one] => one.clone(),
-                [] => panic!(
+                [one] => Ok(one.clone()),
+                [] => Err(format!(
                     "the admin's inline `{}` on `{parent_key}` found no column of `{}` that \
                      points at `{parent_key}`.\nhelp: name it with `Inline::fk`, or declare the \
                      relation with `ModelAdmin::foreign_key`",
                     inline.model, inline.model
-                ),
-                _ => panic!(
+                )),
+                _ => Err(format!(
                     "the admin's inline `{}` on `{parent_key}` found more than one column of `{}` \
                      that points at `{parent_key}`.\nhelp: name the one to use with `Inline::fk`",
                     inline.model, inline.model
-                ),
+                )),
             }
         }
+    }
+}
+
+/// The admin's answer to [`RecordAccess`] for one principal.
+struct Reader<'a> {
+    admin: &'a Admin,
+    principal: Principal<'a>,
+}
+
+#[async_trait::async_trait]
+impl RecordAccess for Reader<'_> {
+    async fn may_read(&self, table: &str, key: &str) -> bool {
+        let admin = self.admin;
+        let Some(entry) = admin.entries.iter().find(|e| e.descriptor.table == table) else {
+            return false;
+        };
+        let columns = entry.descriptor.key_columns();
+        let parts: Vec<&str> = match columns.len() {
+            1 => vec![key],
+            _ => key.split(',').collect(),
+        };
+        if columns.is_empty() || parts.len() != columns.len() {
+            return false;
+        }
+        let record = PrimaryKey::from_parts(
+            columns
+                .iter()
+                .zip(parts)
+                .map(|(c, v)| (c.name.clone(), v.to_string())),
+        );
+        let model = &entry.descriptor.key;
+        if !admin.allows(
+            self.principal,
+            Request::on(Action::ViewDetail, model, &record),
+        ) {
+            return false;
+        }
+        admin
+            .admits(self.principal, entry, RowAction::View, &record)
+            .await
+            .unwrap_or(false)
     }
 }
 
