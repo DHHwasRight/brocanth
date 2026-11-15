@@ -421,6 +421,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
             )]);
         }
         let answers = chooser(ui, args, local)?;
+        check_title(&answers.title)?;
         selection(&answers.picks, Door::Create)?;
         return Ok(answers);
     }
@@ -431,6 +432,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
         .title
         .clone()
         .unwrap_or_else(|| crate::ui::title_case(&name));
+    check_title(&title)?;
 
     Ok(Answers {
         name,
@@ -800,6 +802,40 @@ fn check_name(name: &str) -> Result<(), Vec<Diagnostic>> {
             .help("lowercase letters, digits, - and _, starting with a letter")]),
         None => Ok(()),
     }
+}
+
+/// The title goes into `//!` comments, a Dockerfile comment and HTML. A
+/// newline or another control character would end the comment and leave
+/// the rest of the title as code, so it is refused here, once.
+fn check_title(title: &str) -> Result<(), Vec<Diagnostic>> {
+    if title.chars().any(char::is_control) {
+        return Err(vec![Diagnostic::error(
+            "title",
+            format!("{title:?} contains a newline or another control character"),
+        )
+        .help("pass a title on one line, without tabs: `--title 'My Blog'`")]);
+    }
+    Ok(())
+}
+
+/// `title` as text inside a Rust string literal that is HTML: `&`, `<`, `>`
+/// and `"` as entities, and `\` doubled. With `format`, `{` and `}` are
+/// doubled too, for a literal that is a `format!` string.
+fn title_in_literal(title: &str, format: bool) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\\' => out.push_str("\\\\"),
+            '{' if format => out.push_str("{{"),
+            '}' if format => out.push_str("}}"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
@@ -3736,7 +3772,7 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
          <li><a href=\"/users/7\">/users/7</a></li></ul>")
 }}
 "##,
-        title = a.title
+        title = title_in_literal(&a.title, false)
     )
 }
 
@@ -3791,7 +3827,7 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {{
     }})
 }}
 "##,
-        title = a.title
+        title = title_in_literal(&a.title, true)
     )
 }
 
@@ -6586,6 +6622,33 @@ mod tests {
             answers.as_flags(),
             "brocanth create my_app --title 'My App' --core-only --no-git"
         );
+    }
+
+    #[test]
+    fn a_title_is_escaped_for_the_literal_and_the_html_it_lands_in() {
+        let mut a = answers(&[]);
+        a.title = r#"Say "hi" {x} <b> \ & co"#.to_string();
+        // A plain literal: a quote is an entity, a backslash is doubled, a
+        // brace stays as it is.
+        let index = index_rs(&a);
+        assert!(
+            index.contains(r#"<h1>Say &quot;hi&quot; {x} &lt;b&gt; \\ &amp; co</h1>"#),
+            "{index}"
+        );
+        // A `format!` string: the braces are doubled as well.
+        let about = about_rs(&a);
+        assert!(
+            about.contains(r#"About \u{b7} Say &quot;hi&quot; {{x}} &lt;b&gt; \\ &amp; co"#),
+            "{about}"
+        );
+        // A newline would end a `//!` comment and turn the rest into code.
+        let refused = check_title("one\ntwo").expect_err("a newline is refused");
+        assert!(
+            refused[0].render().contains("help:"),
+            "{}",
+            refused[0].render()
+        );
+        assert!(check_title("it's {fine} <here>").is_ok());
     }
 
     #[test]
