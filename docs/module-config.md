@@ -776,23 +776,24 @@ for such a rename and prints the line to delete before it writes anything.
 
 ### Interaction with `brocanth remove` and module versions
 
-Another agent builds `brocanth remove` and module versions now. This
-design asks for the following, and builds none of it:
+`brocanth remove` exists (`crates/brocanth-cli/src/commands/remove.rs`).
+`docs/modules.md` §7, "Removing from a project", gives its rules. What it
+does with the files this design adds:
 
-- **`remove <key>` and the module file.** An unedited file (byte equal to
-  what the generator writes for the recorded version) is deleted. An
-  edited file stays, out of `mod.rs`, so it does not compile. `remove`
-  says: `kept src/modules/analytics.rs: your choices return with brocanth add analytics`.
-  `add` writes a file only when it is missing, so a re-add picks the old
-  choices up. This is item 1 of the module-system list in
-  `docs/module-catalog.md`: a rename survives a remove and a re-add.
+- **`remove <key>` and the module file.** An unedited module file is
+  deleted. An edited one stays, out of `src/modules/mod.rs`, so nothing
+  compiles it. `add` writes a module file only when it is missing, so a
+  re-add picks the old choices up: a rename survives a remove and a
+  re-add.
 - **`remove <host>`.** A guest's `integrate.<host>` stays and does
-  nothing. `remove` rewrites `src/plugins/mod.rs`, so `admin_panels` goes.
-- **Versions.** `brocanth.toml` records the version of each module. `add`
-  and an upgrade compare the old and the new `Manifest::hook`,
-  `integration` and `option` lists, and print each new or dropped field.
-  The module file can carry the version that wrote it in its header, for
-  the "unedited" test above.
+  nothing. `remove` generates every other module again, so `admin_panels`
+  and the other host slots lose the guest's lines.
+- **Versions.** Not built. The design still asks for this: `brocanth.toml`
+  records the version of each module, and `add` and an upgrade compare the
+  old and the new `Manifest::hook`, `integration` and `option` lists and
+  print each new or dropped field. Until then, a template change makes an
+  untouched file read as edited, and `add` refuses with the diff
+  (`docs/modules.md` §7).
 
 ## 5. Which file answers which question
 
