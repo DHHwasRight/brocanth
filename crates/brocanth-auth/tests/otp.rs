@@ -192,7 +192,8 @@ async fn wrong_codes_count_per_account_across_challenges() {
     // After the window, a fresh challenge works again.
     f.clock.advance(SECOND_FACTOR_WINDOW + 1);
     let (challenge, code) = sent(&otp.request("ada@example.com").await.unwrap());
-    otp.authenticate(&challenge, code.as_str())
+    let _proof = otp
+        .authenticate(&challenge, code.as_str())
         .await
         .expect("the window is over");
 }

@@ -537,10 +537,12 @@ async fn wrong_second_factor_codes_are_capped_per_account() {
     // When the window is over, the next right code works and clears the count.
     f.clock.advance(SECOND_FACTOR_WINDOW + 1);
     let right = mfa.totp().code_at(&enrolment.secret, f.clock.now());
-    mfa.verify_totp(&account, &right)
+    let _proof = mfa
+        .verify_totp(&account, &right)
         .await
         .expect("a right code");
-    mfa.verify_recovery_code(&account, &recovery)
+    let _spent = mfa
+        .verify_recovery_code(&account, &recovery)
         .await
         .expect("the recovery code was not spent while refused");
 }
@@ -569,7 +571,8 @@ async fn a_sealed_totp_secret_is_not_in_the_store_and_still_signs_in() {
     let err = f.mfa().verify_totp(&account, &next).await.unwrap_err();
     assert!(err.to_string().contains("help:"), "{err}");
     // With it, the code signs in.
-    f.mfa()
+    let _proof = f
+        .mfa()
         .sealing_secrets_with(key)
         .verify_totp(&account, &next)
         .await
