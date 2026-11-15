@@ -34,7 +34,7 @@ zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the
 brocanth-client = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["compression", "config"] }
 brocanth-gtag = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "i18n"] }
-brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod"] }
+brocanth-openapi = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["zod", "admin"] }
 brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
@@ -2599,6 +2599,10 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // confirmation page. A model leaves it off with
     // `m.without_action("delete_selected")` in src/plugins/admin/mod.rs.
     config = config.action(brocanth_admin::actions::BulkAction::delete_selected());
+    // The OpenAPI document, as a read-only tab.
+    if crate::modules::openapi::MODULE.integrate.admin {
+        config = config.panel(brocanth_openapi::admin::ApiPanel::installed());
+    }
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
@@ -4034,6 +4038,15 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "webhooks_out.keep_days",
+        help: "Days a delivered or failed delivery stays in the log. 0 keeps it.",
+        flag: true,
+        file: "src/modules/webhooks_out.rs",
+        flags: crate::modules::webhooks_out::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "errors.details",
         help: "Show the cause of a 500 in a debug build. A release build never shows it.",
         flag: true,
@@ -4862,6 +4875,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "webhooks_out.allow_private",
             format!("{:?}", webhooks_out.allow_private),
         ),
+        (
+            "webhooks_out.keep_days",
+            format!("{:?}", webhooks_out.keep_days),
+        ),
         ("errors.details", format!("{:?}", errors.details)),
         (
             "conditional_get.etag",
@@ -5079,7 +5096,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: d68642324d334687
+// brocanth-digest: 36a673552141e9bb
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6607,12 +6624,27 @@ pub mod openapi {
         }
     }
 
+    /// The code `openapi` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: an `API` tab in the admin, with every operation; the admin
+        /// routes stay out of the document.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
     /// What src/modules/openapi.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// The code written into another module.
+        pub integrate: Integrate,
     }
 
     impl Module {
@@ -6620,6 +6652,7 @@ pub mod openapi {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            integrate: Integrate::DEFAULT,
         };
     }
 }
@@ -6811,6 +6844,7 @@ pub mod webhooks_out {
         Concurrency,
         TimeoutSecs,
         AllowPrivate,
+        KeepDays,
     }
 
     impl Key {
@@ -6822,6 +6856,7 @@ pub mod webhooks_out {
                 Key::Concurrency => "webhooks_out.concurrency",
                 Key::TimeoutSecs => "webhooks_out.timeout_secs",
                 Key::AllowPrivate => "webhooks_out.allow_private",
+                Key::KeepDays => "webhooks_out.keep_days",
             }
         }
     }
@@ -7440,7 +7475,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: b11a6128b6681c98
+// brocanth-digest: c58e8fcc034c2882
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -8666,7 +8701,7 @@ pub const MODULE: Module = Module {
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::openapi::{Flag, Flags, Key, Module};
+use crate::plugins::shape::openapi::{Flag, Flags, Integrate, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -8681,6 +8716,13 @@ pub const MODULE: Module = Module {
     //   (Key::Title, Flag::As("title")),
     //   (Key::Title, Flag::Hidden),
     rename: &[],
+
+    integrate: Integrate {
+        // An `API` tab in the admin, with every operation; the admin routes stay
+        // out of the document. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
 
     ..Module::DEFAULT
 };
@@ -8840,7 +8882,7 @@ pub const MODULE: Module = Module {
 };
 ===== src/modules/webhooks_out.rs =====
 //! `webhooks-out`: signed outgoing webhooks: endpoints and a delivery log in
-//! Postgres, retries through jobs.
+//! Postgres, retries on a Postgres queue.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -9805,9 +9847,9 @@ tolerance = 300
 # The largest delivery accepted, in bytes.
 max_bytes = 1048576
 # The `example` source's Standard Webhooks secret.
-# Development only. Replace it with the secret the sender shows you, in
-# the environment or this file. No flag sets it: a flag is readable by
-# every user on the host.
+# Development only: outside development the start refuses this value.
+# Replace it with the secret the sender shows you, in the environment or
+# this file. No flag sets it: a flag is readable by every user on the host.
 secret = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ=="
 # Create the idempotency table on the first readiness check.
 # Off, for a project that keeps brocanth_webhooks::PgSeen::SCHEMA in a migration.
@@ -9925,6 +9967,8 @@ timeout_secs = 10
 # often on this machine. Production reads the default, false: a webhook URL
 # is chosen by whoever registers it, and this stops it reaching your network.
 allow_private = true
+# Days a delivered or failed delivery stays in the log. 0 keeps it.
+keep_days = 30
 
 [errors]
 # Show the cause of a 500 in a debug build. A release build never shows it.
@@ -12061,8 +12105,9 @@ pub fn NotFound(caught: &Caught) -> Element {
 //! extension and what is left is the path, so this file answers
 //! `/openapi.json` and renaming it moves the document.
 //!
-//! The body was rendered once, at startup, by `src/plugins/openapi/mod.rs`.
-//! This page hands it out and does nothing else.
+//! The body was rendered once, at startup, by `src/plugins/openapi/mod.rs`,
+//! which puts it in the request context. This page hands it out and does
+//! nothing else.
 
 use crate::pages::{Ctx, Error, IntoResponse};
 
@@ -12071,12 +12116,17 @@ use crate::pages::{Ctx, Error, IntoResponse};
 /// `no-cache` rather than a long max-age: the document changes when this
 /// application is redeployed, and a client holding a stale one is the exact
 /// failure a derived document exists to prevent.
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let body = crate::plugins::openapi::json().ok_or_else(|| {
-        Error::internal("the openapi plugin is not registered, so there is no document to serve")
-    })?;
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let rendered = ctx
+        .provided::<crate::plugins::openapi::Rendered, _>()
+        .ok_or_else(|| {
+            Error::internal(
+                "the openapi plugin is not registered, so there is no document to serve\n\
+                 help: register crate::plugins::openapi::OpenApi in src/plugins/mod.rs",
+            )
+        })?;
     Ok((
-        body.to_string(),
+        rendered.json().to_string(),
         200,
         vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -12098,12 +12148,17 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 use crate::pages::{Ctx, Error, IntoResponse};
 
 /// GET `/openapi.yaml`.
-pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
-    let body = crate::plugins::openapi::yaml().ok_or_else(|| {
-        Error::internal("the openapi plugin is not registered, so there is no document to serve")
-    })?;
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let rendered = ctx
+        .provided::<crate::plugins::openapi::Rendered, _>()
+        .ok_or_else(|| {
+            Error::internal(
+                "the openapi plugin is not registered, so there is no document to serve\n\
+                 help: register crate::plugins::openapi::OpenApi in src/plugins/mod.rs",
+            )
+        })?;
     Ok((
-        body.to_string(),
+        rendered.yaml().to_string(),
         200,
         vec![
             ("content-type".to_string(), "application/yaml".to_string()),
@@ -15472,13 +15527,15 @@ impl From<MailError> for DeliverError {
     }
 }
 
-/// The mail the worker sends, set once when the plugin is built.
-static SENDER: OnceLock<Mail> = OnceLock::new();
-
 /// One message, sent from the `mail` queue.
 ///
 /// The message is checked again when the worker reads it back: a row that
 /// was edited in the table cannot carry a newline into a header.
+///
+/// The payload is the whole message, links included. So the last attempt
+/// does not fail into the dead letter, where it would wait with its links
+/// until someone discards it: it logs the recipients and the subject, and
+/// ends the job.
 #[derive(Serialize, Deserialize)]
 pub struct DeliverMail {
     pub message: Message,
@@ -15489,11 +15546,28 @@ impl Job for DeliverMail {
     const QUEUE: &'static str = "mail";
     type Error = MailError;
 
-    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
-        let mail = SENDER
-            .get()
-            .ok_or_else(|| MailError::transport("the mail plugin was not built in this process"))?;
-        mail.send(&self.message).await
+    async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
+        // The plugin gives its worker the mail: a job has no request context.
+        let mail = cx.state::<Mail>().ok_or_else(|| {
+            MailError::transport(
+                "this worker was given no mail\n\
+                 help: build the worker with `.state(mail)`, as MailPlugin::start does",
+            )
+        })?;
+        match mail.send(&self.message).await {
+            Err(e) if cx.is_last_attempt() => {
+                let to: Vec<&str> = self.message.to().iter().map(Address::address).collect();
+                let to = to.join(", ");
+                let subject = self.message.subject().as_str();
+                crate::plugins::say!(
+                    error,
+                    "[mail] gave up on mail to {to}: {subject}: {e}";
+                    %to, %subject
+                );
+                Ok(())
+            }
+            sent => sent,
+        }
     }
 }
 
@@ -15504,6 +15578,26 @@ pub struct MailPlugin {
     outbox: Option<Outbox>,
     /// The worker that sends queued mail, kept to stop it.
     worker: Option<WorkerHandle>,
+}
+
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
+/// Refuses `log` and `folder` outside development: both write every
+/// message, reset links included, to the log or the disk.
+fn check_transport(transport: &str, environment: &str) -> Result<(), PluginError> {
+    if transport == "smtp" || environment == "development" {
+        return Ok(());
+    }
+    Err(PluginError::new(format!(
+        "[mail] transport is `{transport}` in `{environment}`: every message, links \
+         included, would go to the log or the disk\n\
+         help: set `[mail] transport = \"smtp\"` and `[mail] smtp_host` in \
+         config/{environment}.toml or the environment"
+    )))
 }
 
 impl MailPlugin {
@@ -15548,6 +15642,7 @@ impl MailPlugin {
                 if !s.smtp_username.is_empty() {
                     config = config.with_credentials(&s.smtp_username, &s.smtp_password);
                 }
+                // The error ends with its own `help:` line.
                 Arc::new(
                     Smtp::connect(&config).map_err(|e| PluginError::new(format!("[mail] {e}")))?,
                 )
@@ -15575,6 +15670,7 @@ impl Plugin for MailPlugin {
     }
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        check_transport(&self.settings.transport, &environment())?;
         let from = self.sender()?;
         // The SMTP pool spawns its upkeep on the runtime, so it needs the
         // runtime entered. It opens no connection here.
@@ -15594,9 +15690,6 @@ impl Plugin for MailPlugin {
             );
         }
         let mail = Mail::new(mailer, from);
-        // The job reads the mail from here: a worker has no request
-        // context. The first application built in this process decides.
-        let _ = SENDER.set(mail.clone());
         self.outbox = Some(Outbox {
             mail,
             transport: self.settings.transport.clone(),
@@ -15620,12 +15713,22 @@ impl Plugin for MailPlugin {
         if !self.settings.worker {
             return Ok(());
         }
+        let Some(outbox) = &self.outbox else {
+            return Ok(());
+        };
         let worker = Worker::builder(&queue)
             .register::<DeliverMail>()
             .queues(vec![DeliverMail::QUEUE.to_string()])
             .concurrency(2)
+            .state(outbox.mail.clone())
             .start()
-            .map_err(|e| PluginError::new(format!("[mail] starting the worker: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "[mail] starting the worker: {e}\n\
+                     help: check the jobs settings, or set `[mail] worker = false` \
+                     in a process that only serves"
+                ))
+            })?;
         let grace = crate::plugins::shutdown_grace().map_err(PluginError::new)?;
         worker.stop_when(lc.readiness().draining(), grace);
         self.worker = Some(worker);
@@ -15717,6 +15820,21 @@ mod tests {
         assert!(from.contains("help:"), "{from}");
         let name = plugin(|s| s.from_name = "Shop\r\nBcc: list@example.com".to_string());
         assert!(name.sender().is_err(), "a line break in the sender's name");
+    }
+
+    /// `log` and `folder` write every message, reset links included: only
+    /// development starts with them.
+    #[test]
+    fn outside_development_only_smtp_starts() {
+        for transport in ["log", "folder", "smtp"] {
+            let started = check_transport(transport, "development");
+            assert!(started.is_ok(), "{transport}");
+        }
+        for transport in ["log", "folder"] {
+            let refused = refusal(check_transport(transport, "production"));
+            assert!(refused.contains("help:"), "{refused}");
+        }
+        assert!(check_transport("smtp", "production").is_ok());
     }
 
     #[test]
@@ -16608,9 +16726,11 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
 //! })
 //! ```
 //!
-//! `/openapi.json` is hidden from the document it serves. The endpoint is a
-//! row of the table it describes, and an endpoint that describes itself is
-//! noise in every client somebody generates from this.
+//! `/openapi.json` and `/openapi.yaml` are hidden from the document they
+//! serve. Each endpoint is a row of the table it describes, and an endpoint
+//! that describes itself is noise in every client somebody generates from
+//! this. The routes another module mounts, such as an admin, are hidden
+//! too: the document is public, and they are not this API.
 //!
 //! # Why this is not `OpenApiPlugin`
 //!
@@ -16622,10 +16742,10 @@ fn observer(app: &crate::app::App) -> brocanth_observe::Observer {
 //! do still happen: an invalid document stops the build, and the document
 //! reaches `Services` for anything else that wants to read it.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::Verb;
 use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder};
 
@@ -16637,25 +16757,33 @@ use brocanth_openapi::{Format, OpenApiConfig, OpenApiPlugin, Schema, SpecBuilder
 /// a 404 and hide it in the document.
 pub const ROUTE: &str = "/openapi.json";
 
+/// Where the YAML spelling is served: `src/pages/openapi.yaml.rs`.
+pub const YAML_ROUTE: &str = "/openapi.yaml";
+
 /// The rendered document, both ways round.
 ///
 /// Rendered once at `configure`, so a request costs a borrow rather than a
-/// walk of the whole structure. A `OnceLock` because the page that serves it
-/// is a plain function with no handle on this plugin.
-static RENDERED: OnceLock<(String, String)> = OnceLock::new();
-
-/// The document as JSON, or `None` when this plugin was never registered.
-pub fn json() -> Option<&'static str> {
-    RENDERED.get().map(|(json, _)| json.as_str())
+/// walk of the whole structure. In the request context, so the pages read
+/// this application's document and no process-wide copy.
+#[derive(Clone)]
+pub struct Rendered {
+    json: Arc<str>,
+    yaml: Arc<str>,
 }
 
-/// The document as YAML, or `None` when this plugin was never registered.
-///
-/// Served by `src/pages/openapi.yaml.rs`, which is the file beside the
-/// JSON one and reads this instead.
-pub fn yaml() -> Option<&'static str> {
-    RENDERED.get().map(|(_, yaml)| yaml.as_str())
+impl Rendered {
+    /// The document as JSON, served by `src/pages/openapi.json.rs`.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+
+    /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
+    pub fn yaml(&self) -> &str {
+        &self.yaml
+    }
 }
+
+impl ContextItem for Rendered {}
 
 /// What this plugin is built from.
 ///
@@ -16685,17 +16813,20 @@ pub struct OpenApi {
     /// Built at `configure` and not in `new`, because deriving a document can
     /// fail and `Plugin::new` cannot.
     served: Option<OpenApiPlugin>,
+    /// The two bodies, rendered at `configure`.
+    rendered: Option<Rendered>,
 }
 
 impl Plugin for OpenApi {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Rendered>;
     const NAME: &'static str = "openapi";
 
     fn new(config: Settings) -> Self {
         Self {
             settings: config,
             served: None,
+            rendered: None,
         }
     }
 
@@ -16710,7 +16841,11 @@ impl Plugin for OpenApi {
         })?;
         let mut spec = SpecBuilder::new(self.settings.title.clone(), self.settings.version.clone())
             .routes_from_router(&router)
-            .hide(ROUTE, Verb::Get);
+            .hide(ROUTE, Verb::Get)
+            .hide(YAML_ROUTE, Verb::Get)
+            .hide_under(crate::modules::admin::MODULE.mount_at)
+            .hide_under(crate::modules::auth_oauth::MODULE.mount_at)
+            .hide_under(crate::modules::oauth_client::MODULE.mount_at);
 
         // What each page takes and gives. `pages!` read it off the handler
         // signatures, so the document says what the code does rather than
@@ -16739,12 +16874,11 @@ impl Plugin for OpenApi {
             });
         }
 
-        let document = spec.build().map_err(|e| {
-            PluginError::new(format!(
-                "[openapi] deriving the document: {e}\n\
-                 help: fix the route or the description it names in this file"
-            ))
-        })?;
+        // The error names the route or the description to fix, and ends
+        // with its own help line.
+        let document = spec
+            .build()
+            .map_err(|e| PluginError::new(format!("[openapi] deriving the document: {e}")))?;
 
         // The crate's own plugin, held rather than registered. Its
         // `configure` is what makes an invalid document a build failure
@@ -16752,10 +16886,12 @@ impl Plugin for OpenApi {
         // bodies once.
         let mut served = OpenApiPlugin::new(OpenApiConfig::new(document).json_route(ROUTE));
         served.configure(lc)?;
-        let _ = RENDERED.set((
-            served.body(Format::Json).to_string(),
-            served.body(Format::Yaml).to_string(),
-        ));
+        self.rendered = Some(Rendered {
+            json: served.body(Format::Json).into(),
+            yaml: served.body(Format::Yaml).into(),
+        });
+        // The admin's `API` tab reads it from here.
+        served.install();
         self.served = Some(served);
         Ok(())
     }
@@ -16766,6 +16902,14 @@ impl Plugin for OpenApi {
         match &mut self.served {
             Some(served) => served.register(lc),
             None => Ok(()),
+        }
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `configure` runs before the server takes a request, so the bodies
+        // are here by the time a request builds its context.
+        if let Some(rendered) = &self.rendered {
+            cx.insert(rendered.clone());
         }
     }
 }
@@ -19323,6 +19467,16 @@ impl Handler for Example {
 // The plugin
 // ---------------------------------------------------------------------------
 
+/// The secret `config/development.toml` gives the `example` source. It is
+/// public, so the start refuses it outside development.
+pub const DEVELOPMENT_SECRET: &str = "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ==";
+
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
 /// What this plugin is built from.
 ///
 /// It derives `Deserialize` because this application reads it from
@@ -19363,7 +19517,7 @@ impl Default for Settings {
             path: "/webhooks".to_string(),
             tolerance: 300,
             max_bytes: 1_048_576,
-            secret: "whsec_ZGV2ZWxvcG1lbnQgb25seTogcmVwbGFjZSBtZQ==".to_string(),
+            secret: String::new(),
             migrate: true,
         }
     }
@@ -19390,6 +19544,16 @@ impl Plugin for WebhooksIn {
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let environment = environment();
+        if self.settings.secret == DEVELOPMENT_SECRET && environment != "development" {
+            return Err(PluginError::new(format!(
+                "[webhooks_in] secret is the development one, in `{environment}`\n\
+                 help: set `[webhooks_in] secret` to the secret the sender shows you, \
+                 in the environment or config/{environment}.toml"
+            )));
+        }
+        // An empty secret -- a production file that sets none -- stops
+        // here, and the error's `help:` line says where to find one.
         let example = Scheme::standard(&self.settings.secret)
             .map_err(|e| PluginError::new(format!("[webhooks_in] secret: {e}")))?;
         let receiver = Incoming::new(&self.settings.path)
@@ -19512,9 +19676,27 @@ mod tests {
 //!
 //! The deliveries are retried on the `webhooks` queue by a worker this
 //! plugin runs, over the `db` module's pool. With the admin, they are the
-//! admin's `webhooks` tab.
+//! admin's `webhooks` tab. A delivered or failed row is deleted after
+//! `[webhooks_out] keep_days`.
+//!
+//! An event that must not be lost is emitted on the transaction that
+//! changed the data, with `hooks.emit_in(&mut tx, ..)`: the delivery rows
+//! and their jobs commit with it, or not at all.
 
-pub use brocanth_webhooks::{OutgoingConfig as Settings, OutgoingPlugin as WebhooksOut};
+pub use brocanth_webhooks::OutgoingConfig as Settings;
+
+/// The crate's plugin, stopped within this application's shutdown grace.
+pub type WebhooksOut = brocanth_webhooks::OutgoingPlugin<Grace>;
+
+/// `[server] shutdown_grace_secs`: how long a drain waits for the
+/// deliveries in progress.
+pub struct Grace;
+
+impl brocanth_webhooks::outgoing::ShutdownGrace for Grace {
+    fn grace() -> Result<std::time::Duration, String> {
+        crate::plugins::shutdown_grace()
+    }
+}
 ===== package.json =====
 {
   "name": "my-blog",
@@ -19596,7 +19778,7 @@ request.
 - `admin-actions`  "Delete selected" on every admin list, with a confirmation page
 - `webhooks`  signed webhooks: verified deliveries in, signed events out; pick a direction below
 - `webhooks-in`  POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler
-- `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs
+- `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries on a Postgres queue
 - `oauth`  an OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below
 - `oauth-client`  connect pages at /connections; tokens sealed in Postgres, refreshed once, sent as a bearer
 - `oauth-client-memory`  the connected accounts in this process's memory; for tests and development, gone at restart
@@ -20236,7 +20418,7 @@ the response. Never build an `Smtp` in a page, and never put the SMTP
 password in a file that is in git or on a command line.
 
 In development `[mail] transport` is `log`: each message is in the log,
-and nothing is sent.
+and nothing is sent. Outside development only `smtp` starts.
 
 ## Roles
 
@@ -20297,7 +20479,8 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 
 ## Outgoing webhooks
 
-Send an event with `Outgoing::emit`, from the code that changed the data.
+Send an event with `Outgoing::emit_in` on the transaction that changed the
+data, or `Outgoing::emit` after it.
 Do not post to a partner's URL from a page: the delivery log, the
 signature and the retries come from `emit`. Show an endpoint's secret
 once, to the person who registered it, and never log it.
@@ -20451,7 +20634,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 9a9ecedd623be9fb -->
+<!-- brocanth-digest: 8ce135af5679af4c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -20599,7 +20782,7 @@ kind = ["enhancer"]
 files = ["src/modules/mail.rs", "src/plugins/mail/"]
 config = ["mail"]
 crates = ["brocanth-mail"]
-adapted_to = ["config", "jobs"]
+adapted_to = ["config", "jobs", "db", "jobs-memory"]
 
 [modules.auth]
 version = "0.1.0"
@@ -20767,7 +20950,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/openapi.rs", "src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
 crates = ["brocanth-openapi"]
-adapted_to = ["config", "input"]
+adapted_to = ["config", "input", "auth-oauth", "oauth-client", "admin"]
 
 [modules.validation]
 version = "0.1.0"
@@ -21033,4 +21216,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: fb61bb0ab73a7de4
+# brocanth-digest: 66008ce56ab15e92
