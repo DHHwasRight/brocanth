@@ -21,6 +21,28 @@
 //! built over the `db` module's pool, so the deliveries and their jobs live
 //! in one database.
 //!
+//! # Why its own queue, not the `jobs` module's
+//!
+//! The queue is always a Postgres one on the `db` module's pool, even in a
+//! project whose `jobs` module keeps its queue in memory. That is what lets
+//! [`Outgoing::emit_in`] write the delivery rows and their jobs in the
+//! caller's transaction: a memory queue has no transaction to join. With
+//! `jobs` on Postgres both are the same tables, on the `webhooks` queue
+//! name. So `webhooks-out` needs `db`, not `jobs`.
+//!
+//! # Where the job finds the `Outgoing`
+//!
+//! A job is decoded from a row, so it holds no handle. The plugin gives its
+//! worker the [`Outgoing`] with `WorkerBuilder::state`, and [`Deliver`]
+//! reads it from its `JobContext`. Two applications in one process each
+//! have their own. A worker built by hand gives it the same way.
+//!
+//! # How long the log is kept
+//!
+//! A delivered or failed row is deleted `keep_days` after it was written,
+//! by a task the plugin runs beside its worker. A `pending` or `retrying`
+//! row is never deleted.
+//!
 //! # What a receiver gets
 //!
 //! A POST with `content-type: application/json` and a body
@@ -43,7 +65,9 @@
 //!   would not do: the name can resolve to another address a moment later.
 //! * A redirect: a 3xx answer is a failed attempt, not a hop to follow.
 
+use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,8 +86,12 @@ use crate::sign::{decode_secret, new_message_id, new_secret, sign_standard};
 /// The queue the delivery jobs wait on.
 pub const QUEUE: &str = "webhooks";
 
-/// The first [`Outgoing`] built in this process, for the job and the panel.
+/// The first [`Outgoing`] the plugin built in this process, for the admin
+/// panel only. The job reads its own from its worker's state.
 static INSTALLED: OnceLock<Outgoing> = OnceLock::new();
+
+/// How many row changes a [`WebhookSink`] holds before it drops one.
+pub const SINK_CAPACITY: usize = 1024;
 
 /// What failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +125,9 @@ pub struct OutgoingConfig {
     /// Accept an endpoint on a loopback or private address. For
     /// development, where the receiver is on the same machine.
     pub allow_private: bool,
+    /// Days a delivered or failed row stays in the log. `0` keeps it for
+    /// ever.
+    pub keep_days: u32,
 }
 
 impl Default for OutgoingConfig {
@@ -107,12 +138,13 @@ impl Default for OutgoingConfig {
             concurrency: 4,
             timeout_secs: 10,
             allow_private: false,
+            keep_days: 30,
         }
     }
 }
 
 /// One endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// Its row id.
     pub id: i64,
@@ -127,6 +159,21 @@ pub struct Endpoint {
     pub active: bool,
     /// What it is for.
     pub description: String,
+}
+
+impl std::fmt::Debug for Endpoint {
+    /// Prints every field but the secret, as [`Scheme`](crate::Scheme)
+    /// does: a `{:?}` in a log line must not leak it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("id", &self.id)
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("events", &self.events)
+            .field("active", &self.active)
+            .field("description", &self.description)
+            .finish()
+    }
 }
 
 /// Where one delivery is.
@@ -210,7 +257,9 @@ CREATE TABLE IF NOT EXISTS brocanth_webhook_deliveries (
     delivered_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
-    ON brocanth_webhook_deliveries (created_at DESC)";
+    ON brocanth_webhook_deliveries (created_at DESC);
+CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_endpoint
+    ON brocanth_webhook_deliveries (endpoint_id)";
 
     /// The outgoing side over `db`: a queue on its pool and a client.
     ///
@@ -242,8 +291,9 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
         })
     }
 
-    /// The first `Outgoing` installed in this process: what the job and
-    /// the admin panel use.
+    /// The first `Outgoing` installed in this process: what the admin
+    /// panel uses. The delivery job does not: it reads the `Outgoing` its
+    /// worker was given.
     pub fn installed() -> Option<Outgoing> {
         INSTALLED.get().cloned()
     }
@@ -252,6 +302,15 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
     /// wins; the plugin makes it.
     pub fn install(&self) {
         let _ = INSTALLED.set(self.clone());
+    }
+
+    /// A worker for the delivery jobs on this queue, with this `Outgoing`
+    /// in its state. Add settings, then `start` it.
+    pub fn worker(&self) -> brocanth_jobs::WorkerBuilder {
+        Worker::builder(&self.inner.queue)
+            .register::<Deliver>()
+            .queues([QUEUE])
+            .state(self.clone())
     }
 
     /// The queue the delivery jobs go on.
@@ -374,25 +433,59 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
     /// Sends `event` to every active endpoint that wants it: one delivery
     /// row and one job each. Answers the delivery ids.
     ///
-    /// The rows are written before the jobs are enqueued. A process that
-    /// dies between the two leaves a `pending` row with no job, which the
-    /// panel's "Send again" button, or [`Outgoing::redeliver`], sends.
+    /// The rows and the jobs commit together, in a transaction of their
+    /// own: a failure leaves nothing, so a retried `emit` sends no copy.
+    /// To commit them with the change that caused the event, use
+    /// [`Outgoing::emit_in`] on the caller's transaction.
     ///
     /// # Errors
     /// The event name is empty, or the database or the queue failed.
     pub async fn emit(&self, event: &str, data: &serde_json::Value) -> Result<Vec<i64>, OutError> {
+        let mut tx = self.inner.db.pool().begin().await.map_err(db_error)?;
+        let ids = self.emit_in(&mut tx, event, data).await?;
+        tx.commit().await.map_err(db_error)?;
+        Ok(ids)
+    }
+
+    /// [`Outgoing::emit`] inside the caller's transaction: the delivery
+    /// rows and their jobs commit with the row that caused the event, or
+    /// not at all.
+    ///
+    /// ```ignore
+    /// let mut tx = db.pool().begin().await?;
+    /// // ... mark the invoice paid with `&mut *tx` ...
+    /// hooks.emit_in(&mut tx, "invoice.paid", &serde_json::json!({ "id": 42 })).await?;
+    /// tx.commit().await?;
+    /// ```
+    ///
+    /// The jobs go through the queue's outbox, which a running worker moves
+    /// into the queue after the commit.
+    ///
+    /// # Errors
+    /// The event name is empty, or the database or the queue failed. The
+    /// caller rolls the transaction back.
+    pub async fn emit_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        event: &str,
+        data: &serde_json::Value,
+    ) -> Result<Vec<i64>, OutError> {
         if event.trim().is_empty() {
             return Err(OutError(
                 "webhooks: an event needs a type\nhelp: name it `<thing>.<what happened>`, as in `invoice.paid`"
                     .to_string(),
             ));
         }
-        let wanting: Vec<i64> = self
-            .endpoints()
-            .await?
-            .into_iter()
-            .filter(|e| e.active && wants(&e.events, event))
-            .map(|e| e.id)
+        let rows = sqlx::query(
+            "SELECT id, events FROM brocanth_webhook_endpoints WHERE active ORDER BY id",
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        let wanting: Vec<i64> = rows
+            .iter()
+            .filter(|row| wants(&row.get::<Vec<String>, _>("events"), event))
+            .map(|row| row.get("id"))
             .collect();
         let body = serde_json::json!({
             "type": event,
@@ -410,14 +503,42 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
             .bind(new_message_id())
             .bind(event)
             .bind(&body)
-            .fetch_one(self.inner.db.pool())
+            .fetch_one(&mut **tx)
             .await
             .map_err(db_error)?;
             let id: i64 = row.get("id");
-            self.enqueue(id).await?;
+            self.inner
+                .queue
+                .enqueue(Deliver { delivery: id })
+                .in_tx(tx)
+                .await
+                .map_err(|e| {
+                    OutError(format!(
+                        "webhooks: enqueuing delivery {id}: {e}\n\
+                         help: check `[db] url`, then emit again: nothing was committed"
+                    ))
+                })?;
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    /// Deletes the delivered and failed rows written more than `older_than`
+    /// ago. Answers how many went. A `pending` or `retrying` row stays.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub async fn prune(&self, older_than: Duration) -> Result<u64, OutError> {
+        let done = sqlx::query(
+            "DELETE FROM brocanth_webhook_deliveries \
+             WHERE state IN ('delivered', 'failed') \
+             AND created_at < now() - make_interval(secs => $1)",
+        )
+        .bind(older_than.as_secs_f64())
+        .execute(self.inner.db.pool())
+        .await
+        .map_err(db_error)?;
+        Ok(done.rows_affected())
     }
 
     async fn enqueue(&self, delivery: i64) -> Result<(), OutError> {
@@ -494,7 +615,7 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
                 if answer.status().is_success() {
                     (status, None)
                 } else {
-                    let text = answer.text().await.unwrap_or_default();
+                    let text = head_of(answer).await;
                     (status, Some(format!("answered {status}: {}", clip(&text))))
                 }
             }
@@ -610,10 +731,13 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
     /// `.deleted` for the listed collections, or for every one when the list
     /// is empty. Add it to the sink the model layer writes through.
     ///
-    /// The emit runs on a task: a sink must not block the write that caused
-    /// it, so a change whose emit fails is lost. An event that must not be
-    /// lost is emitted by the code that wrote the row, with
-    /// [`Outgoing::emit`].
+    /// A sink must not block the write that caused it. The changes go on a
+    /// queue of [`SINK_CAPACITY`] that one task empties, in order. A change
+    /// that finds the queue full, or whose emit fails, is lost: it is
+    /// logged at `warn` with its event and counted in
+    /// [`WebhookSink::lost`]. An event that must not be lost is emitted
+    /// with the change that caused it, by [`Outgoing::emit_in`] on the
+    /// write's transaction.
     ///
     /// # Errors
     /// No Tokio runtime is running.
@@ -623,22 +747,43 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_created
                 "webhooks: the change sink needs a Tokio runtime ({e})\nhelp: build it in a plugin stage or a handler"
             ))
         })?;
+        let (changes, mut queued) =
+            tokio::sync::mpsc::channel::<(String, serde_json::Value)>(SINK_CAPACITY);
+        let lost = Arc::new(AtomicU64::new(0));
+        let outgoing = self.clone();
+        let counter = Arc::clone(&lost);
+        // Ends when the sink is dropped: the queue closes, and the task
+        // emits what is left, then stops.
+        runtime.spawn(async move {
+            while let Some((event, data)) = queued.recv().await {
+                if let Err(e) = outgoing.emit(&event, &data).await {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(event, error = %e, "a row change's webhook was not emitted");
+                }
+            }
+        });
         Ok(WebhookSink {
-            outgoing: self.clone(),
+            changes,
             collections: collections.iter().map(|c| c.to_string()).collect(),
-            runtime,
+            lost,
         })
     }
 }
 
 /// Emits an event per row change. See [`Outgoing::sink`].
 pub struct WebhookSink {
-    outgoing: Outgoing,
+    changes: tokio::sync::mpsc::Sender<(String, serde_json::Value)>,
     collections: Vec<String>,
-    runtime: tokio::runtime::Handle,
+    lost: Arc<AtomicU64>,
 }
 
 impl WebhookSink {
+    /// How many changes were lost: dropped on a full queue, or whose emit
+    /// failed.
+    pub fn lost(&self) -> u64 {
+        self.lost.load(Ordering::Relaxed)
+    }
+
     /// The event type and the payload one change becomes.
     pub fn event_of(change: &RowChange<'_>) -> (String, serde_json::Value) {
         let (kind, fields): (&str, Vec<&str>) = match &change.kind {
@@ -660,10 +805,18 @@ impl WebhookSink {
 impl ChangeSink for WebhookSink {
     fn publish(&self, change: &RowChange<'_>) {
         let (event, data) = Self::event_of(change);
-        let outgoing = self.outgoing.clone();
-        self.runtime.spawn(async move {
-            let _ = outgoing.emit(&event, &data).await;
-        });
+        if let Err(refused) = self.changes.try_send((event, data)) {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+            let (event, why) = match refused {
+                tokio::sync::mpsc::error::TrySendError::Full((event, _)) => {
+                    (event, "the queue is full")
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed((event, _)) => {
+                    (event, "the emitting task stopped")
+                }
+            };
+            tracing::warn!(event, why, "a row change's webhook was dropped");
+        }
     }
 
     fn wants(&self, collection: &str) -> bool {
@@ -697,8 +850,10 @@ impl Job for Deliver {
     }
 
     async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
-        let outgoing = Outgoing::installed().ok_or_else(|| {
-            "no `Outgoing` is installed in this process\nhelp: register the webhooks_out plugin in the process that runs this worker".to_string()
+        let outgoing = cx.state::<Outgoing>().ok_or_else(|| {
+            "this worker was given no `Outgoing`\nhelp: build the worker with `Outgoing::worker()`, \
+             or add `.state(outgoing)` to its builder"
+                .to_string()
         })?;
         outgoing.attempt(self.delivery, cx.is_last_attempt()).await
     }
@@ -751,13 +906,18 @@ pub fn check_url(url: &str, allow_private: bool) -> Result<(), OutError> {
 
 /// The HTTP client every attempt uses: no redirect, a timeout, and
 /// [`PublicOnly`] as its resolver unless `allow_private` is on.
+///
+/// Unless `allow_private` is on, the client also ignores `HTTP_PROXY`,
+/// `HTTPS_PROXY` and `ALL_PROXY`. Through a proxy, the proxy resolves the
+/// endpoint's name, so [`PublicOnly`] never sees the address, and a name
+/// such as `internal.svc.cluster.local` would reach this network.
 fn client(config: &OutgoingConfig) -> Result<reqwest::Client, OutError> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs.max(1)))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("brocanth-webhooks/", env!("CARGO_PKG_VERSION")));
     if !config.allow_private {
-        builder = builder.dns_resolver(PublicOnly);
+        builder = builder.dns_resolver(PublicOnly).no_proxy();
     }
     builder.build().map_err(|e| {
         OutError(format!(
@@ -820,6 +980,12 @@ fn is_private(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 // 100.64.0.0/10: carrier-grade NAT.
                 || a == 100 && (b & 0xc0) == 64
+                // 192.0.0.0/24: IETF protocol assignments.
+                || (a, b, v4.octets()[2]) == (192, 0, 0)
+                // 198.18.0.0/15: benchmarking, often routed inside a network.
+                || a == 198 && (b & 0xfe) == 18
+                // 240.0.0.0/4: reserved.
+                || a >= 240
         }
         IpAddr::V6(v6) => {
             let first = v6.segments()[0];
@@ -838,8 +1004,31 @@ fn is_private(ip: IpAddr) -> bool {
                     && is_private(IpAddr::V4(std::net::Ipv4Addr::from_bits(
                         (v6.to_bits() & 0xffff_ffff) as u32,
                     ))))
+                // 6to4, 2002::/16: the IPv4 address is the next 32 bits.
+                || (first == 0x2002
+                    && is_private(IpAddr::V4(std::net::Ipv4Addr::from_bits(
+                        ((v6.to_bits() >> 80) & 0xffff_ffff) as u32,
+                    ))))
         }
     }
+}
+
+/// The most of an answer's body [`head_of`] reads. [`clip`] keeps 300
+/// bytes, and the endpoint's owner chooses how long the body is.
+const BODY_LIMIT: usize = 1024;
+
+/// The first [`BODY_LIMIT`] bytes of an answer's body, as text. The rest is
+/// never read: a large body costs one chunk, not its length.
+async fn head_of(mut answer: reqwest::Response) -> String {
+    let mut head = Vec::new();
+    while head.len() < BODY_LIMIT {
+        match answer.chunk().await {
+            Ok(Some(chunk)) => head.extend_from_slice(&chunk),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    head.truncate(BODY_LIMIT);
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 fn clip(text: &str) -> String {
@@ -856,20 +1045,47 @@ fn unix_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// Where the plugin reads how long a drain waits for the deliveries in
+/// progress. The generated project answers its `[server]
+/// shutdown_grace_secs`.
+pub trait ShutdownGrace: 'static {
+    /// The grace.
+    ///
+    /// # Errors
+    /// The setting cannot be read, with a `help:` line.
+    fn grace() -> Result<Duration, String>;
+}
+
+/// Ten seconds: the framework's default grace.
+pub struct DefaultGrace;
+
+impl ShutdownGrace for DefaultGrace {
+    fn grace() -> Result<Duration, String> {
+        Ok(Duration::from_secs(10))
+    }
+}
+
 /// The plugin: builds [`Outgoing`] over the `db` module's pool, creates the
 /// tables, runs the delivery worker and puts `Outgoing` on the context.
 ///
 /// Register it after the `db` plugin, which publishes the pool it reads.
-pub struct OutgoingPlugin {
+/// `G` says how long a drain waits for the deliveries in progress.
+pub struct OutgoingPlugin<G: ShutdownGrace = DefaultGrace> {
     config: OutgoingConfig,
     outgoing: Option<Outgoing>,
     worker: Option<WorkerHandle>,
+    pruner: Option<tokio::task::JoinHandle<()>>,
+    grace: Duration,
+    _grace: PhantomData<fn() -> G>,
 }
 
 /// The time the worker keeps to give back what did not finish.
 const GIVE_BACK: Duration = Duration::from_secs(2);
 
-impl Plugin for OutgoingPlugin {
+/// How often the plugin deletes the old rows of the log.
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
+
+impl<G: ShutdownGrace> Plugin for OutgoingPlugin<G> {
     type Config = OutgoingConfig;
     type Provides = ProvidesContext<Outgoing>;
     /// Also the configuration section.
@@ -880,6 +1096,9 @@ impl Plugin for OutgoingPlugin {
             config,
             outgoing: None,
             worker: None,
+            pruner: None,
+            grace: Duration::from_secs(10),
+            _grace: PhantomData,
         }
     }
 
@@ -941,23 +1160,44 @@ impl Plugin for OutgoingPlugin {
         let (Some(outgoing), true) = (&self.outgoing, self.config.worker) else {
             return Ok(());
         };
-        let worker = Worker::builder(outgoing.queue())
-            .register::<Deliver>()
-            .queues([QUEUE])
+        self.grace = G::grace().map_err(|e| PluginError::new(format!("[webhooks_out] {e}")))?;
+        let worker = outgoing
+            .worker()
             .concurrency(self.config.concurrency)
             .start()
-            .map_err(|e| PluginError::new(format!("[webhooks_out] starting the worker: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "[webhooks_out] starting the worker: {e}\n\
+                     help: check `[db] url`, or set `worker = false` in a process that only serves"
+                ))
+            })?;
         worker.stop_when(
             lc.readiness().draining(),
-            Duration::from_secs(10).saturating_sub(GIVE_BACK),
+            self.grace.saturating_sub(GIVE_BACK),
         );
         self.worker = Some(worker);
+        if self.config.keep_days > 0 {
+            let outgoing = outgoing.clone();
+            let keep = Duration::from_secs(u64::from(self.config.keep_days) * 24 * 3600);
+            self.pruner = Some(tokio::spawn(async move {
+                let mut every = tokio::time::interval(PRUNE_EVERY);
+                loop {
+                    every.tick().await;
+                    if let Err(e) = outgoing.prune(keep).await {
+                        tracing::warn!(error = %e, "old webhook deliveries were not deleted");
+                    }
+                }
+            }));
+        }
         Ok(())
     }
 
     fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        if let Some(pruner) = self.pruner.take() {
+            pruner.abort();
+        }
         if let Some(worker) = &self.worker {
-            let grace = sd.remaining().unwrap_or(Duration::from_secs(10));
+            let grace = sd.remaining().unwrap_or(self.grace);
             worker.stop(grace.saturating_sub(GIVE_BACK));
         }
         Ok(())
@@ -1035,6 +1275,14 @@ mod tests {
             "http://[fc00::1]/",
             "http://[::]/",
             "http://[ff02::1]/",
+            // Special-purpose IPv4 ranges.
+            "http://192.0.0.1/",
+            "http://198.18.0.1/",
+            "http://198.19.255.254/",
+            "http://240.0.0.1/",
+            // 6to4 around a private IPv4: 2002:7f00:1:: is 127.0.0.1.
+            "http://[2002:7f00:1::]/",
+            "http://[2002:a00:1::1]/",
             // Names.
             "http://LOCALHOST/",
             "http://localhost./",
@@ -1052,6 +1300,8 @@ mod tests {
             "http://[2606:4700:4700::1111]/",
             "http://[::ffff:8.8.8.8]/",
             "http://[64:ff9b::808:808]/",
+            "http://[2002:808:808::]/",
+            "http://198.20.0.1/",
             "http://127.0.0.1@example.com/",
         ] {
             assert!(check_url(url, false).is_ok(), "{url} was refused");
@@ -1085,10 +1335,112 @@ mod tests {
         assert!(err.to_string().contains("no public address"), "{err}");
     }
 
+    /// The proxy variables are process-wide, and reqwest reads them when a
+    /// client is built: the tests that build a client take turns.
+    static PROXY_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A listener that counts the connections it accepts and answers each
+    /// with a 204.
+    async fn counting_listener() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        (port, accepted)
+    }
+
+    /// Through a proxy, the proxy resolves the endpoint's name and
+    /// `PublicOnly` never sees it. The strict client ignores the proxy
+    /// variables; the development client keeps them.
+    #[tokio::test]
+    async fn the_strict_client_ignores_the_proxy_variables() {
+        let _turn = PROXY_ENV.lock().await;
+        let (port, accepted) = counting_listener().await;
+        let proxy = format!("http://127.0.0.1:{port}");
+        std::env::set_var("HTTP_PROXY", &proxy);
+        std::env::set_var("http_proxy", &proxy);
+        let strict = client(&OutgoingConfig::default());
+        let open = client(&OutgoingConfig {
+            allow_private: true,
+            ..OutgoingConfig::default()
+        });
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("http_proxy");
+        let (strict, open) = (strict.unwrap(), open.unwrap());
+        // `.invalid` never resolves, so only a proxy could answer.
+        let url = "http://internal.invalid/hook";
+        assert!(strict.post(url).send().await.is_err());
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let answer = open.post(url).send().await.expect("through the proxy");
+        assert_eq!(answer.status().as_u16(), 204);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An endpoint that answers a 500 with an endless body costs one
+    /// kibibyte of memory, not the body.
+    #[tokio::test]
+    async fn a_long_answer_is_read_only_to_its_head() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = socket
+                .write_all(b"HTTP/1.1 500 X\r\ncontent-length: 104857600\r\n\r\n")
+                .await;
+            let chunk = vec![b'x'; 64 * 1024];
+            // 100 MiB promised; the reader stops long before.
+            for _ in 0..1600 {
+                if socket.write_all(&chunk).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let open = client(&OutgoingConfig {
+            allow_private: true,
+            ..OutgoingConfig::default()
+        })
+        .unwrap();
+        let answer = open
+            .post(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect("an answer");
+        let head = head_of(answer).await;
+        assert_eq!(head.len(), BODY_LIMIT);
+    }
+
+    #[test]
+    fn an_endpoint_never_prints_its_secret() {
+        let endpoint = Endpoint {
+            id: 1,
+            url: "https://example.com/hooks".to_string(),
+            secret: "whsec_c2VjcmV0IHNlY3JldCBzZWNyZXQ=".to_string(),
+            events: vec!["*".to_string()],
+            active: true,
+            description: String::new(),
+        };
+        let printed = format!("{endpoint:?}");
+        assert!(!printed.contains("whsec_"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
     /// The client of an `Outgoing` reaches a name on this machine only when
     /// `allow_private` is on: the resolver is wired into it.
     #[tokio::test]
     async fn the_client_does_not_connect_to_a_name_on_this_machine() {
+        let _turn = PROXY_ENV.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));

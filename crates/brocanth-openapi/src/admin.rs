@@ -42,7 +42,7 @@ use brocanth_admin::admin::AdminError;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::view::render;
 
-use crate::document::{Document, Operation, Parameter};
+use crate::document::{Document, Operation, Parameter, PathItem};
 use crate::json::Json;
 use crate::schema::Schema;
 
@@ -62,7 +62,8 @@ pub(crate) const STYLE: &str = include_str!("admin.css");
 /// [`Services`](brocanth::plugin_api::Services) instead reaches the same
 /// document through [`document_of`](crate::document_of).
 pub struct ApiPanel {
-    document: Arc<Document>,
+    /// `None` for [`ApiPanel::installed`]: read when a request comes.
+    document: Option<Arc<Document>>,
     key: String,
     label: String,
 }
@@ -71,10 +72,29 @@ impl ApiPanel {
     /// The panel, at `api`, labelled "API".
     pub fn new(document: Arc<Document>) -> Self {
         Self {
-            document,
+            document: Some(document),
             key: "api".to_string(),
             label: "API".to_string(),
         }
+    }
+
+    /// The panel over the document [`OpenApiPlugin::install`] installed.
+    ///
+    /// For a generated admin, which builds its tabs before the plugin
+    /// derives the document. Until a document is installed, the tab is
+    /// the admin's 404.
+    ///
+    /// [`OpenApiPlugin::install`]: crate::OpenApiPlugin::install
+    pub fn installed() -> Self {
+        Self {
+            document: None,
+            key: "api".to_string(),
+            label: "API".to_string(),
+        }
+    }
+
+    fn document(&self) -> Option<Arc<Document>> {
+        self.document.clone().or_else(crate::plugin::installed)
     }
 
     /// A different key, for an application that already has an `api` model.
@@ -93,8 +113,7 @@ impl ApiPanel {
 
     // ------------------------------------------------------------ screens
 
-    fn operations(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
-        let doc = &self.document;
+    fn operations(&self, doc: &Document, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
         // Sorted before the rows are built, so the ordering key -- where
         // the verb comes in `Verb::ALL` -- never has to be carried into a
         // context the template would then have to ignore.
@@ -137,8 +156,13 @@ impl ApiPanel {
         Ok(PanelPage::body("API", html))
     }
 
-    fn operation(&self, id: &str, r: &PanelRequest<'_>) -> Option<Result<PanelPage, AdminError>> {
-        let (path, verb, op) = self.find(id)?;
+    fn operation(
+        &self,
+        doc: &Document,
+        id: &str,
+        r: &PanelRequest<'_>,
+    ) -> Option<Result<PanelPage, AdminError>> {
+        let (path, item, verb, op) = find(doc, id)?;
         let ctx = OperationCtx {
             back_href: r.url(""),
             verb: verb.as_str().to_string(),
@@ -148,8 +172,12 @@ impl ApiPanel {
             description: op.description.clone().unwrap_or_default(),
             tags: op.tags.join(", "),
             deprecated: op.deprecated,
-            security: security(op, &self.document),
-            parameters: op.parameters.iter().map(param_row).collect(),
+            security: security(op, doc),
+            parameters: item
+                .effective_parameters(op)
+                .into_iter()
+                .map(param_row)
+                .collect(),
             request_body: op
                 .request_body
                 .iter()
@@ -193,20 +221,20 @@ impl ApiPanel {
                 .map_err(AdminError::from),
         )
     }
+}
 
-    /// The operation with this id, wherever it is in the document.
-    ///
-    /// An `operationId` is unique across a valid document — the builder
-    /// refuses a duplicate — so this is a lookup and not a search with a
-    /// tie-break.
-    fn find(&self, id: &str) -> Option<(&str, Verb, &Operation)> {
-        self.document.paths.iter().find_map(|(path, item)| {
-            item.operations
-                .iter()
-                .find(|(_, op)| op.operation_id == id)
-                .map(|(verb, op)| (path.as_str(), *verb, op))
-        })
-    }
+/// The operation with this id, wherever it is in the document.
+///
+/// An `operationId` is unique across a valid document — the builder
+/// refuses a duplicate — so this is a lookup and not a search with a
+/// tie-break.
+fn find<'a>(doc: &'a Document, id: &str) -> Option<(&'a str, &'a PathItem, Verb, &'a Operation)> {
+    doc.paths.iter().find_map(|(path, item)| {
+        item.operations
+            .iter()
+            .find(|(_, op)| op.operation_id == id)
+            .map(|(verb, op)| (path.as_str(), item, *verb, op))
+    })
 }
 
 #[async_trait]
@@ -225,9 +253,12 @@ impl Panel for ApiPanel {
         if r.post {
             return Ok(None);
         }
+        let Some(doc) = self.document() else {
+            return Ok(None);
+        };
         match r.path.split_once('/') {
-            None if r.path.is_empty() => self.operations(&r).map(Some),
-            Some(("op", id)) => self.operation(id, &r).transpose(),
+            None if r.path.is_empty() => self.operations(&doc, &r).map(Some),
+            Some(("op", id)) => self.operation(&doc, id, &r).transpose(),
             _ => Ok(None),
         }
     }

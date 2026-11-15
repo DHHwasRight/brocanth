@@ -20,10 +20,22 @@
 //! 4. The signature is valid and, for a scheme with a timestamp, inside
 //!    the replay window, or 401. See [`crate::sign`].
 //! 5. The body decodes into the handler's event type, or 400.
-//! 6. The idempotency key is claimed, or the delivery is a duplicate and is
-//!    answered 200 with nothing run. See [`crate::seen`].
-//! 7. The handler runs. `Ok` is 200; `Err` gives the key back and answers
-//!    the rejection's status, 500 by default, so the sender retries.
+//! 6. The idempotency key is claimed for a short lease ([`LEASE`]). A copy
+//!    of a delivery that ran is answered 200 with nothing run; a copy that
+//!    arrives while the first still runs is answered 409, so the sender
+//!    retries it later. See [`crate::seen`].
+//! 7. The handler runs. `Ok` is 200 and keeps the key for the whole window;
+//!    `Err` gives the key back and answers the rejection's status, 500 by
+//!    default, so the sender retries. A handler that panics, or a request
+//!    that is dropped mid-way, gives the key back too.
+//!
+//! # What the sender is told
+//!
+//! A fixed, short body per status. Why a signature was refused, and what a
+//! store or a handler's `?` failed with, goes to the log through `tracing`,
+//! never to the sender: the reason helps a forger, and an error's text can
+//! name a table or a host. [`Answer::detail`] holds it for the log and for
+//! tests.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -36,7 +48,7 @@ use brocanth::plugin_body::Body;
 use brocanth::plugin_hooks::{AsyncRequestHook, Flow, Request, RequestState};
 use serde::de::DeserializeOwned;
 
-use crate::seen::{MemorySeen, Seen, DEFAULT_KEEP};
+use crate::seen::{Claim, MemorySeen, Seen, DEFAULT_KEEP, LEASE, MAX_KEEP};
 use crate::sign::{digest_hex, Scheme, DEFAULT_TOLERANCE};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -123,9 +135,13 @@ impl Rejection {
     }
 }
 
+/// What a `?` on any error answers: a 500 with a fixed body. The error's
+/// own text can name a table, a host or a file, so it goes to the log, not
+/// to the sender. Build a [`Rejection`] by hand to say more.
 impl<E: std::error::Error> From<E> for Rejection {
     fn from(error: E) -> Self {
-        Self::retry(error.to_string())
+        tracing::error!(error = %error, "webhook handler failed");
+        Self::retry("the receiver failed; retry later")
     }
 }
 
@@ -134,8 +150,11 @@ impl<E: std::error::Error> From<E> for Rejection {
 pub struct Answer {
     /// The HTTP status.
     pub status: u16,
-    /// A short plain-text body.
+    /// A short plain-text body: what the sender reads.
     pub message: String,
+    /// Why, for the log: the check a signature failed, or the store's
+    /// error. Never sent.
+    pub detail: Option<String>,
 }
 
 impl Answer {
@@ -143,7 +162,50 @@ impl Answer {
         Self {
             status,
             message: message.into(),
+            detail: None,
         }
+    }
+
+    /// The same, with a reason that goes to the log and not to the sender.
+    fn logged(status: u16, message: impl Into<String>, detail: String) -> Self {
+        tracing::warn!(status, detail = %detail, "webhook delivery refused");
+        Self {
+            status,
+            message: message.into(),
+            detail: Some(detail),
+        }
+    }
+}
+
+/// Gives a claimed key back when it is dropped armed: the handler panicked,
+/// or the request's future was dropped before the handler returned. The
+/// release is a spawned task, because `Drop` cannot wait. A release that
+/// cannot run leaves the key to expire with its [`LEASE`].
+struct Unclaim {
+    seen: Arc<dyn Seen>,
+    source: String,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for Unclaim {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (seen, source, id) = (
+            Arc::clone(&self.seen),
+            std::mem::take(&mut self.source),
+            std::mem::take(&mut self.id),
+        );
+        runtime.spawn(async move {
+            if let Err(e) = seen.release(&source, &id).await {
+                tracing::warn!(%source, %id, error = %e, "webhook key not given back");
+            }
+        });
     }
 }
 
@@ -207,10 +269,10 @@ impl Incoming {
         self
     }
 
-    /// How long an idempotency key is kept.
+    /// How long an idempotency key is kept, at most [`MAX_KEEP`].
     #[must_use]
     pub fn keep(mut self, keep: Duration) -> Self {
-        self.keep = keep;
+        self.keep = keep.min(MAX_KEEP);
         self
     }
 
@@ -253,6 +315,11 @@ impl Incoming {
 
     /// The hook, with keys kept in memory until [`Receiver::set_seen`].
     ///
+    /// A source with no replay window ([`Scheme::hmac_sha256`],
+    /// [`Scheme::github`]) is safe from a replay only while its keys last.
+    /// [`Receiver::set_seen`] with a lasting store warns about none; the
+    /// memory store warns at build, through `tracing`.
+    ///
     /// # Errors
     /// The path does not start with `/`.
     pub fn build(self) -> Result<Receiver, PluginError> {
@@ -263,12 +330,14 @@ impl Incoming {
                 self.path
             )));
         }
-        Ok(Receiver {
+        let receiver = Receiver {
             inner: Arc::new(Inner {
                 incoming: self,
                 seen: RwLock::new(Arc::new(MemorySeen::new())),
             }),
-        })
+        };
+        receiver.warn_unwindowed("in memory");
+        Ok(receiver)
     }
 }
 
@@ -289,6 +358,31 @@ impl Receiver {
     /// application has a database.
     pub fn set_seen(&self, seen: Arc<dyn Seen>) {
         *self.inner.seen.write().unwrap_or_else(|e| e.into_inner()) = seen;
+    }
+
+    /// The sources whose scheme has no replay window, sorted.
+    pub fn unwindowed(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .inner
+            .incoming
+            .sources
+            .iter()
+            .filter(|(_, source)| !source.scheme.has_window())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    fn warn_unwindowed(&self, store: &str) {
+        for source in self.unwindowed() {
+            tracing::warn!(
+                source,
+                "webhook source `{source}` has no replay window and its keys are {store}: \
+                 a captured delivery is accepted again after a restart; \
+                 help: give the receiver a lasting store with `Receiver::set_seen(PgSeen)`"
+            );
+        }
     }
 
     /// The path prefix, without a trailing slash.
@@ -339,7 +433,9 @@ impl Receiver {
         }
         let verified = match found.scheme.verify(&header, body, now, incoming.tolerance) {
             Ok(verified) => verified,
-            Err(refused) => return Answer::new(401, refused.to_string()),
+            Err(refused) => {
+                return Answer::logged(401, "the signature is not valid", refused.to_string())
+            }
         };
         let id = verified
             .id
@@ -360,18 +456,46 @@ impl Receiver {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        match seen.claim(source, &id, incoming.keep).await {
-            Ok(true) => {}
-            Ok(false) => return Answer::new(200, "already received"),
-            Err(e) => return Answer::new(503, e.to_string()),
+        // A short lease first: a handler that never returns -- a panic, a
+        // dropped request -- holds the key for minutes, not for `keep`.
+        match seen.claim(source, &id, LEASE.min(incoming.keep)).await {
+            Ok(Claim::New) => {}
+            Ok(Claim::Done) => return Answer::new(200, "already received"),
+            Ok(Claim::Running) => {
+                return Answer::new(409, "this delivery is being handled; retry later")
+            }
+            Err(e) => {
+                return Answer::logged(
+                    503,
+                    "the receiver cannot check for duplicates now; retry later",
+                    e.to_string(),
+                )
+            }
         }
-        match run.await {
-            Ok(()) => Answer::new(200, "ok"),
+        let mut unclaim = Unclaim {
+            seen: Arc::clone(&seen),
+            source: source.to_string(),
+            id: id.clone(),
+            armed: true,
+        };
+        let outcome = run.await;
+        unclaim.armed = false;
+        match outcome {
+            Ok(()) => {
+                // Now the key holds for the whole window. A failed confirm
+                // leaves the lease, so a copy after it runs the handler
+                // again: the log says so.
+                if let Err(e) = seen.confirm(source, &id, incoming.keep).await {
+                    tracing::warn!(%source, %id, error = %e, "webhook key kept only for its lease");
+                }
+                Answer::new(200, "ok")
+            }
             Err(rejection) => {
                 // Give the key back, so the sender's retry runs the handler
-                // again. A failed release keeps the key: the retry is then
-                // answered as a duplicate, which the store's error explains.
-                let _ = seen.release(source, &id).await;
+                // again. A failed release keeps the key for its lease.
+                if let Err(e) = seen.release(source, &id).await {
+                    tracing::warn!(%source, %id, error = %e, "webhook key not given back");
+                }
                 let status = if (400..600).contains(&rejection.status) {
                     rejection.status
                 } else {
@@ -560,7 +684,9 @@ mod tests {
                 .receive_at("app", lookup(&headers), body, NOW + 3600)
                 .await;
             assert_eq!(replayed.status, 401);
-            assert!(replayed.message.contains("replay window"), "{replayed:?}");
+            assert!(!replayed.message.contains("replay window"), "{replayed:?}");
+            let why = replayed.detail.clone().unwrap_or_default();
+            assert!(why.contains("replay window"), "{replayed:?}");
             let unknown = receiver
                 .receive_at("nope", lookup(&headers), body, NOW)
                 .await;
@@ -591,6 +717,188 @@ mod tests {
             assert_eq!((a.status, b.message.as_str()), (200, "already received"));
         });
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// A handler that waits on a gate, to hold a delivery mid-run.
+    #[derive(Clone)]
+    struct Gate(Arc<tokio::sync::Notify>, Count);
+
+    impl Handler for Gate {
+        type Event = Event;
+
+        async fn handle(&self, event: Event, delivery: &Delivery) -> Result<(), Rejection> {
+            if event.kind == "panic" {
+                panic!("the handler failed hard");
+            }
+            self.0.notified().await;
+            self.1.handle(event, delivery).await
+        }
+    }
+
+    fn gated(secret: &str, gate: &Gate) -> Receiver {
+        Incoming::new("/webhooks")
+            .source("app", Scheme::standard(secret).unwrap(), gate.clone())
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_copy_that_arrives_while_the_first_runs_is_told_to_retry() {
+        let secret = new_secret();
+        let gate = Gate(Arc::default(), Count::default());
+        let receiver = gated(&secret, &gate);
+        let body = br#"{"kind":"paid"}"#;
+        let headers = standard(&secret, "msg_busy", body);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let first = {
+                    let receiver = receiver.clone();
+                    let headers = headers.clone();
+                    tokio::spawn(async move {
+                        receiver
+                            .receive_at("app", lookup(&headers), body, NOW)
+                            .await
+                    })
+                };
+                // Let the first claim the key and wait at the gate.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let copy = receiver
+                    .receive_at("app", lookup(&headers), body, NOW)
+                    .await;
+                assert_eq!(copy.status, 409, "{copy:?}");
+                gate.0.notify_one();
+                assert_eq!(first.await.unwrap(), Answer::new(200, "ok"));
+                let after = receiver
+                    .receive_at("app", lookup(&headers), body, NOW)
+                    .await;
+                assert_eq!(after, Answer::new(200, "already received"));
+            });
+        assert_eq!(gate.1 .0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_dropped_or_panicked_run_gives_the_key_back() {
+        let secret = new_secret();
+        let gate = Gate(Arc::default(), Count::default());
+        let receiver = gated(&secret, &gate);
+        let body = br#"{"kind":"paid"}"#;
+        let headers = standard(&secret, "msg_drop", body);
+        let boom = br#"{"kind":"panic"}"#;
+        let boom_headers = standard(&secret, "msg_panic", boom);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                // The request is dropped while the handler waits.
+                let dropped = tokio::time::timeout(
+                    Duration::from_millis(50),
+                    receiver.receive_at("app", lookup(&headers), body, NOW),
+                )
+                .await;
+                assert!(dropped.is_err(), "the run was cut");
+                let panicked = {
+                    let receiver = receiver.clone();
+                    let headers = boom_headers.clone();
+                    tokio::spawn(async move {
+                        receiver
+                            .receive_at("app", lookup(&headers), boom, NOW)
+                            .await
+                    })
+                };
+                assert!(panicked.await.is_err(), "the handler panicked");
+                // The release is a spawned task: give it a moment.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let retry = {
+                    let receiver = receiver.clone();
+                    let headers = headers.clone();
+                    tokio::spawn(async move {
+                        receiver
+                            .receive_at("app", lookup(&headers), body, NOW)
+                            .await
+                    })
+                };
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                gate.0.notify_one();
+                assert_eq!(retry.await.unwrap(), Answer::new(200, "ok"));
+                // The panicked key was given back: the copy runs, and
+                // panics again, rather than being a duplicate.
+                let again = {
+                    let receiver = receiver.clone();
+                    tokio::spawn(async move {
+                        receiver
+                            .receive_at("app", lookup(&boom_headers), boom, NOW)
+                            .await
+                    })
+                };
+                assert!(again.await.is_err(), "the copy ran the handler again");
+            });
+        let _ = gate;
+    }
+
+    #[test]
+    fn a_handler_error_and_a_refusal_say_nothing_private_to_the_sender() {
+        #[derive(Clone)]
+        struct Leaky;
+        impl Handler for Leaky {
+            type Event = Event;
+            async fn handle(&self, _: Event, _: &Delivery) -> Result<(), Rejection> {
+                let failed: Result<(), std::io::Error> = Err(std::io::Error::other(
+                    "connection to db.internal:5432 refused",
+                ));
+                failed?;
+                Ok(())
+            }
+        }
+        let secret = new_secret();
+        let receiver = Incoming::new("/webhooks")
+            .source("app", Scheme::standard(&secret).unwrap(), Leaky)
+            .unwrap()
+            .build()
+            .unwrap();
+        let body = br#"{"kind":"paid"}"#;
+        let headers = standard(&secret, "msg_leak", body);
+        run(async {
+            let answer = receiver
+                .receive_at("app", lookup(&headers), body, NOW)
+                .await;
+            assert_eq!(answer.status, 500);
+            assert!(!answer.message.contains("db.internal"), "{answer:?}");
+            let mut forged = headers.clone();
+            forged.remove(0);
+            let refused = receiver.receive_at("app", lookup(&forged), body, NOW).await;
+            assert_eq!(refused.status, 401);
+            assert!(!refused.message.contains("webhook-id"), "{refused:?}");
+            assert!(refused.detail.unwrap_or_default().contains("webhook-id"));
+        });
+    }
+
+    #[test]
+    fn a_source_without_a_window_is_named() {
+        let receiver = Incoming::new("/webhooks")
+            .source(
+                "app",
+                Scheme::standard(&new_secret()).unwrap(),
+                Count::default(),
+            )
+            .unwrap()
+            .source("gh", Scheme::github("s3cret").unwrap(), Count::default())
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(receiver.unwindowed(), vec!["gh"]);
+    }
+
+    #[test]
+    fn a_huge_keep_is_clamped() {
+        let incoming = Incoming::new("/webhooks").keep(Duration::MAX);
+        assert_eq!(incoming.keep, MAX_KEEP);
     }
 
     #[test]

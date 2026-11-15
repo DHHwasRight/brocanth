@@ -13,10 +13,10 @@ The wizard calls it: *An OpenAPI document, derived from your routes*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`input`](input.md) |
+| Adapts to | [`config`](config.md), [`input`](input.md), [`auth-oauth`](auth-oauth.md), [`oauth-client`](oauth-client.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-openapi` (features `zod`) |
+| Crates | `brocanth-openapi` (feature `zod`; `admin` with that module) |
 | Without it | no document; a client learns this API by reading the handlers |
 
 ## What it writes
@@ -34,6 +34,17 @@ Slots:
 - src/plugins/mod.rs (the provider list): `openapi crate::plugins::openapi::OpenApi`
 - src/pages/mod.rs (the route table test): `/openapi.json` (2 entries)
 - config/<env>.toml: `[openapi]`
+- the admin panels, with `admin`: `brocanth_openapi::admin::ApiPanel`
+
+The document hides its own two routes. It also hides the routes that
+`admin`, `auth-oauth` and `oauth-client` mount, read from their module
+files: the document is public, and those routes are not this API.
+
+## Choices
+
+| Choice | Default | What it does |
+|---|---|---|
+| integration `admin` | on | A read-only tab at `/admin/api` with every operation. Without `admin` it does nothing. |
 
 ## Settings
 

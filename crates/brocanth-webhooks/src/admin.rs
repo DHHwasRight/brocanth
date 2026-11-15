@@ -92,10 +92,15 @@ impl Panel for DeliveriesPanel {
             .unwrap_or(1);
         let failed = |e: crate::OutError| AdminError::Data(brocanth_admin::DataError::Backend(e.0));
         let endpoints = outgoing.endpoints().await.map_err(failed)?;
-        let rows = outgoing
-            .deliveries(PAGE + 1, (page - 1) * PAGE)
-            .await
-            .map_err(failed)?;
+        // A page past the end of i64 is past the end of the log: an empty
+        // page, not an overflow.
+        let rows = match (page - 1).checked_mul(PAGE) {
+            Some(offset) => outgoing
+                .deliveries(PAGE + 1, offset)
+                .await
+                .map_err(failed)?,
+            None => Vec::new(),
+        };
         Ok(Some(PanelPage::body(
             "Webhooks",
             screen(&r, &endpoints, &rows, page),

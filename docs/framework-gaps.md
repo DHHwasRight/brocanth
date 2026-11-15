@@ -362,7 +362,7 @@ what was read.
 | `brocanth-cache` | — | yes | — | `cache` |
 | `brocanth-realtime` | — | yes | events (as a sink) | `realtime` |
 | `brocanth-auth` | 8,875 | 146 | 2 | `auth`, `auth-screens`, `auth-oauth`, `auth-lockout`, `superuser`, `roles` |
-| `brocanth-openapi` | 5,873 | 72 | **0** | **no** |
+| `brocanth-openapi` | 5,873 | 72 | the CLI (scaffold) | `openapi` |
 | `brocanth-schema` | 4,832 | 61 | **0** | **no** |
 | `brocanth-storage` | 2,944 | 70 | 2 | **no** |
 | `brocanth-policy` | 3,290 | 64 | 2 | **no** |
@@ -444,7 +444,7 @@ means it is not yet a feature.
 | Background jobs with retries and a dead letter | **yes, and further** | `brocanth-jobs`; Rails and Django both need a second product for this |
 | Single binary, embedded database (PocketBase) | **branch** | `brocanth-pgserver`, unmerged |
 | Realtime subscriptions (PocketBase) | **yes** | `realtime-sse` writes `GET /realtime/events?topics=..` over the broker: one connection per subscriber, topics authorised on connect, a heartbeat, `lagged` for dropped frames, an end on shutdown. No replay: a reconnect is told `lagged` |
-| OpenAPI document (PocketBase) | **yes, unwired** | `brocanth-openapi`, 5,873 lines, one test file |
+| OpenAPI document (PocketBase) | **yes** | `brocanth-openapi`, with a scaffold module: `--with openapi` serves `/openapi.json` and `/openapi.yaml`, and with `admin` an `API` tab. Three test files |
 
 ---
 

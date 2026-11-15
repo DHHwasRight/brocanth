@@ -84,7 +84,7 @@ use tokio::sync::watch;
 
 use crate::error::{Error, Result};
 use crate::events::{JobEvent, JobEvents};
-use crate::job::JobFailure;
+use crate::job::{JobFailure, WorkerState};
 use crate::queue::Queue;
 use crate::registry::{JobRegistry, RunEnv};
 
@@ -157,6 +157,7 @@ pub struct WorkerBuilder {
     queue: Queue,
     registry: JobRegistry,
     config: WorkerConfig,
+    state: WorkerState,
 }
 
 impl WorkerBuilder {
@@ -232,6 +233,15 @@ impl WorkerBuilder {
         self
     }
 
+    /// Gives every job this worker runs a value of type `T`, which it reads
+    /// with [`JobContext::state`](crate::JobContext::state): a client, a
+    /// mailer, a handle on the application. A second value of one type
+    /// replaces the first.
+    pub fn state<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.state = self.state.with(value);
+        self
+    }
+
     /// Replaces the registry wholesale, for an application that builds one
     /// centrally and hands the same one to every worker.
     pub fn registry(mut self, registry: JobRegistry) -> Self {
@@ -283,6 +293,7 @@ impl WorkerBuilder {
             queue: self.queue,
             registry: self.registry,
             config: self.config,
+            state: self.state,
             id,
         })
     }
@@ -298,6 +309,7 @@ pub struct Worker {
     queue: Queue,
     registry: JobRegistry,
     config: WorkerConfig,
+    state: WorkerState,
     id: String,
 }
 
@@ -308,6 +320,7 @@ impl Worker {
             queue: queue.clone(),
             registry: JobRegistry::new(),
             config: WorkerConfig::default(),
+            state: WorkerState::default(),
         }
     }
 
@@ -397,6 +410,7 @@ impl Worker {
         };
         let registry = self.registry.build(RunEnv {
             timeout: config.job_timeout,
+            state: self.state.clone(),
         });
         let engine = brocanth_queue::Worker::new(
             Arc::clone(self.queue.engine()),

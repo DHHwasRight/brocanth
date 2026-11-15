@@ -15,9 +15,20 @@
 //!
 //! * **The transport is a setting, and the default is `log`.** A
 //!   development configuration that is copied to production then sends no
-//!   mail to real people. The plugin warns at startup when the transport is
-//!   not `smtp`. Reason: a mail that went to a customer from a laptop cannot
-//!   be called back; a mail that went to the log can be sent again.
+//!   mail to real people. Reason: a mail that went to a customer from a
+//!   laptop cannot be called back; a mail that went to the log can be sent
+//!   again.
+//! * **Outside development, `log` and `folder` stop the start.** Both
+//!   write the whole message, reset and verification links included, to
+//!   the log or the disk. In development that is the point; in production
+//!   it is a credential in the log. So the start refuses them unless
+//!   `$<APP>_ENV` is `development`, with a `help:` line that names
+//!   `[mail] transport = "smtp"`.
+//! * **A queued message that runs out of attempts is not kept.** The job's
+//!   payload is the whole message, links included. A delivered job's row is
+//!   deleted, and the last failed attempt logs the recipients and the
+//!   subject and ends the job, so no message waits in the dead letter or in
+//!   its backups.
 //! * **The SMTP password is a secret.** It has no flag, because every user on
 //!   the host can read a process's arguments. It comes from the file or from
 //!   `$<APP>_MAIL__SMTP_PASSWORD`.
@@ -51,6 +62,14 @@ impl Module for Mail {
         .adapts_to(
             "jobs",
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
+        )
+        .adapts_to(
+            "db",
+            "the application opens Postgres, so the test that starts it is left out",
+        )
+        .adapts_to(
+            "jobs-memory",
+            "a memory queue opens no database, so the test that starts the application stays",
         )
         .asked_in("behaviour", "Send mail")
         .krate(
@@ -158,20 +177,28 @@ const AGENTS: &str = "\n\
     password in a file that is in git or on a command line.\n\
     \n\
     In development `[mail] transport` is `log`: each message is in the log,\n\
-    and nothing is sent.\n";
+    and nothing is sent. Outside development only `smtp` starts.\n";
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "mail");
     let jobs = project.has("jobs");
+    // `{:?}`: the title is free text, and a quote or a backslash in it
+    // must not end the string literal.
     let mut text = PLUGIN
         .replace("@DERIVE@", &derive)
         .replace("@NOTE@", &note)
-        .replace("@TITLE@", project.title);
+        .replace("@TITLE@", &format!("{:?}", project.title));
     for (marker, with, without) in JOBS_EDITS {
         assert!(text.contains(marker), "the mail scaffold lost `{marker}`");
         text = text.replace(marker, if jobs { with } else { without });
     }
-    text
+    // When the application opens Postgres -- the `db` module, or a `jobs`
+    // queue in Postgres -- a build needs a database: that test is left out.
+    // A memory queue (`jobs-memory`) opens none, so the test stays.
+    // Both asked every time, so the manifest check sees both questions.
+    let memory_queue = project.has("jobs-memory");
+    let postgres = project.has("db") || (jobs && !memory_queue);
+    text.replace("@APP_TEST@", if postgres { "" } else { APP_TEST })
 }
 
 /// The parts of the file that change with `jobs`: the marker, the text with
@@ -261,17 +288,7 @@ const JOBS_EDITS: &[(&str, &str, &str)] = &[
         "",
     ),
     ("@PLUGIN_NEW@\n", "            worker: None,\n", ""),
-    (
-        "@REMEMBER@\n",
-        "        // The job reads the mail from here: a worker has no request\n\
-         \x20       // context. The first application built in this process decides.\n\
-         \x20       let _ = SENDER.set(mail.clone());\n",
-        "",
-    ),
     ("@STAGES@\n", STAGES, "\n"),
-    // With `jobs` the application opens Postgres, so a build needs a
-    // database: that test is left out.
-    ("@APP_TEST@", "", APP_TEST),
 ];
 
 /// Without `jobs`: the whole application starts, with the settings
@@ -320,13 +337,15 @@ impl From<MailError> for DeliverError {
     }
 }
 
-/// The mail the worker sends, set once when the plugin is built.
-static SENDER: OnceLock<Mail> = OnceLock::new();
-
 /// One message, sent from the `mail` queue.
 ///
 /// The message is checked again when the worker reads it back: a row that
 /// was edited in the table cannot carry a newline into a header.
+///
+/// The payload is the whole message, links included. So the last attempt
+/// does not fail into the dead letter, where it would wait with its links
+/// until someone discards it: it logs the recipients and the subject, and
+/// ends the job.
 #[derive(Serialize, Deserialize)]
 pub struct DeliverMail {
     pub message: Message,
@@ -337,11 +356,28 @@ impl Job for DeliverMail {
     const QUEUE: &'static str = "mail";
     type Error = MailError;
 
-    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
-        let mail = SENDER
-            .get()
-            .ok_or_else(|| MailError::transport("the mail plugin was not built in this process"))?;
-        mail.send(&self.message).await
+    async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
+        // The plugin gives its worker the mail: a job has no request context.
+        let mail = cx.state::<Mail>().ok_or_else(|| {
+            MailError::transport(
+                "this worker was given no mail\n\
+                 help: build the worker with `.state(mail)`, as MailPlugin::start does",
+            )
+        })?;
+        match mail.send(&self.message).await {
+            Err(e) if cx.is_last_attempt() => {
+                let to: Vec<&str> = self.message.to().iter().map(Address::address).collect();
+                let to = to.join(", ");
+                let subject = self.message.subject().as_str();
+                crate::plugins::say!(
+                    error,
+                    "[mail] gave up on mail to {to}: {subject}: {e}";
+                    %to, %subject
+                );
+                Ok(())
+            }
+            sent => sent,
+        }
     }
 }
 
@@ -364,12 +400,22 @@ const STAGES: &str = r#"
         if !self.settings.worker {
             return Ok(());
         }
+        let Some(outbox) = &self.outbox else {
+            return Ok(());
+        };
         let worker = Worker::builder(&queue)
             .register::<DeliverMail>()
             .queues(vec![DeliverMail::QUEUE.to_string()])
             .concurrency(2)
+            .state(outbox.mail.clone())
             .start()
-            .map_err(|e| PluginError::new(format!("[mail] starting the worker: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(format!(
+                    "[mail] starting the worker: {e}\n\
+                     help: check the jobs settings, or set `[mail] worker = false` \
+                     in a process that only serves"
+                ))
+            })?;
         let grace = crate::plugins::shutdown_grace().map_err(PluginError::new)?;
         worker.stop_when(lc.readiness().draining(), grace);
         self.worker = Some(worker);
@@ -447,7 +493,7 @@ impl Default for Settings {
         Self {
             transport: "log".to_string(),
             from: "no-reply@example.com".to_string(),
-            from_name: "@TITLE@".to_string(),
+            from_name: @TITLE@.to_string(),
             folder: "tmp/mail".to_string(),
             smtp_host: "localhost".to_string(),
             smtp_port: 587,
@@ -501,6 +547,26 @@ pub struct MailPlugin {
 @PLUGIN_FIELDS@
 }
 
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
+/// Refuses `log` and `folder` outside development: both write every
+/// message, reset links included, to the log or the disk.
+fn check_transport(transport: &str, environment: &str) -> Result<(), PluginError> {
+    if transport == "smtp" || environment == "development" {
+        return Ok(());
+    }
+    Err(PluginError::new(format!(
+        "[mail] transport is `{transport}` in `{environment}`: every message, links \
+         included, would go to the log or the disk\n\
+         help: set `[mail] transport = \"smtp\"` and `[mail] smtp_host` in \
+         config/{environment}.toml or the environment"
+    )))
+}
+
 impl MailPlugin {
     /// `[mail] from`, with `[mail] from_name` beside it.
     fn sender(&self) -> Result<Address, PluginError> {
@@ -543,6 +609,7 @@ impl MailPlugin {
                 if !s.smtp_username.is_empty() {
                     config = config.with_credentials(&s.smtp_username, &s.smtp_password);
                 }
+                // The error ends with its own `help:` line.
                 Arc::new(
                     Smtp::connect(&config).map_err(|e| PluginError::new(format!("[mail] {e}")))?,
                 )
@@ -570,6 +637,7 @@ impl Plugin for MailPlugin {
     }
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        check_transport(&self.settings.transport, &environment())?;
         let from = self.sender()?;
         // The SMTP pool spawns its upkeep on the runtime, so it needs the
         // runtime entered. It opens no connection here.
@@ -589,7 +657,6 @@ impl Plugin for MailPlugin {
             );
         }
         let mail = Mail::new(mailer, from);
-@REMEMBER@
         self.outbox = Some(Outbox {
             mail,
             transport: self.settings.transport.clone(),
@@ -675,5 +742,39 @@ mod tests {
         let name = plugin(|s| s.from_name = "Shop\r\nBcc: list@example.com".to_string());
         assert!(name.sender().is_err(), "a line break in the sender's name");
     }
+
+    /// `log` and `folder` write every message, reset links included: only
+    /// development starts with them.
+    #[test]
+    fn outside_development_only_smtp_starts() {
+        for transport in ["log", "folder", "smtp"] {
+            let started = check_transport(transport, "development");
+            assert!(started.is_ok(), "{transport}");
+        }
+        for transport in ["log", "folder"] {
+            let refused = refusal(check_transport(transport, "production"));
+            assert!(refused.contains("help:"), "{refused}");
+        }
+        assert!(check_transport("smtp", "production").is_ok());
+    }
 @APP_TEST@}
 "#;
+
+#[cfg(test)]
+mod tests {
+    use brocanth_scaffold::Project;
+
+    /// The title is free text: a quote or a backslash in it stays inside the
+    /// string literal of the sender's name.
+    #[test]
+    fn a_quote_in_the_title_stays_in_its_string() {
+        let title = r#"Bob's "Shop" \ Co"#;
+        let known = ["mail", "config", "jobs", "jobs-memory", "db"];
+        let project = Project::new("shop", title, &["mail"], &known);
+        let text = super::plugin_rs(&project);
+        assert!(
+            text.contains(r#"from_name: "Bob's \"Shop\" \\ Co".to_string(),"#),
+            "{text}"
+        );
+    }
+}

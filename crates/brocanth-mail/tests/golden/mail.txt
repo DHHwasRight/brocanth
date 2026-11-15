@@ -2377,6 +2377,26 @@ pub struct MailPlugin {
     outbox: Option<Outbox>,
 }
 
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
+/// Refuses `log` and `folder` outside development: both write every
+/// message, reset links included, to the log or the disk.
+fn check_transport(transport: &str, environment: &str) -> Result<(), PluginError> {
+    if transport == "smtp" || environment == "development" {
+        return Ok(());
+    }
+    Err(PluginError::new(format!(
+        "[mail] transport is `{transport}` in `{environment}`: every message, links \
+         included, would go to the log or the disk\n\
+         help: set `[mail] transport = \"smtp\"` and `[mail] smtp_host` in \
+         config/{environment}.toml or the environment"
+    )))
+}
+
 impl MailPlugin {
     /// `[mail] from`, with `[mail] from_name` beside it.
     fn sender(&self) -> Result<Address, PluginError> {
@@ -2419,6 +2439,7 @@ impl MailPlugin {
                 if !s.smtp_username.is_empty() {
                     config = config.with_credentials(&s.smtp_username, &s.smtp_password);
                 }
+                // The error ends with its own `help:` line.
                 Arc::new(
                     Smtp::connect(&config).map_err(|e| PluginError::new(format!("[mail] {e}")))?,
                 )
@@ -2445,6 +2466,7 @@ impl Plugin for MailPlugin {
     }
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        check_transport(&self.settings.transport, &environment())?;
         let from = self.sender()?;
         // The SMTP pool spawns its upkeep on the runtime, so it needs the
         // runtime entered. It opens no connection here.
@@ -2549,6 +2571,21 @@ mod tests {
         assert!(name.sender().is_err(), "a line break in the sender's name");
     }
 
+    /// `log` and `folder` write every message, reset links included: only
+    /// development starts with them.
+    #[test]
+    fn outside_development_only_smtp_starts() {
+        for transport in ["log", "folder", "smtp"] {
+            let started = check_transport(transport, "development");
+            assert!(started.is_ok(), "{transport}");
+        }
+        for transport in ["log", "folder"] {
+            let refused = refusal(check_transport(transport, "production"));
+            assert!(refused.contains("help:"), "{refused}");
+        }
+        assert!(check_transport("smtp", "production").is_ok());
+    }
+
     /// The settings `cargo run` reads: the development file, or the
     /// literal in `src/plugins/mod.rs`.
     #[test]
@@ -2645,7 +2682,7 @@ the response. Never build an `Smtp` in a page, and never put the SMTP
 password in a file that is in git or on a command line.
 
 In development `[mail] transport` is `log`: each message is in the log,
-and nothing is sent.
+and nothing is sent. Outside development only `smtp` starts.
 
 ## Decisions that belong to the person
 
@@ -2675,7 +2712,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: fe88ac7ff7711549 -->
+<!-- brocanth-digest: 1e5edc05c8b79e44 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

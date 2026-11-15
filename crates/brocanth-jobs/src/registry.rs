@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use brocanth_queue::{BoxFuture, Entry, Lane, Uniqueness};
 
-use crate::job::{FailureKind, Job, JobContext, JobFailure};
+use crate::job::{FailureKind, Job, JobContext, JobFailure, WorkerState};
 
 /// Where a failure's backtrace starts in the message the engine stores.
 ///
@@ -40,10 +40,12 @@ use crate::job::{FailureKind, Job, JobContext, JobFailure};
 pub(crate) const BACKTRACE_MARK: &str = "\n\nbacktrace:\n";
 
 /// What a worker tells every runner it builds.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RunEnv {
     /// The per-job timeout, if the worker has one.
     pub(crate) timeout: Option<Duration>,
+    /// What every job reads with [`JobContext::state`].
+    pub(crate) state: WorkerState,
 }
 
 type Build = Arc<dyn Fn(RunEnv) -> Entry + Send + Sync>;
@@ -103,7 +105,9 @@ impl JobRegistry {
                 // asks for nothing here. The enqueue checks a key against the
                 // backend instead.
                 Uniqueness::None,
-                move |payload: Vec<u8>, cx: brocanth_queue::JobContext| run::<J>(env, payload, cx),
+                move |payload: Vec<u8>, cx: brocanth_queue::JobContext| {
+                    run::<J>(env.clone(), payload, cx)
+                },
             )
         });
         self.entries.insert(J::NAME, (id, build));
@@ -137,7 +141,7 @@ impl JobRegistry {
         let mut registry = brocanth_queue::Registry::new();
         for (_, build) in self.entries.values() {
             // The map's keys are unique, so a duplicate kind cannot happen.
-            let _ = registry.try_add(build(env));
+            let _ = registry.try_add(build(env.clone()));
         }
         registry
     }
@@ -168,7 +172,10 @@ fn run<J: Job>(
                 .into_queue());
             }
         };
-        let cx = JobContext { inner: cx };
+        let cx = JobContext {
+            inner: cx,
+            state: env.state.clone(),
+        };
         let body = CatchUnwind::new(Box::pin(async move { job.perform(&cx).await }));
         let outcome = match env.timeout {
             Some(limit) => match tokio::time::timeout(limit, body).await {
@@ -395,10 +402,40 @@ mod tests {
         r.register::<Sleepy>();
         let env = RunEnv {
             timeout: Some(Duration::from_millis(20)),
+            ..RunEnv::default()
         };
         let failure = failure_of(&r, env, "sleepy", "null").await;
         assert_eq!(failure.kind, brocanth_queue::FailureKind::TimedOut);
         assert!(failure.kind.is_retryable());
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Reads;
+
+    impl Job for Reads {
+        const NAME: &'static str = "reads";
+        type Error = String;
+
+        async fn perform(&self, cx: &JobContext) -> Result<(), Self::Error> {
+            match cx.state::<&'static str>() {
+                Some(&"given") => Err("read the state".to_string()),
+                other => Err(format!("no state: {other:?}")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_job_reads_the_state_its_worker_was_given() {
+        let mut r = JobRegistry::new();
+        r.register::<Reads>();
+        let env = RunEnv {
+            state: WorkerState::default().with::<&'static str>("given"),
+            ..RunEnv::default()
+        };
+        let failure = failure_of(&r, env, "reads", "null").await;
+        assert!(failure.message.contains("read the state"), "{failure:?}");
+        let failure = failure_of(&r, RunEnv::default(), "reads", "null").await;
+        assert!(failure.message.contains("no state"), "{failure:?}");
     }
 
     #[test]

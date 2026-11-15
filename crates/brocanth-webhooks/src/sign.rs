@@ -119,6 +119,12 @@ impl Scheme {
     /// Any sender that puts `<prefix><hex HMAC-SHA256 of the body>` in one
     /// header.
     ///
+    /// No timestamp is signed, so there is **no replay window**: a captured
+    /// delivery verifies for ever. Only the idempotency store stops a
+    /// replay, and only while it keeps the key. Use a lasting store
+    /// ([`PgSeen`](crate::PgSeen)) for such a source; the memory store is
+    /// lost at restart.
+    ///
     /// # Errors
     /// The secret is empty.
     pub fn hmac_sha256(header: &str, prefix: &str, secret: &str) -> Result<Self, SecretError> {
@@ -130,6 +136,12 @@ impl Scheme {
             prefix: prefix.to_string(),
             key: secret.as_bytes().to_vec(),
         })
+    }
+
+    /// Whether the scheme signs a timestamp, so a replay window applies.
+    /// `false` for [`Scheme::hmac_sha256`] and [`Scheme::github`].
+    pub fn has_window(&self) -> bool {
+        !matches!(self, Scheme::Hmac { .. })
     }
 
     /// Checks one delivery.

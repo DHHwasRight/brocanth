@@ -13,9 +13,8 @@ use std::time::Duration;
 use brocanth_db::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use brocanth_db::sqlx::{self, PgPool};
 use brocanth_db::Db;
-use brocanth_jobs::Worker;
 use brocanth_webhooks::outgoing::{Deliver, QUEUE};
-use brocanth_webhooks::{Outgoing, OutgoingConfig, PgSeen, Scheme, Seen};
+use brocanth_webhooks::{Claim, Outgoing, OutgoingConfig, PgSeen, Scheme, Seen};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -97,17 +96,35 @@ async fn two_instances_share_the_keys_and_a_release_frees_one() {
     a.migrate().await.expect("migrate");
     a.migrate().await.expect("migrate twice");
     let keep = Duration::from_secs(60);
-    assert!(a.claim("stripe", "evt_1", keep).await.unwrap());
-    assert!(
-        !b.claim("stripe", "evt_1", keep).await.unwrap(),
-        "b sees a's key"
+    assert_eq!(a.claim("stripe", "evt_1", keep).await, Ok(Claim::New));
+    assert_eq!(
+        b.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::Running),
+        "b sees a's key, still running"
     );
-    assert!(
-        b.claim("github", "evt_1", keep).await.unwrap(),
+    assert_eq!(
+        b.claim("github", "evt_1", keep).await,
+        Ok(Claim::New),
         "keys are per source"
     );
     a.release("stripe", "evt_1").await.unwrap();
-    assert!(b.claim("stripe", "evt_1", keep).await.unwrap(), "released");
+    assert_eq!(
+        b.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::New),
+        "released"
+    );
+    b.confirm("stripe", "evt_1", keep).await.unwrap();
+    assert_eq!(
+        a.claim("stripe", "evt_1", keep).await,
+        Ok(Claim::Done),
+        "confirmed"
+    );
+    // A keep far past the range of an interval is clamped, not refused.
+    assert_eq!(
+        a.claim("huge", "evt_1", Duration::MAX).await,
+        Ok(Claim::New)
+    );
+    a.confirm("huge", "evt_1", Duration::MAX).await.unwrap();
     scope.drop_schema().await;
 }
 
@@ -218,9 +235,9 @@ async fn state_of(outgoing: &Outgoing, id: i64) -> (String, i32, Option<i32>) {
     (row.state, row.attempts, row.last_status)
 }
 
-/// The whole path: emit, the job, the worker, the POST, the row. The only
-/// test here that runs the worker, because the job finds its `Outgoing`
-/// through the process-wide `Outgoing::installed`.
+/// The whole path: emit, the job, the worker, the POST, the row. The job
+/// finds its `Outgoing` in the state of the worker `Outgoing::worker`
+/// built, not in a process-wide value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_emitted_event_reaches_the_endpoint_signed_and_the_row_says_delivered() {
     let Some(scope) =
@@ -230,7 +247,6 @@ async fn an_emitted_event_reaches_the_endpoint_signed_and_the_row_says_delivered
     };
     let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
     outgoing.migrate().await.expect("migrate");
-    outgoing.install();
     let (url, got) = receiver(204).await;
     let endpoint = outgoing
         .add_endpoint(&url, &["invoice.*"], "test")
@@ -249,9 +265,8 @@ async fn an_emitted_event_reaches_the_endpoint_signed_and_the_row_says_delivered
         .unwrap();
     assert_eq!(ids.len(), 1, "one endpoint wants the event");
 
-    let worker = Worker::builder(outgoing.queue())
-        .register::<Deliver>()
-        .queues([QUEUE])
+    let worker = outgoing
+        .worker()
         .poll_interval(Duration::from_millis(50))
         .start()
         .expect("a worker");
@@ -732,6 +747,166 @@ async fn the_admin_tab_escapes_a_receivers_answer_and_hides_the_button_from_a_re
         panic!("a redirect after the button");
     };
     assert_eq!(state_of(&outgoing, ids[0]).await.0, "pending");
+    scope.drop_schema().await;
+}
+
+/// A job run with no `Outgoing` in its state fails with a `help:` line,
+/// rather than reaching for a process-wide value; with one, it delivers.
+#[tokio::test]
+async fn the_job_reads_its_outgoing_from_the_worker_state() {
+    use brocanth_jobs::{Job, JobContext, JobId};
+    let Some(scope) = scoped("the_job_reads_its_outgoing_from_the_worker_state").await else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, got) = receiver(204).await;
+    outgoing.add_endpoint(&url, &["*"], "bare").await.unwrap();
+    let ids = outgoing.emit("a.b", &serde_json::json!({})).await.unwrap();
+    let job = Deliver { delivery: ids[0] };
+    let cx = || JobContext::detached(JobId("1".into()), Deliver::NAME, QUEUE, 1, 8);
+    let error = job.perform(&cx()).await.expect_err("no state");
+    assert!(error.contains("help:"), "{error}");
+    assert!(got.lock().unwrap().is_empty());
+    job.perform(&cx().with_state(outgoing.clone()))
+        .await
+        .expect("delivered");
+    assert_eq!(state_of(&outgoing, ids[0]).await.0, "delivered");
+    scope.drop_schema().await;
+}
+
+/// `emit_in` writes on the caller's transaction: a rollback leaves no row
+/// and no job, so the retry of the whole write sends no copy.
+#[tokio::test]
+async fn emit_in_commits_with_the_caller_or_not_at_all() {
+    let Some(scope) = scoped("emit_in_commits_with_the_caller_or_not_at_all").await else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, _) = receiver(204).await;
+    outgoing.add_endpoint(&url, &["*"], "tx").await.unwrap();
+    // No worker runs, so a committed job waits in the outbox.
+    let jobs = || async {
+        let outbox: i64 = sqlx::query_scalar("SELECT count(*) FROM queue_outbox")
+            .fetch_one(scope.db.pool())
+            .await
+            .unwrap();
+        outbox
+    };
+
+    let mut tx = scope.db.pool().begin().await.unwrap();
+    let ids = outgoing
+        .emit_in(&mut tx, "a.b", &serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    tx.rollback().await.unwrap();
+    assert!(outgoing.deliveries(10, 0).await.unwrap().is_empty());
+    assert_eq!(jobs().await, 0, "the job rolled back with the row");
+
+    let mut tx = scope.db.pool().begin().await.unwrap();
+    outgoing
+        .emit_in(&mut tx, "a.b", &serde_json::json!({}))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(outgoing.deliveries(10, 0).await.unwrap().len(), 1);
+    assert_eq!(jobs().await, 1, "the job committed with the row");
+    scope.drop_schema().await;
+}
+
+/// The log keeps a row `keep_days`; a row still on its way is never
+/// deleted.
+#[tokio::test]
+async fn prune_deletes_only_old_finished_rows() {
+    let Some(scope) = scoped("prune_deletes_only_old_finished_rows").await else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, _) = receiver(204).await;
+    outgoing.add_endpoint(&url, &["*"], "old").await.unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.extend(outgoing.emit("a.b", &serde_json::json!({})).await.unwrap());
+    }
+    outgoing.attempt(ids[0], false).await.unwrap();
+    sqlx::query("UPDATE brocanth_webhook_deliveries SET state = 'failed' WHERE id = $1")
+        .bind(ids[1])
+        .execute(scope.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(outgoing.prune(Duration::from_secs(3600)).await.unwrap(), 0);
+    sqlx::query("UPDATE brocanth_webhook_deliveries SET created_at = now() - interval '2 days'")
+        .execute(scope.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(outgoing.prune(Duration::from_secs(3600)).await.unwrap(), 2);
+    let left: Vec<i64> = outgoing
+        .deliveries(10, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(left, vec![ids[2]], "the pending row stays");
+    scope.drop_schema().await;
+}
+
+/// The sink queues changes for one task; a change it cannot emit is
+/// counted, not silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sink_emits_in_order_and_counts_what_it_loses() {
+    use brocanth_events::{ChangeSink, RowChange};
+    let Some(scope) = scoped("the_sink_emits_in_order_and_counts_what_it_loses").await else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, _) = receiver(204).await;
+    outgoing.add_endpoint(&url, &["*"], "sink").await.unwrap();
+    let sink = outgoing.sink(&["posts"]).unwrap();
+    for id in 0..5_i64 {
+        sink.publish(&RowChange::deleted("posts", id));
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = outgoing.deliveries(10, 0).await.unwrap();
+        if rows.len() == 5 {
+            let ids: Vec<String> = rows
+                .iter()
+                .rev()
+                .map(|r| {
+                    let body: serde_json::Value = serde_json::from_str(&r.payload).unwrap();
+                    body["data"]["id"].as_str().unwrap().to_string()
+                })
+                .collect();
+            assert_eq!(ids, ["0", "1", "2", "3", "4"], "in order");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} rows",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(sink.lost(), 0);
+    // With the tables gone, every emit fails and is counted.
+    sqlx::query("DROP TABLE brocanth_webhook_deliveries")
+        .execute(scope.db.pool())
+        .await
+        .unwrap();
+    sink.publish(&RowChange::deleted("posts", 9_i64));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while sink.lost() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the failure was not counted"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     scope.drop_schema().await;
 }
 

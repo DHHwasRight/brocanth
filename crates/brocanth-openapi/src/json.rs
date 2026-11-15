@@ -688,8 +688,16 @@ impl Parser<'_> {
         if self.at + 4 > self.bytes.len() {
             return Err(self.error("short unicode escape"));
         }
-        let slice = &self.text[self.at..self.at + 4];
-        let value = u32::from_str_radix(slice, 16).map_err(|_| self.error("bad unicode escape"))?;
+        // Read bytes, not a `&str` slice: the slice end can fall inside a
+        // multibyte character and panic. Checking each byte also refuses a
+        // sign, which `from_str_radix` accepts.
+        let mut value = 0;
+        for &byte in &self.bytes[self.at..self.at + 4] {
+            let digit = char::from(byte)
+                .to_digit(16)
+                .ok_or_else(|| self.error("bad unicode escape"))?;
+            value = value * 16 + digit;
+        }
         self.at += 4;
         Ok(value)
     }
@@ -755,6 +763,17 @@ mod tests {
         let a = Json::Object(vec![("x".into(), Json::Int(1)), ("y".into(), Json::Int(2))]);
         let b = Json::Object(vec![("y".into(), Json::Int(2)), ("x".into(), Json::Int(1))]);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_unicode_escape_cut_by_a_multibyte_character_is_an_error() {
+        assert!(parse("\"\\u000\u{e9}\"").is_err());
+    }
+
+    #[test]
+    fn a_unicode_escape_refuses_a_sign() {
+        assert!(parse(r#""\u+041""#).is_err());
+        assert_eq!(parse(r#""\u0041""#).unwrap(), Json::Str("A".into()));
     }
 
     #[test]

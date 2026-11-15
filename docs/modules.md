@@ -597,11 +597,12 @@ scope.** The per-request cost of `(app.context)()` — one `HashMap` and one
 box per provider, on every matched request, read or not — was flagged by
 four and called sound-but-costly by three. It is a real design cost and a
 `OnceCell` in `Ctx` would remove it; it is not a defect, and changing the
-eager/lazy semantics is a decision rather than a fix. Three single-vote
+eager/lazy semantics is a decision rather than a fix. Two single-vote
 items are open: the `jt-rsx` golden snapshots a module order the CLI
-re-sorts away, two renderers writing one slot rely on array order the
-scaffold says must never be load-bearing, and `/openapi.yaml` is listed in
-the document it serves.
+re-sorts away, and two renderers writing one slot rely on array order the
+scaffold says must never be load-bearing. A third, `/openapi.yaml` listed
+in the document it serves, is closed: the generated builder hides
+`YAML_ROUTE` beside `ROUTE`.
 
 **The two that matter most are not in the table.** `--with openapi`
 shipped a project failing `cargo fmt --check`, and `--with openapi`

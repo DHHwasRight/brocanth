@@ -344,7 +344,8 @@ async fn a_timestamp_outside_the_window_is_refused_in_the_past_and_the_future() 
                 .receive_at(sender.name, find(&headers), &body, NOW)
                 .await;
             assert_eq!(answer.status, 401, "{} signed {offset}s away", sender.name);
-            assert!(answer.message.contains("replay window"), "{answer:?}");
+            let why = answer.detail.clone().unwrap_or_default();
+            assert!(why.contains("replay window"), "{answer:?}");
         }
         for (n, offset) in [-300_i64, 300].into_iter().enumerate() {
             let body = format!(r#"{{"id":"evt_edge_{}_{n}"}}"#, sender.name).into_bytes();
@@ -554,7 +555,12 @@ async fn a_missing_or_unreadable_header_is_a_401_that_names_it() {
             .receive_at("standard", find(&headers), body, NOW)
             .await;
         assert_eq!(answer.status, 401);
-        assert!(answer.message.contains(name), "{answer:?}");
+        assert!(
+            !answer.message.contains(name),
+            "told the sender: {answer:?}"
+        );
+        let why = answer.detail.clone().unwrap_or_default();
+        assert!(why.contains(name), "{answer:?}");
     }
     let mut headers = full.clone();
     headers[1].1 = "soon".to_string();
@@ -562,7 +568,8 @@ async fn a_missing_or_unreadable_header_is_a_401_that_names_it() {
         .receive_at("standard", find(&headers), body, NOW)
         .await;
     assert_eq!(answer.status, 401);
-    assert!(answer.message.contains("cannot be read"), "{answer:?}");
+    let why = answer.detail.clone().unwrap_or_default();
+    assert!(why.contains("cannot be read"), "{answer:?}");
 
     for value in ["v1=abc", "t=soon,v1=00", ""] {
         let headers = vec![("stripe-signature".to_string(), value.to_string())];
