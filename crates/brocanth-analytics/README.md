@@ -7,7 +7,8 @@ writes the queue to your own Postgres every few seconds.
 
 There is no cookie, no script in the page, and no third party. No IP
 address and no user agent is stored. A visitor is a hash that changes
-every day, and the salt that made it is deleted when the day ends.
+every day, and the salt that made it is deleted the day after: one more
+day lets every instance write the views it still holds.
 
 Use it to answer "how many people read this page, and where did they
 come from". Do not use it to follow one person: it cannot, by design.
@@ -67,7 +68,7 @@ let app = AppBuilder::new()
 |---|---|---|
 | `enabled` | `true` (`false` in the generated development file) | Count page views. `false` installs no hook. |
 | `site` | the project name | The site on every row the hook writes, and part of the hash. A beacon row takes its origin's host instead. |
-| `exclude` | `["/admin"]` | Paths never counted, with everything under them. File only. |
+| `exclude` | `[]` | Paths never counted, with everything under them. File only. A generated project with `admin` adds the admin's mount path with `exclude_path`. |
 | `query_allow` | the five `utm_*` | Query parameters kept on the path. File only. |
 | `retention_days` | `760` | Days a row is kept (25 months). `0` keeps rows forever. |
 | `flush_interval` | `10` | Seconds between two writes. |

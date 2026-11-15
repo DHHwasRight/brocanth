@@ -37,7 +37,11 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
 ], optional = true }
 
-# `postgres`: `PgStore`, two tables in the database the `db` module opened.
+# The client address the `proxy-headers` hook read from a trusted proxy
+# (`ClientInfo`). An application with hooks links the middleware already.
+brocanth-middleware = { workspace = true, optional = true }
+
+# `postgres`: `PgStore`, three tables in the database the `db` module opened.
 brocanth-db = { workspace = true, optional = true }
 
 # `config`: `AnalyticsConfig` reads from an `[analytics]` section.
@@ -76,6 +80,7 @@ runtime = [
     "dep:getrandom",
     "dep:async-trait",
     "dep:tokio",
+    "dep:brocanth-middleware",
 ]
 postgres = ["runtime", "dep:brocanth-db"]
 config = ["runtime", "dep:serde"]

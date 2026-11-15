@@ -33,12 +33,12 @@
   function read() {
     try {
       var saved = JSON.parse(w.localStorage.getItem(KEY));
-      if (saved && saved.at + cfg.days * DAY > Date.now()) return saved.choice;
+      if (saved && saved.v === cfg.version && saved.at + cfg.days * DAY > Date.now()) return saved.choice;
     } catch (e) {}
     return null;
   }
   function write(choice) {
-    try { w.localStorage.setItem(KEY, JSON.stringify({ choice: choice, at: Date.now() })); } catch (e) {}
+    try { w.localStorage.setItem(KEY, JSON.stringify({ choice: choice, at: Date.now(), v: cfg.version })); } catch (e) {}
     if (cfg.log) report(choice);
   }
   function consentId() {
@@ -54,6 +54,8 @@
   }
   function report(choice) {
     var url = "/__consent?c=" + choice + "&id=" + consentId() + "&v=" + cfg.version;
+    var lang = banner && banner.getAttribute && banner.getAttribute("lang");
+    if (lang) url += "&l=" + encodeURIComponent(lang);
     try { w.fetch(url, { keepalive: true, credentials: "omit" }); } catch (e) {}
   }
 

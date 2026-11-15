@@ -1,11 +1,14 @@
 # brocanth-gtag
 
 Google Analytics 4 behind a consent banner. A response hook puts a banner
-and a small consent script into every HTML page. Google's tag loads only
-after the visitor accepts. Global Privacy Control and Do Not Track count as
-a refusal. Before a page view leaves, the URL loses its fragment, every
-query parameter that is not on an allow-list, and anything that holds an
-`@`. `/admin` never gets the tag.
+and a small consent script into every HTML page. In `basic` mode, the
+default, Google's tag loads only after the visitor accepts. In `advanced`
+mode, it loads on the first page with every consent denied and sends
+cookieless pings before any choice. Global Privacy Control and Do Not
+Track count as a refusal. Before a page view leaves, the URL loses its
+fragment, every query parameter that is not on an allow-list, and anything
+that holds an `@`. A generated project keeps the tag off its admin; by
+hand, call `.exclude_path("/admin")` on the configuration.
 
 Use it for a site that wants visit counts from Google Analytics and must
 ask first, as the GDPR and the ePrivacy rules require in the EU. Do not use
@@ -46,7 +49,7 @@ are not counted:
 | `consent_days` | `182` | `--gtag.consent_days` | `$<APP>_GTAG__CONSENT_DAYS` |
 | `send_title` | `false` | `--gtag.send_title` | `$<APP>_GTAG__SEND_TITLE` |
 | `allow_params` | the five `utm_*` | file only | by index, with `config` |
-| `exclude` | `["/admin"]` | file only | by index, with `config` |
+| `exclude` | `[]` (a generated project adds the admin's path) | file only | by index, with `config` |
 | `cookie_domain` | none | `--gtag.cookie_domain` | `$<APP>_GTAG__COOKIE_DOMAIN` |
 | `consent_log` | none | `--gtag.consent_log` | `$<APP>_GTAG__CONSENT_LOG` |
 | `banner.text`, `banner.accept`, `banner.refuse`, `banner.manage`, `banner.policy_url` | English | `--gtag.banner.*` | `$<APP>_GTAG__BANNER__*` |
@@ -70,6 +73,12 @@ choice demonstrates nothing. On a site with a server, set `consent_log` to
 a file: each choice is then appended as one JSON line, with no address and
 no user agent. A static site has no server to receive the report, so it
 cannot keep such a record.
+
+The script reports to `GET /__consent`. It answers only a request from the
+site's own pages, and it rotates the file past 16 MiB, but anyone can send
+it a request: give `/__consent` a rule in the rate limiter. The file is per
+instance, and a container loses it when it stops, unless the path is on a
+volume that outlives it.
 
 ```rust
 use brocanth_gtag::{parse_choice, GtagConfig};
@@ -95,8 +104,12 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_app::AppBuilder;
 use brocanth_gtag::{Gtag, GtagConfig};
 
+let config = GtagConfig::default()
+    .measuring("G-ABC123")
+    // The default excludes nothing: keep the tag off the admin.
+    .exclude_path("/admin");
 let app = AppBuilder::new()
-    .plugin_hooking(Gtag::new(GtagConfig::default().measuring("G-ABC123")))
+    .plugin_hooking(Gtag::new(config))
     .build()
     .expect("an application");
 # let _ = app;
@@ -159,7 +172,8 @@ cargo test -p brocanth-gtag
 
 The tests drive the hook with `brocanth-test`'s `TestClient` and check
 what a browser receives: no Google script before consent, no markup under
-Global Privacy Control or on `/admin`, and a policy that lets the tag load.
+Global Privacy Control or on an excluded path, and a policy that lets the
+tag load.
 `tests/consent_js.rs` runs the consent script under Node when `node` is on
 the `PATH`, and skips otherwise.
 

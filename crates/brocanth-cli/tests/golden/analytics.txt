@@ -1473,8 +1473,8 @@ macro_rules! register {
         //
         // A request hook, after dispatch: a GET answered with HTML is one
         // page view. It stores no address, no user agent and no cookie; the
-        // visitor is a hash whose salt is deleted when the day ends. The
-        // views go in two tables of the `[db]` database, written every
+        // visitor is a hash whose salt is deleted the day after. The
+        // views go in tables of the `[db]` database, written every
         // `flush_interval` seconds, never during a request.
         //
         // The admin is never counted, wherever src/modules/admin.rs
@@ -2247,7 +2247,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 89e29b128d1d9ea8
+// brocanth-digest: 7aeb6e23f660c264
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

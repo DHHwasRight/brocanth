@@ -187,7 +187,18 @@ fn a_consent_log_records_the_choice_and_nothing_that_names_the_visitor() {
         405
     );
 
-    let log = std::fs::read_to_string(&file).expect("the log");
+    // A cross-site page cannot write the log.
+    assert_eq!(
+        client
+            .send(
+                TestRequest::get("/__consent?c=denied&id=0123456789abcdef&v=1")
+                    .header("sec-fetch-site", "cross-site")
+            )
+            .status(),
+        403
+    );
+
+    let log = written(&file, 1);
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 1, "{log}");
     let line = lines[0];
@@ -200,11 +211,28 @@ fn a_consent_log_records_the_choice_and_nothing_that_names_the_visitor() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The log once it holds `lines` lines: a thread writes it, off the
+/// request.
+fn written(file: &std::path::Path, lines: usize) -> String {
+    for _ in 0..200 {
+        let log = std::fs::read_to_string(file).unwrap_or_default();
+        if log.lines().count() >= lines {
+            return log;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::read_to_string(file).unwrap_or_default()
+}
+
 #[test]
 fn a_choice_is_read_strictly() {
     use brocanth_gtag::parse_choice;
     let ok = parse_choice("c=denied&id=abcdef12&v=00ff").expect("a choice");
     assert_eq!(ok.choice, "denied");
+    assert_eq!(ok.locale, None);
+    let fr = parse_choice("c=denied&id=abcdef12&v=00ff&l=fr-CA").expect("a choice");
+    assert_eq!(fr.locale.as_deref(), Some("fr-CA"));
+    assert!(parse_choice("c=denied&id=abcdef12&v=00ff&l=f\"r").is_none());
     for bad in [
         "",
         "c=granted",

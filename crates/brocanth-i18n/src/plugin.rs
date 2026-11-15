@@ -112,8 +112,13 @@ impl<L: Locales> Plugin for I18nHook<L> {
         }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.negotiator.check().map_err(PluginError::new)
+    /// Also puts the [`Negotiator`] in the services, so a plugin that
+    /// writes URLs at startup (the sitemap, robots.txt) writes one per
+    /// locale with [`Negotiator::localized`]. Register it before them.
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        self.negotiator.check().map_err(PluginError::new)?;
+        lc.services_mut().insert(self.negotiator.clone());
+        Ok(())
     }
 
     /// A context with no request (`announce!`, a test) gets the default

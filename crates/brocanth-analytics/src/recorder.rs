@@ -147,7 +147,8 @@ impl Recorder {
         self.buffer().len()
     }
 
-    /// Views dropped because the buffer was full.
+    /// Views dropped: the buffer was full, or a shutdown ran out of time
+    /// before it wrote them.
     pub fn dropped(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
     }
@@ -172,6 +173,9 @@ impl Recorder {
     /// Answers the number of views written. With no store attached it
     /// writes nothing and keeps the buffer.
     ///
+    /// Cancel-safe: a flush dropped before its write finished (a shutdown
+    /// that aborts the timer, a timeout) puts its batch back on the buffer.
+    ///
     /// # Errors
     /// The store's error. The batch goes back on the buffer, so the next
     /// flush tries it again.
@@ -180,11 +184,22 @@ impl Recorder {
         let Some(store) = self.inner.store.get().cloned() else {
             return Ok(0);
         };
-        let batch = std::mem::take(&mut *self.buffer());
-        let written = match self.write(&*store, &batch).await {
-            Ok(n) => n,
+        let mut taken = Taken {
+            recorder: self,
+            batch: Some(std::mem::take(&mut *self.buffer())),
+        };
+        let result = self
+            .write(&*store, taken.batch.as_deref().unwrap_or_default())
+            .await;
+        let written = match result {
+            Ok(n) => {
+                // Written: nothing goes back.
+                taken.batch = None;
+                n
+            }
             Err(e) => {
-                self.requeue(batch);
+                // `taken` puts the batch back when it goes out of scope.
+                std::mem::drop(taken);
                 self.fail(&e);
                 return Err(e);
             }
@@ -285,6 +300,15 @@ impl Recorder {
         Ok(views.len())
     }
 
+    /// Counts every view still in the buffer as dropped and empties it.
+    /// For a shutdown that ran out of time: the process ends, and the
+    /// views with it.
+    pub fn drop_pending(&self) -> usize {
+        let lost = std::mem::take(&mut *self.buffer()).len();
+        self.inner.dropped.fetch_add(lost as u64, Ordering::Relaxed);
+        lost
+    }
+
     fn requeue(&self, batch: Vec<Pending>) {
         let mut buffer = self.buffer();
         let room = MAX_BUFFER.saturating_sub(buffer.len());
@@ -310,6 +334,22 @@ impl Recorder {
             .buffer
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A batch taken off the buffer and not yet written. Dropped while it still
+/// holds the batch, it puts the batch back, so a flush that fails or is
+/// cancelled loses nothing it can keep.
+struct Taken<'r> {
+    recorder: &'r Recorder,
+    batch: Option<Vec<Pending>>,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        if let Some(batch) = self.batch.take() {
+            self.recorder.requeue(batch);
+        }
     }
 }
 
@@ -350,6 +390,52 @@ mod tests {
         let a = visitor(&[1u8; 32], &prehash);
         assert_eq!(a, visitor(&[1u8; 32], &prehash));
         assert_ne!(a, visitor(&[2u8; 32], &prehash));
+    }
+
+    /// A store whose write never ends, so a test can cancel a flush in it.
+    struct Stuck;
+
+    #[async_trait::async_trait]
+    impl Store for Stuck {
+        async fn salt(&self, _day: Day) -> Result<[u8; 32], StoreError> {
+            Ok([0; 32])
+        }
+        async fn write(&self, _views: &[View]) -> Result<(), StoreError> {
+            std::future::pending().await
+        }
+        async fn forget(&self, _today: Day, _keep: Option<Day>) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn report(&self, _site: &str, _from: Day, _to: Day) -> Result<Report, StoreError> {
+            Ok(Report::default())
+        }
+        async fn sites(&self) -> Result<Vec<String>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_flush_puts_its_batch_back() {
+        let recorder = Recorder::new("site", 0, Arc::new(SystemTime::now));
+        recorder.attach(Arc::new(Stuck));
+        recorder.record(Pending {
+            site: "site".into(),
+            day: Day(20_000),
+            prehash: [1; 32],
+            path: "/".into(),
+            query: String::new(),
+            referrer: String::new(),
+            browser: "Firefox",
+            os: "Linux",
+            device: "desktop",
+            country: String::new(),
+        });
+        let flush = recorder.flush();
+        let timed_out = tokio::time::timeout(std::time::Duration::from_millis(20), flush).await;
+        assert!(timed_out.is_err(), "the write never ends");
+        assert_eq!(recorder.pending(), 1, "the batch is back on the buffer");
+        assert_eq!(recorder.drop_pending(), 1);
+        assert_eq!((recorder.pending(), recorder.dropped()), (0, 1));
     }
 
     #[test]

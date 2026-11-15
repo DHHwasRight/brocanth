@@ -205,15 +205,21 @@ fn the_same_visitor_on_one_day_counts_once_and_again_the_next_day() {
 }
 
 #[test]
-fn an_earlier_days_salt_is_deleted_once_the_day_is_over() {
+fn a_days_salt_is_deleted_once_the_next_day_is_over() {
     let rig = rig(config());
     rig.client.send(visit("/", FIREFOX)).assert_ok();
     flush(&rig.recorder).unwrap();
     assert_eq!(rig.store.salt_days(), vec![Day(20_000)]);
+    // The next day keeps yesterday's salt, so another instance that still
+    // flushes yesterday's views finds the same one.
     rig.now.fetch_add(86_400, Ordering::SeqCst);
     rig.client.send(visit("/", FIREFOX)).assert_ok();
     flush(&rig.recorder).unwrap();
-    assert_eq!(rig.store.salt_days(), vec![Day(20_001)]);
+    assert_eq!(rig.store.salt_days(), vec![Day(20_000), Day(20_001)]);
+    rig.now.fetch_add(86_400, Ordering::SeqCst);
+    rig.client.send(visit("/", FIREFOX)).assert_ok();
+    flush(&rig.recorder).unwrap();
+    assert_eq!(rig.store.salt_days(), vec![Day(20_001), Day(20_002)]);
 }
 
 #[test]

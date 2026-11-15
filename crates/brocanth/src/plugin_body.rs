@@ -756,6 +756,41 @@ impl std::fmt::Debug for Drained<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Markup a response hook adds to a page
+// ---------------------------------------------------------------------------
+
+/// Whether a `Content-Type` value names HTML: `text/html`, in any case,
+/// with any parameters. One rule for every hook that adds markup to a
+/// page, so two of them never disagree on what a page is.
+pub fn is_html(content_type: Option<&http::HeaderValue>) -> bool {
+    content_type
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/html"))
+}
+
+/// Puts `markup` before the last `</body`, in any case. A whole document
+/// that has none (`</body>` is optional in HTML) gets it at the end. A
+/// fragment, with no `</body`, no `<html` and no doctype, gets nothing.
+///
+/// Answers whether the markup went in. One rule for every hook that adds
+/// markup to a page (the `gtag` banner, the analytics beacon).
+pub fn insert_before_body_end(body: &mut Vec<u8>, markup: &[u8]) -> bool {
+    let find = |needle: &[u8]| {
+        body.windows(needle.len())
+            .rposition(|w| w.eq_ignore_ascii_case(needle))
+    };
+    if let Some(at) = find(b"</body") {
+        body.splice(at..at, markup.iter().copied());
+        return true;
+    }
+    if find(b"<html").is_some() || find(b"<!doctype").is_some() {
+        body.extend_from_slice(markup);
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1037,5 +1072,28 @@ mod tests {
             "close wakes the parked socket"
         );
         assert!(ticket.poll_closing(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn markup_goes_before_the_last_body_end_of_a_page_and_never_into_a_fragment() {
+        let mut page = b"<html><body><p>a</p></BODY></html>".to_vec();
+        assert!(insert_before_body_end(&mut page, b"<i>"));
+        assert_eq!(page, b"<html><body><p>a</p><i></BODY></html>");
+        let mut bare = b"<!DOCTYPE html><h1>a</h1>".to_vec();
+        assert!(insert_before_body_end(&mut bare, b"<i>"));
+        assert_eq!(bare, b"<!DOCTYPE html><h1>a</h1><i>");
+        let mut fragment = b"<li>a</li>".to_vec();
+        assert!(!insert_before_body_end(&mut fragment, b"<i>"));
+        assert_eq!(fragment, b"<li>a</li>");
+        assert!(!insert_before_body_end(&mut Vec::new(), b"<i>"));
+    }
+
+    #[test]
+    fn html_is_any_case_with_any_parameter() {
+        let html = |v: &'static str| is_html(Some(&http::HeaderValue::from_static(v)));
+        assert!(html("text/html; charset=utf-8"));
+        assert!(html(" Text/HTML"));
+        assert!(!html("application/json"));
+        assert!(!is_html(None));
     }
 }

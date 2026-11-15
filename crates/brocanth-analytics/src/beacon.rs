@@ -125,15 +125,13 @@ impl ResponseHook for Insert {
         body: &mut Vec<u8>,
         _state: &mut RequestState,
     ) -> Result<(), PluginError> {
-        let html = head
-            .headers
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/html"));
+        let html = brocanth::plugin_body::is_html(head.headers.get(http::header::CONTENT_TYPE));
         // A dp-swap partial is a fragment swapped into a page that already
         // runs the snippet; the snippet sends that navigation itself.
         let partial = request.headers().contains_key("dp-partial");
-        if html && !partial {
+        // A page, not an error page or an empty answer: the same rule the
+        // `gtag` tag follows.
+        if html && !partial && head.status == http::StatusCode::OK && !body.is_empty() {
             insert(body, &self.tag);
         }
         Ok(())
@@ -141,17 +139,13 @@ impl ResponseHook for Insert {
 }
 
 /// Puts `tag` before the last `</body>`, in any case, or at the end of a
-/// page that has none: `</body>` is optional in HTML, and a template that
-/// leaves it out still renders a whole page.
+/// whole document that has none: `</body>` is optional in HTML, and a
+/// template that leaves it out still renders a whole page. A fragment
+/// gets nothing. The rule is
+/// [`insert_before_body_end`](brocanth::plugin_body::insert_before_body_end),
+/// which the `gtag` banner follows too.
 pub fn insert(body: &mut Vec<u8>, tag: &str) {
-    let lower = body.to_ascii_lowercase();
-    let needle = b"</body>";
-    match lower.windows(needle.len()).rposition(|w| w == needle) {
-        Some(at) => {
-            body.splice(at..at, tag.bytes());
-        }
-        None => body.extend_from_slice(tag.as_bytes()),
-    }
+    brocanth::plugin_body::insert_before_body_end(body, tag.as_bytes());
 }
 
 fn attribute(value: &str) -> String {
@@ -174,6 +168,9 @@ mod tests {
         let mut bare = b"<!doctype html><h1>a</h1>".to_vec();
         insert(&mut bare, "<script></script>");
         assert_eq!(bare, b"<!doctype html><h1>a</h1><script></script>");
+        let mut fragment = b"<li>a</li>".to_vec();
+        insert(&mut fragment, "<script></script>");
+        assert_eq!(fragment, b"<li>a</li>", "a fragment is no page");
     }
 
     #[test]

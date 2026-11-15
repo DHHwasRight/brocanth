@@ -170,17 +170,20 @@ pub trait Store: Send + Sync {
     /// Keeps these views.
     async fn write(&self, views: &[View]) -> Result<(), StoreError>;
 
-    /// Deletes every salt of a day before `today`, and every view of a day
-    /// before `keep_from` (`None` keeps every view).
+    /// Deletes every salt of a day before yesterday, and every view of a
+    /// day before `keep_from` (`None` keeps every view).
     ///
-    /// Deleting the salt is what makes yesterday's hashes anonymous: without
+    /// Deleting the salt is what makes a day's hashes anonymous: without
     /// it, nobody can recompute a hash from an address to test a guess.
+    /// Yesterday's salt stays one more day, because another instance may
+    /// still flush views of yesterday; a salt made again for that day
+    /// would count those visitors twice.
     async fn forget(&self, today: Day, keep_from: Option<Day>) -> Result<(), StoreError>;
 
     /// The report for `site` from `from` to `to`, both included.
     async fn report(&self, site: &str, from: Day, to: Day) -> Result<Report, StoreError>;
 
-    /// Every site that has a row, sorted.
+    /// Every site that has had a row, sorted.
     async fn sites(&self) -> Result<Vec<String>, StoreError>;
 }
 
@@ -252,7 +255,7 @@ impl Store for MemoryStore {
 
     async fn forget(&self, today: Day, keep_from: Option<Day>) -> Result<(), StoreError> {
         let mut state = self.lock();
-        state.salts.retain(|day, _| *day >= today);
+        state.salts.retain(|day, _| *day >= today.minus(1));
         if let Some(keep_from) = keep_from {
             state.views.retain(|view| view.day >= keep_from);
         }

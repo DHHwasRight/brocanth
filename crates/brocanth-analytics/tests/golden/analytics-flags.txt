@@ -1444,8 +1444,8 @@ macro_rules! register {
         //
         // A request hook, after dispatch: a GET answered with HTML is one
         // page view. It stores no address, no user agent and no cookie; the
-        // visitor is a hash whose salt is deleted when the day ends. The
-        // views go in two tables of the `[db]` database, written every
+        // visitor is a hash whose salt is deleted the day after. The
+        // views go in tables of the `[db]` database, written every
         // `flush_interval` seconds, never during a request.
         let builder = builder.plugin_hooking(
             <brocanth_analytics::Analytics as brocanth::plugin_api::Plugin>::new(
@@ -2258,7 +2258,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 0c3cacc8f3629f41
+// brocanth-digest: 3ee8130f47fec741
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

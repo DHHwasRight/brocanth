@@ -178,6 +178,7 @@ async fn forget_deletes_old_salts_and_rows_past_the_retention() {
         return;
     };
     sandbox.store.salt(Day(19_990)).await.unwrap();
+    let yesterday_salt = sandbox.store.salt(Day(19_999)).await.unwrap();
     let today_salt = sandbox.store.salt(Day(20_000)).await.unwrap();
     sandbox
         .store
@@ -193,8 +194,13 @@ async fn forget_deletes_old_salts_and_rows_past_the_retention() {
         .fetch_one(sandbox.db.pool())
         .await
         .unwrap();
-    assert_eq!(salts, 1, "only today's salt is left");
+    assert_eq!(salts, 2, "only yesterday's and today's salts are left");
     assert_eq!(sandbox.store.salt(Day(20_000)).await.unwrap(), today_salt);
+    assert_eq!(
+        sandbox.store.salt(Day(19_999)).await.unwrap(),
+        yesterday_salt,
+        "another replica that flushes yesterday's views reads the same salt"
+    );
     let report = sandbox
         .store
         .report("site", Day(0), Day(30_000))
@@ -226,5 +232,76 @@ async fn no_column_can_hold_an_address_or_a_user_agent() {
             "country"
         ]
     );
+    sandbox.drop().await;
+}
+
+#[tokio::test]
+async fn a_failed_chunk_writes_nothing_so_a_retry_counts_each_view_once() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    // The first chunk is good; the second holds a NUL, which a Postgres
+    // `text` refuses. Without one transaction, the first chunk would stay
+    // and the recorder's retry would write it again.
+    let mut views: Vec<View> = (0..1_000).map(|n| view(20_000, n, "/", "")).collect();
+    views.push(view(20_000, 1_000, "/bad\0path", ""));
+    assert!(sandbox.store.write(&views).await.is_err());
+    let count = |db: Db| async move {
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM brocanth_analytics_views")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        n
+    };
+    assert_eq!(count(sandbox.db.clone()).await, 0);
+    views.pop();
+    sandbox.store.write(&views).await.unwrap();
+    assert_eq!(count(sandbox.db.clone()).await, 1_000);
+    sandbox.drop().await;
+}
+
+#[tokio::test]
+async fn a_replica_that_finds_the_sweep_locked_deletes_nothing() {
+    let Some(sandbox) = Sandbox::new().await else {
+        return;
+    };
+    sandbox.store.salt(Day(19_990)).await.unwrap();
+    sandbox
+        .store
+        .write(&[view(19_960, 1, "/old", "")])
+        .await
+        .unwrap();
+    // Another replica sweeps: it holds the lock in its own transaction.
+    let mut other = sandbox.db.pool().begin().await.unwrap();
+    let (locked,): (bool,) =
+        sqlx::query_as("SELECT pg_try_advisory_xact_lock($1, hashtext(current_schema()))")
+            .bind(0x6272_6f63_i32)
+            .fetch_one(&mut *other)
+            .await
+            .unwrap();
+    assert!(locked);
+    sandbox
+        .store
+        .forget(Day(20_000), Some(Day(19_970)))
+        .await
+        .unwrap();
+    let report = sandbox
+        .store
+        .report("site", Day(0), Day(30_000))
+        .await
+        .unwrap();
+    assert_eq!(report.views, 1, "the other replica deletes it");
+    other.rollback().await.unwrap();
+    sandbox
+        .store
+        .forget(Day(20_000), Some(Day(19_970)))
+        .await
+        .unwrap();
+    let report = sandbox
+        .store
+        .report("site", Day(0), Day(30_000))
+        .await
+        .unwrap();
+    assert_eq!(report.views, 0);
     sandbox.drop().await;
 }

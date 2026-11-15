@@ -5,10 +5,15 @@ and checks them before anything serves them. It refuses the lines crawlers
 silently ignore: a rule path that does not start with `/`, and a sitemap or
 a `<loc>` that is not a full URL. It has no dependencies.
 
-It also ships two modules. `robots` serves `/robots.txt` from settings, and
-answers `Disallow: /` on development and staging servers so they are never
-indexed. `sitemap` serves `/sitemap.xml`: every GET page with no parameter,
-from the page table. With both, the robots.txt names the sitemap.
+It also ships two modules. `robots` serves `/robots.txt` from settings.
+The development file sets `index = false`, so a development server answers
+`Disallow: /`. Every other server is open unless its file says otherwise:
+set `index = false` on staging, or a search engine lists it beside
+production. `sitemap` serves `/sitemap.xml`: every GET page with no
+parameter, from the page table. With both, the robots.txt names the
+sitemap. With `i18n-routing`, the sitemap lists each page once per locale
+(`/fr/about`), and each robots.txt rule path is also written under each
+locale segment.
 
 Use it when a site is public. Do not use it to hide private pages: a
 robots.txt is a request to polite crawlers, and it lists the paths it
@@ -143,8 +148,9 @@ dot. The base URL may carry a base path: `https://user.github.io/repo`.
 `render` refuses a relative base, a path that does not start with `/`, a
 date that is not a W3C date, and more than 50,000 URLs.
 
-The `sitemap` module reads `[sitemap] base_url`, `extra` and `exclude`. See
-`docs/modules/sitemap.md`.
+The `sitemap` module reads `[sitemap] base_url`, `extra` and `exclude`.
+With `base_url` unset, a debug build lists `http://localhost:3000`, and a
+release build refuses to start. See `docs/modules/sitemap.md`.
 
 ## Testing
 

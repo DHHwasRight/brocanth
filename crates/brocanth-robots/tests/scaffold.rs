@@ -60,6 +60,16 @@ fn a_static_site_exports_sitemap_xml_and_robots_txt_names_it() {
     );
 }
 
+/// With `i18n-routing`: the sitemap lists each page once per locale, and
+/// each robots.txt rule path is written under each locale segment too.
+#[test]
+fn with_locale_paths_each_page_is_listed_once_per_locale() {
+    shape(
+        "i18n-routing",
+        &["config", "i18n", "i18n-routing", "robots", "sitemap"],
+    );
+}
+
 fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
     files
         .iter()

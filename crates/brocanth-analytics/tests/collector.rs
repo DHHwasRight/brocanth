@@ -284,3 +284,25 @@ fn without_listed_origins_there_is_no_collector() {
     assert_ne!(response.status(), 204, "the path is the application's");
     assert_eq!(flush(&rig.recorder), Ok(0));
 }
+
+#[test]
+fn an_enabled_plugin_with_no_database_refuses_to_start() {
+    use brocanth::plugin_api::Plugin;
+    let built = AppBuilder::new()
+        .plugin_hooking(Analytics::new(AnalyticsConfig::default()))
+        .build();
+    let Err(error) = built else {
+        panic!("the views would have gone to memory");
+    };
+    let error = error.to_string();
+    assert!(error.contains("help:"), "{error}");
+    assert!(error.contains("`db`"), "{error}");
+    // Off, it counts nothing, so no database is needed.
+    AppBuilder::new()
+        .plugin_hooking(Analytics::new(AnalyticsConfig {
+            enabled: false,
+            ..AnalyticsConfig::default()
+        }))
+        .build()
+        .expect("a disabled plugin needs no store");
+}

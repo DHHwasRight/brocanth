@@ -232,6 +232,7 @@ pub struct Current {
     tag: &'static str,
     source: Source,
     message: fn(&'static str, &str) -> Option<String>,
+    resolve: fn(&str) -> Option<&'static str>,
 }
 
 impl Current {
@@ -241,7 +242,20 @@ impl Current {
             tag: negotiated.locale.tag(),
             source: negotiated.source,
             message: message_of::<L>,
+            resolve: resolve_of::<L>,
         }
+    }
+
+    /// The same catalog in another offered locale, named by its exact tag
+    /// (ignoring case, `_` for `-`). `None` when no offered locale has
+    /// that tag. For a hook that must read the text of the locale a page
+    /// showed, which a later request names, such as the `gtag` consent
+    /// report.
+    pub fn with_tag(&self, tag: &str) -> Option<Current> {
+        Some(Current {
+            tag: (self.resolve)(tag)?,
+            ..*self
+        })
     }
 
     /// The BCP 47 tag: `en`, `fr-CA`.
@@ -272,6 +286,10 @@ impl fmt::Debug for Current {
 
 fn message_of<L: Locales>(tag: &'static str, key: &str) -> Option<String> {
     L::from_tag(tag)?.message(key)
+}
+
+fn resolve_of<L: Locales>(tag: &str) -> Option<&'static str> {
+    L::from_tag(tag).map(L::tag)
 }
 
 /// Picks a locale for a request. Cheap to clone: the configuration is
@@ -487,6 +505,21 @@ impl<L: Locales> Negotiator<L> {
                     .is_some_and(|rest| rest.starts_with('/'))
         });
         !file && !kept
+    }
+
+    /// Every URL a page at `path` answers at with no redirect: one per
+    /// offered locale (`/en/about`, `/fr/about`) while `paths` is on, or
+    /// `path` itself when it keeps no segment (a file, a prefix of
+    /// `unprefixed`) or `paths` is off. For a list of URLs written at
+    /// startup, such as a sitemap.
+    pub fn localized(&self, path: &str) -> Vec<String> {
+        if !self.config.paths || !self.redirects(path) {
+            return vec![path.to_string()];
+        }
+        self.offered
+            .iter()
+            .map(|locale| prefixed(locale.tag(), path))
+            .collect()
     }
 
     /// What a page is told about a locale its path named.
@@ -890,5 +923,30 @@ mod tests {
         assert_eq!(current.source(), Source::Cookie);
         // This test type has no catalog, so the trait's default answers.
         assert_eq!(current.text("title"), None);
+    }
+
+    #[test]
+    fn a_page_is_listed_once_per_locale_while_paths_are_on() {
+        let off = Negotiator::<L>::new(NegotiatorConfig::default());
+        assert_eq!(off.localized("/about"), ["/about"]);
+        let on = Negotiator::<L>::new(NegotiatorConfig {
+            available: vec!["en".into(), "fr".into()],
+            ..NegotiatorConfig::default().with_paths(true)
+        });
+        assert_eq!(on.localized("/about"), ["/en/about", "/fr/about"]);
+        assert_eq!(on.localized("/"), ["/en", "/fr"]);
+        assert_eq!(on.localized("/api/users"), ["/api/users"], "unprefixed");
+        assert_eq!(on.localized("/robots.txt"), ["/robots.txt"], "a file");
+    }
+
+    #[test]
+    fn current_moves_to_another_offered_locale_by_its_tag() {
+        let current = Current::of(Negotiated {
+            locale: L::En,
+            source: Source::AcceptLanguage,
+        });
+        assert_eq!(current.with_tag("FR").map(|c| c.tag()), Some("fr"));
+        assert_eq!(current.with_tag("fr_ca").map(|c| c.tag()), Some("fr-CA"));
+        assert!(current.with_tag("de").is_none());
     }
 }

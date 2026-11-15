@@ -59,19 +59,30 @@ fn node() -> bool {
 }
 
 fn run(gpc: bool, saved: Option<&str>, href: &str) -> Run {
+    run_versions(gpc, saved, href, "1a2b", "1a2b")
+}
+
+/// `run`, with the banner version the page shows and the one the saved
+/// choice was made under.
+fn run_versions(gpc: bool, saved: Option<&str>, href: &str, shown: &str, seen: &str) -> Run {
     let dir = std::env::temp_dir().join(format!(
         "brocanth-gtag-{}-{}",
         std::process::id(),
-        href.len() + usize::from(gpc) * 7 + saved.map_or(0, str::len) * 13
+        href.len()
+            + usize::from(gpc) * 7
+            + saved.map_or(0, str::len) * 13
+            + usize::from(shown != seen) * 101
     ));
     std::fs::create_dir_all(&dir).expect("a temp dir");
     let script = dir.join("consent.js");
     let harness = dir.join("harness.js");
     std::fs::write(&script, SCRIPT).expect("write the script");
     std::fs::write(&harness, HARNESS).expect("write the harness");
-    let cfg = r#"{"id":"G-ABC123","mode":"basic","gpc":true,"days":182,"title":false,"allow":["utm_source"]}"#;
+    let cfg = format!(
+        r#"{{"id":"G-ABC123","mode":"basic","gpc":true,"days":182,"title":false,"allow":["utm_source"],"version":"{shown}"}}"#
+    );
     let saved = saved.map_or("null".to_string(), |choice| {
-        format!(r#"{{"choice":"{choice}","at":9999999999999}}"#)
+        format!(r#"{{"choice":"{choice}","at":9999999999999,"v":"{seen}"}}"#)
     });
     let args = format!(r#"[{cfg},{gpc},{saved},"{href}"]"#);
     let output = Command::new("node")
@@ -138,6 +149,12 @@ fn the_script_follows_the_consent_rules() {
     let denied = run(false, Some("denied"), href).out;
     assert!(denied.contains(r#""banner":false"#), "{denied}");
     assert!(denied.contains(r#""appended":[]"#), "{denied}");
+
+    // An acceptance of an older banner text: the banner asks again, and
+    // nothing loads until it is answered.
+    let older = run_versions(false, Some("granted"), href, "2b3c", "1a2b").out;
+    assert!(older.contains(r#""banner":true"#), "{older}");
+    assert!(older.contains(r#""appended":[]"#), "{older}");
 }
 
 #[test]

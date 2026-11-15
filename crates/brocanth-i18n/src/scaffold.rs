@@ -36,7 +36,8 @@ impl Module for I18n {
         )
         .adapts_to(
             "gtag",
-            "the catalogs carry the consent banner's strings, so the banner follows the locale",
+            "the catalogs carry the consent banner's strings, so the banner follows the locale; \
+             with `i18n-routing`, the consent report's path is unprefixed",
         )
         .adapts_to(
             "rsx",
@@ -166,6 +167,11 @@ fn routing_adjust(project: &Project) -> String {
     // module that adds one is covered and this list names nobody.
     for (key, field) in project.mounts() {
         chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
+    }
+    // The consent banner reports a choice to a fixed path, from a script
+    // that sends no cookie: a redirect would lose the report.
+    if project.has("gtag") {
+        chain.push_str(".keep_unprefixed(brocanth_gtag::CONSENT_PATH)");
     }
     chain
 }

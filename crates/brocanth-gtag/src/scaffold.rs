@@ -19,7 +19,7 @@ impl Module for Gtag {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "gtag",
-            "Google Analytics 4 behind a consent banner; nothing leaves before the visitor accepts",
+            "Google Analytics 4 behind a consent banner; in `basic` mode nothing leaves before the visitor accepts",
         )
         .category(Category::Middleware)
         .adapts_to(
@@ -163,7 +163,11 @@ impl Module for Gtag {
                     "",
                     "A file each consent choice is appended to, such as `log/consent.jsonl`.",
                 )
-                .note("A server only: a static export has no one to report a choice to.")
+                .note(
+                    "A server only: a static export has no one to report a choice to.\n\
+                     The file is per instance, and a container loses it when it stops\n\
+                     unless the path is on a volume that outlives it.",
+                )
                 .optional(),
                 Setting::text(
                     "banner.text",
@@ -236,7 +240,10 @@ const AGENTS: &str = "\n\
     \n\
     `brocanth_gtag::Gtag` is registered in `src/plugins/mod.rs`.\n\
     Its hook puts a consent banner and Google's tag into every HTML page,\n\
-    before `</body>`. Nothing reaches Google before the visitor accepts.\n\
+    before `</body>`. In `basic` mode, the default, nothing reaches Google\n\
+    before the visitor accepts. In `advanced` mode, Google's script loads\n\
+    on the first page with every consent denied, and sends cookieless\n\
+    pings before any choice.\n\
     \n\
     Do not add a second Google tag, and do not send a page view yourself:\n\
     the hook scrubs the URL first. Never put an email address, a name or a\n\
@@ -246,7 +253,10 @@ const AGENTS: &str = "\n\
     \n\
     The choice lives in the visitor's browser. To keep a record of it on\n\
     the server, set `consent_log` to a file: each choice is one JSON line\n\
-    with no address and no user agent.\n";
+    with no address and no user agent. The file is per instance; keep it\n\
+    on a volume that outlives the container. The report path,\n\
+    `/__consent`, answers only the site's own pages: give it a rate-limit\n\
+    rule.\n";
 
 /// With `i18n`: where the banner's words are.
 const AGENTS_I18N: &str = "\n\

@@ -171,7 +171,9 @@ pub fn generate(catalogs: &[Catalog], default: &str) -> Result<Generated, Error>
     for c in catalogs {
         if !is_tag(&c.tag) {
             problems.push(format!(
-                "{}: `{}` is not a BCP 47 tag; name the file `en.toml`, `fr-CA.toml`",
+                "{}: `{}` is not a BCP 47 tag the runtime can read\n  \
+                 help: name the file after a language, then a script or a region: \
+                 `en.toml`, `fr-CA.toml`, `zh-Hant-TW.toml`",
                 c.path, c.tag
             ));
         }
@@ -1164,15 +1166,17 @@ fn camel(s: &str) -> String {
 }
 
 /// `en`, `fr-CA`, `zh-Hant-TW`: a language of two or three letters, then
-/// subtags of two to eight letters or digits. The full grammar is RFC 5646;
-/// this is the part a file name needs, and ICU4X parses the tag again at
-/// run time.
+/// subtags of two to eight letters or digits, and a tag ICU4X's `Locale`
+/// parses. `Formats::new` parses the tag with the same parser at run time
+/// and panics on a tag it refuses (`en-12`, `zh-yue`), so the build must
+/// refuse it first.
 fn is_tag(tag: &str) -> bool {
     let mut parts = tag.split('-');
     let lang = parts.next().unwrap_or("");
     (2..=3).contains(&lang.len())
         && lang.bytes().all(|b| b.is_ascii_alphabetic())
         && parts.all(|p| (2..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && tag.parse::<icu_locale_core::Locale>().is_ok()
 }
 
 const KEYWORDS: &[&str] = &[

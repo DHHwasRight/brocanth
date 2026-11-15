@@ -288,8 +288,8 @@ const PRELUDE: &str = r#"
         //
         // A request hook, after dispatch: a GET answered with HTML is one
         // page view. It stores no address, no user agent and no cookie; the
-        // visitor is a hash whose salt is deleted when the day ends. The
-        // views go in two tables of the `[db]` database, written every
+        // visitor is a hash whose salt is deleted the day after. The
+        // views go in tables of the `[db]` database, written every
         // `flush_interval` seconds, never during a request.
 "#;
 

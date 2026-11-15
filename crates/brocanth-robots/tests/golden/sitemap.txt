@@ -1603,7 +1603,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "sitemap.base_url",
-        help: "The site's address: scheme, host, and base path if any.",
+        help: "The site's address: scheme, host, and base path if any. Empty means none.",
         flag: true,
         file: "src/modules/sitemap.rs",
         flags: crate::modules::sitemap::MODULE.flags,
@@ -1871,7 +1871,7 @@ pub fn sitemap_settings(given: &[Given]) -> Result<crate::plugins::sitemap::Sett
     let mut settings = crate::plugins::sitemap::Settings::default();
     for given in given {
         if given.setting.path == "sitemap.base_url" {
-            settings.base_url = parsed(given)?;
+            settings.base_url = optional(given)?;
         }
     }
     Ok(settings)
@@ -2024,7 +2024,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 73a6c19018074184
+// brocanth-digest: bdbb9909c47ec63c
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2584,7 +2584,8 @@ mod tests {
 //! is many pages: list the ones that exist in `extra`.
 //!
 //! A base URL that is not a full `http(s)` address stops the build here: a
-//! crawler ignores every relative `<loc>`.
+//! crawler ignores every relative `<loc>`. An unset one stops a release
+//! build, and a debug build takes the development address.
 //!
 //! To give a page a `<lastmod>`, call `path_modified` in `sitemap` below.
 
@@ -2594,6 +2595,10 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::Verb;
 use brocanth_robots::sitemap::{listed, under, Sitemap as Xml};
+
+/// The address `serve` listens on: the base URL of a debug build that
+/// sets none.
+const DEVELOPMENT_BASE: &str = "http://localhost:3000";
 
 /// The rendered XML, set once at `configure`.
 static RENDERED: OnceLock<String> = OnceLock::new();
@@ -2618,24 +2623,14 @@ pub fn location() -> Option<&'static str> {
 /// Nothing deserialises it: `main` builds it from a literal, and the
 /// compiler checks that literal. `Plugin::Config` carries no bounds the
 /// core imposes, so there is no deserialiser here to link.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Settings {
     /// The site's address: scheme, host, and base path if any.
-    pub base_url: String,
+    pub base_url: Option<String>,
     /// More paths to list.
     pub extra: Vec<String>,
     /// Path prefixes kept out of the sitemap.
     pub exclude: Vec<String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            base_url: "http://localhost:3000".to_string(),
-            extra: Vec::new(),
-            exclude: Vec::new(),
-        }
-    }
 }
 
 pub struct Sitemap {
@@ -2643,21 +2638,45 @@ pub struct Sitemap {
 }
 
 impl Sitemap {
-    /// The builder these settings and these routes describe.
-    fn sitemap<'a>(&self, routes: impl IntoIterator<Item = (Verb, &'a str)>) -> Xml {
+    /// The base URL. Unset, a debug build takes the development address,
+    /// and a release build stops: a production sitemap of localhost URLs
+    /// sends every crawler nowhere.
+    fn base(&self) -> Result<&str, PluginError> {
+        match self.settings.base_url.as_deref().filter(|b| !b.is_empty()) {
+            Some(base) => Ok(base),
+            None if cfg!(debug_assertions) => Ok(DEVELOPMENT_BASE),
+            None => Err(PluginError::new(
+                "[sitemap] `base_url` is not set, so no <loc> can name this site\n\
+                 help: set `base_url` under [sitemap] to the published address, \
+                 such as \"https://example.com\"",
+            )),
+        }
+    }
+
+    /// The builder these settings and these routes describe. `localized`
+    /// gives the URLs one page answers at.
+    fn sitemap<'a>(
+        &self,
+        routes: impl IntoIterator<Item = (Verb, &'a str)>,
+        localized: &dyn Fn(&str) -> Vec<String>,
+    ) -> Result<Xml, PluginError> {
         let kept = |path: &str| !self.settings.exclude.iter().any(|p| under(path, p));
-        let mut xml = Xml::new(self.settings.base_url.as_str());
+        let mut xml = Xml::new(self.base()?);
         for (verb, pattern) in routes {
             if verb == Verb::Get && listed(pattern) && kept(pattern) {
-                xml = xml.path(pattern);
+                for path in localized(pattern) {
+                    xml = xml.path(path);
+                }
             }
         }
         for path in &self.settings.extra {
             if kept(path) {
-                xml = xml.path(path.as_str());
+                for path in localized(path) {
+                    xml = xml.path(path);
+                }
             }
         }
-        xml
+        Ok(xml)
     }
 }
 
@@ -2680,7 +2699,8 @@ impl Plugin for Sitemap {
         let routes = crate::pages::handlers()
             .iter()
             .map(|(verb, pattern, _)| (*verb, *pattern));
-        let xml = self.sitemap(routes);
+        let localized = |path: &str| vec![path.to_string()];
+        let xml = self.sitemap(routes, &localized)?;
         let text = xml
             .render()
             .map_err(|e| PluginError::new(format!("[sitemap] {e}")))?;
@@ -2706,7 +2726,8 @@ mod tests {
     fn rendered(settings: Settings) -> Result<String, String> {
         let plugin = Sitemap::new(settings);
         plugin
-            .sitemap(ROUTES.iter().copied())
+            .sitemap(ROUTES.iter().copied(), &|path| vec![path.to_string()])
+            .map_err(|e| e.to_string())?
             .render()
             .map_err(|e| e.to_string())
     }
@@ -2714,7 +2735,7 @@ mod tests {
     #[test]
     fn pages_with_no_parameter_are_listed_and_the_rest_are_not() {
         let xml = rendered(Settings {
-            base_url: "https://example.com".to_string(),
+            base_url: Some("https://example.com".to_string()),
             extra: vec!["/users/7".to_string()],
             exclude: vec!["/drafts".to_string()],
         })
@@ -2731,7 +2752,7 @@ mod tests {
     #[test]
     fn a_relative_base_url_stops_the_build_with_the_fix() {
         let error = rendered(Settings {
-            base_url: "example.com".to_string(),
+            base_url: Some("example.com".to_string()),
             ..Settings::default()
         })
         .unwrap_err();

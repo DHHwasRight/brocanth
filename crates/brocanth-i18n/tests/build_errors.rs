@@ -166,6 +166,16 @@ fn a_missing_default_catalog_and_a_bad_file_name_fail_the_build() {
         found[0].contains("`french` is not a BCP 47 tag"),
         "{found:#?}"
     );
+    assert!(found[0].contains("help:"), "{found:#?}");
+    // The shape of a tag, but one the runtime's parser refuses: a region
+    // is two letters or three digits, and `yue` is no script.
+    for tag in ["en-12", "zh-yue"] {
+        let found = problems(&[catalog("en", "a = \"b\"\n"), catalog(tag, "a = \"b\"\n")]);
+        assert!(
+            found[0].contains(&format!("`{tag}` is not a BCP 47 tag")),
+            "{tag}: {found:#?}"
+        );
+    }
 }
 
 #[test]
