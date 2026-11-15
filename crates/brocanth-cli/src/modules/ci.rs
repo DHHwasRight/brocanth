@@ -37,9 +37,9 @@ impl Module for GitHub {
         .category(Category::External)
         .adapts_to("static", "CI keeps the exported site as an artifact")
         .adapts_to("docker", "CI builds the image")
-        .adapts_to("db", "CI starts a database for the tests")
-        .adapts_to("jobs", "CI starts a database for the tests")
-        .adapts_to("cache", "CI starts a database for the tests")
+        .adapts_to("db", POSTGRES)
+        .adapts_to("jobs", POSTGRES)
+        .adapts_to("cache", POSTGRES)
         .outside_runtime()
         .asked_in("operations", "GitHub Actions")
         .part_of("ci")
@@ -51,9 +51,18 @@ impl Module for GitHub {
     }
 }
 
+/// What the manifest says to a module that stores rows.
+const POSTGRES: &str = "CI starts a database for the tests";
+
 /// Whether the project's tests want a database: anything that stores rows.
+/// Read off the manifest, so the keys that start the service are the keys
+/// the docs list, in one place.
 fn wants_postgres(project: &Project) -> bool {
-    ["db", "jobs", "cache"].iter().any(|k| project.has(k))
+    GitHub
+        .manifest()
+        .adapts_to
+        .iter()
+        .any(|(key, what)| *what == POSTGRES && project.has(key))
 }
 
 fn workflow(project: &Project) -> String {

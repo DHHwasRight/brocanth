@@ -42,8 +42,19 @@
 //! Beside the crate it scaffolds, behind a `scaffold` feature that is off by
 //! default, so an application that depends on `brocanth-cache` never links
 //! the code that writes `brocanth-cache` into a project. The modules kept
-//! here are the ones with no crate of their own: a logger the scaffold
-//! writes out in full, cookie sessions, and the three faces of rsx.
+//! here are exceptions, each for a reason:
+//!
+//! - No crate of their own: `logging` (the scaffold writes the logger out
+//!   in full), `sessions` (a placeholder), `docker` and `ci` (they write
+//!   files that are not Rust), and the renderers `rsx` and `jt`, whose
+//!   compilers live in their own repositories.
+//! - Woven into the files every project has: `commands` and `config`
+//!   choose between two whole shapes of `src/main.rs`, and `config` also
+//!   decides how every other module's settings are read. `create.rs` reads
+//!   them as switches, so they stay beside it.
+//! - Not moved yet: `model` (to `brocanth-model`) and `static`
+//!   (to `brocanth-static`). Each is a candidate for a `scaffold` feature
+//!   of its crate.
 
 use brocanth_scaffold::Module;
 
