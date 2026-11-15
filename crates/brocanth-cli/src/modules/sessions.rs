@@ -69,7 +69,7 @@ impl Module for Sessions {
             .line(r#"            setup.router().mount("/users/{*rest}", "session");"#);
         s.at(Slot::PluginsLayers)
             .line(r#"        "session" => Some(sessions::layer),"#);
-        s.at(Slot::AgentsSections).block(AGENTS.to_string());
+        s.at(Slot::AgentsSections).block(AGENTS);
         s.at(Slot::AppContext).block(
             "    let session: &crate::plugins::sessions::Session = cx.extract();\n\
             \x20   let cookie = &session.cookie;\n\
