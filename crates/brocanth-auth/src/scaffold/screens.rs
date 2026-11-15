@@ -532,6 +532,8 @@ mod tests {
     struct Browser {
         app: crate::app::App,
         jar: Vec<(String, String)>,
+        /// The CSRF cookie's name, as the first page set it.
+        csrf_cookie: String,
     }
 
     impl Browser {
@@ -539,11 +541,25 @@ mod tests {
             let mut browser = Self {
                 app: crate::app::build().expect("the application builds"),
                 jar: Vec::new(),
+                csrf_cookie: String::new(),
             };
             let first = browser.get("/account/signup").await;
             assert_eq!(first.status, 200);
-            assert!(browser.cookie("csrf_token").is_some(), "a CSRF cookie");
+            // The cookie's name depends on `[csrf] cookie` and on `Secure`,
+            // so find the cookie that holds the form's token.
+            let token = csrf_token(&text(&first)).expect("a CSRF field");
+            browser.csrf_cookie = browser
+                .jar
+                .iter()
+                .find(|(_, value)| *value == token)
+                .map(|(key, _)| key.clone())
+                .expect("a CSRF cookie");
             browser
+        }
+
+        /// The CSRF token, as the cookie holds it.
+        fn csrf(&self) -> String {
+            self.cookie(&self.csrf_cookie).expect("a CSRF cookie")
         }
 
         fn auth(&self) -> Services {
@@ -590,8 +606,8 @@ mod tests {
 
         /// A form post with the CSRF field, as the page's form sends it.
         async fn post(&mut self, path: &str, form: &str) -> Response {
-            let token = self.cookie("csrf_token").expect("a CSRF cookie");
-            self.post_raw(path, &format!("_csrf_token={token}&{form}"))
+            let token = self.csrf();
+            self.post_raw(path, &format!("{}={token}&{form}", csrf_field()))
                 .await
         }
 
@@ -644,6 +660,48 @@ mod tests {
         }
     }
 
+    /// The name of the form's CSRF field: the default, which the config
+    /// file is written with.
+    fn csrf_field() -> String {
+        brocanth_middleware::CsrfConfig::default().field
+    }
+
+    /// The value of the first CSRF field in a page, as the hook drew it:
+    /// masked with a fresh pad on each response.
+    fn csrf_value(page: &str) -> Option<&str> {
+        let marker = format!(r#"name="{}" value=""#, csrf_field());
+        let start = page.find(&marker)? + marker.len();
+        let len = page[start..].find('"')?;
+        Some(&page[start..start + len])
+    }
+
+    /// The token inside the page's CSRF field: hex of a pad, then hex of
+    /// the pad XOR the token.
+    fn csrf_token(page: &str) -> Option<String> {
+        let sent = csrf_value(page)?;
+        let bytes: Vec<u8> = (0..sent.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(sent.get(i..i + 2)?, 16).ok())
+            .collect::<Option<_>>()?;
+        let (pad, masked) = bytes.split_at(bytes.len() / 2);
+        let token: String = pad
+            .iter()
+            .zip(masked)
+            .map(|(p, m)| format!("{:02x}", p ^ m))
+            .collect();
+        Some(token)
+    }
+
+    /// The page with the value of each CSRF field blanked: the pad
+    /// differs on each response, so two pages compare without it.
+    fn without_csrf(page: &str) -> String {
+        let mut page = page.to_string();
+        while let Some(value) = csrf_value(&page).filter(|value| !value.is_empty()) {
+            page = page.replacen(&format!(r#"value="{value}""#), r#"value="""#, 1);
+        }
+        page
+    }
+
     /// The `<p role="alert">` of a form drawn again.
     fn alert(response: &Response) -> String {
         let body = text(response);
@@ -688,7 +746,10 @@ mod tests {
             let none = browser.post_raw(path, "email=ada%40example.com").await;
             assert_eq!(none.status, 403, "{path} took a post with no token");
             let wrong = browser
-                .post_raw(path, "_csrf_token=forged&email=ada%40example.com")
+                .post_raw(
+                    path,
+                    &format!("{}=forged&email=ada%40example.com", csrf_field()),
+                )
                 .await;
             assert_eq!(wrong.status, 403, "{path} took a forged token");
         }
@@ -697,7 +758,7 @@ mod tests {
     #[tokio::test]
     async fn every_page_draws_its_form_with_the_token_in_it() {
         let mut browser = Browser::new().await;
-        let token = browser.cookie("csrf_token").expect("a CSRF cookie");
+        let token = browser.csrf();
         for path in [
             "/account/signup",
             "/account/signin",
@@ -709,17 +770,22 @@ mod tests {
         ] {
             let page = browser.get(path).await;
             assert_eq!(page.status, 200, "{path}");
-            assert!(text(&page).contains(&token), "{path} has no CSRF field");
+            let sent = csrf_token(&text(&page));
+            assert_eq!(
+                sent.as_deref(),
+                Some(token.as_str()),
+                "{path} has no CSRF field"
+            );
         }
     }
 
     #[tokio::test]
     async fn a_put_to_a_screen_is_not_a_post() {
         let mut browser = Browser::new().await;
-        let token = browser.cookie("csrf_token").expect("a CSRF cookie");
+        let token = browser.csrf();
         let mut request = Request::new(Verb::Put, "/account/signin")
             .with_header("content-type", "application/x-www-form-urlencoded");
-        request.body = format!("_csrf_token={token}").into();
+        request.body = format!("{}={token}", csrf_field()).into();
         assert_eq!(browser.send(request).await.status, 405);
     }
 
@@ -781,7 +847,11 @@ mod tests {
         let taken = browser.sign_up("ada@example.com").await;
         let taken_page = browser.follow(&taken).await;
         assert_eq!(new.header("location"), taken.header("location"));
-        assert_eq!(new_page, taken_page, "the same words, the same page");
+        assert_eq!(
+            without_csrf(&new_page),
+            without_csrf(&taken_page),
+            "the same words, the same page"
+        );
         assert_eq!(
             browser.sign_in("ada@example.com", PASSWORD).await.status,
             303,
@@ -849,7 +919,7 @@ mod tests {
                 Some("/account/signin"),
                 "{email}"
             );
-            pages.push(browser.follow(&answered).await);
+            pages.push(without_csrf(&browser.follow(&answered).await));
         }
         assert_eq!(pages[0], pages[1], "a known and an unknown address");
         assert_eq!(pages[0], pages[2], "a known address and an empty field");
