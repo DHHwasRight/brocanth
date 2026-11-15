@@ -813,6 +813,7 @@ mod disk {
         assert_eq!(ignore, "*\n!keep\n");
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn inside_a_tokio_runtime_the_store_runs_on_the_blocking_pool() {
         let dir = tempfile::tempdir().unwrap();

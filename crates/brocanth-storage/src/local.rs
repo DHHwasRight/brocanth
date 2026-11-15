@@ -407,6 +407,21 @@ impl Storage for LocalDisk {
 
 /// Runs blocking work on Tokio's blocking pool inside a Tokio runtime, and
 /// in place outside one. See the module documentation on blocking.
+///
+/// Without the `runtime` feature the work always runs in place: only a build
+/// that links no Tokio, such as the CLI's, turns it off.
+#[cfg(not(feature = "runtime"))]
+pub(crate) async fn offload<T, F>(work: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    work()
+}
+
+/// Runs blocking work on Tokio's blocking pool inside a Tokio runtime, and
+/// in place outside one. See the module documentation on blocking.
+#[cfg(feature = "runtime")]
 pub(crate) async fn offload<T, F>(work: F) -> Result<T, StorageError>
 where
     F: FnOnce() -> Result<T, StorageError> + Send + 'static,
