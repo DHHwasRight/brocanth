@@ -61,6 +61,15 @@ impl State {
         self.entries.get(slot).filter(|e| e.expires_at > now)
     }
 
+    /// Removes an entry and its tags. Answers whether a live entry went:
+    /// an expired one is already a miss, so it does not count, as in Redis.
+    fn remove(&mut self, slot: &Slot, now: i64) -> bool {
+        self.untag(slot);
+        self.entries
+            .remove(slot)
+            .is_some_and(|e| e.expires_at > now)
+    }
+
     fn untag(&mut self, slot: &Slot) {
         for tag in self.tags_of.remove(slot).unwrap_or_default() {
             if let Some(slots) = self.tagged.get_mut(&tag) {
@@ -244,6 +253,7 @@ impl Cache for MemoryCache {
     }
 
     async fn invalidate_tags(&self, tags: &[Tag]) -> Result<u64> {
+        let now = self.now();
         let mut state = self.state();
         let mut slots = HashSet::new();
         for tag in tags {
@@ -251,8 +261,7 @@ impl Cache for MemoryCache {
         }
         let mut removed = 0;
         for at in slots {
-            state.untag(&at);
-            if state.entries.remove(&at).is_some() {
+            if state.remove(&at, now) {
                 removed += 1;
             }
         }
@@ -279,14 +288,27 @@ impl Cache for MemoryCache {
     }
 
     async fn delete(&self, key: &Key) -> Result<bool> {
-        Ok(self.state().entries.remove(&slot(key)).is_some())
+        let now = self.now();
+        Ok(self.state().remove(&slot(key), now))
     }
 
     async fn clear(&self, namespace: &Namespace) -> Result<u64> {
+        let now = self.now();
         let mut state = self.state();
-        let before = state.entries.len();
-        state.entries.retain(|(ns, _), _| ns != namespace.as_str());
-        Ok((before - state.entries.len()) as u64)
+        let slots: Vec<Slot> = state
+            .entries
+            .keys()
+            .chain(state.tags_of.keys())
+            .filter(|(ns, _)| ns == namespace.as_str())
+            .cloned()
+            .collect();
+        let mut removed = 0;
+        for at in slots {
+            if state.remove(&at, now) {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     async fn lease(&self, key: &Key, ttl: Duration) -> Result<bool> {

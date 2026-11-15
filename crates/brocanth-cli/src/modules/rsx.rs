@@ -76,7 +76,7 @@ impl Module for Rsx {
         // by the parent and not by the two of them, because a file two
         // modules write is a clash the scaffold reports rather than a file
         // written twice.
-        if p.has("rsx-tailwind") || p.has("rsx-htmx") {
+        if p.embeds_assets() {
             s.file("src/assets.rs", ASSETS_RS);
             s.at(Slot::MainMods).line("mod assets;");
             // Before the router, around the whole server. A page returns a

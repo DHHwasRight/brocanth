@@ -40,7 +40,7 @@ impl Module for CacheRedis {
             project,
             Backend {
                 doc: DOC,
-                cache_items: &[],
+                cache_items: &["CacheReadiness"],
                 uses: "use brocanth_cache_redis::RedisCache;\n",
                 settings: vec![url_setting(
                     "redis://localhost:6379",
@@ -54,7 +54,7 @@ impl Module for CacheRedis {
                 defaults: "            url: \"redis://localhost:6379\".to_string(),\n",
                 configure: CONFIGURE_URL,
                 open: OPEN,
-                ready: READY,
+                ready: READY.to_string(),
                 sweep: false,
             },
         );
@@ -79,25 +79,17 @@ const OPEN: &str = r#"        // The connection opens on the first command, so n
         })?;
         let cache = {
             let _entered = runtime.enter();
-            RedisCache::open(&self.settings.url)
+            RedisCache::connect_lazy(&self.settings.url)
                 .map_err(|e| PluginError::new(format!("[cache] {e}")))?
         };
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
 "#;
 
-const READY: &str = r#"        // Ready when one read answers. A miss is a pass: the question is
-        // whether the server answers. `serve` awaits this once before it
+const READY: &str = r#"        // Ready when one read answers: `CacheReadiness` is the check
+        // `CachePlugin` registers. `serve` awaits this once before it
         // listens, so an unreachable server stops the start there.
-        let probe = Arc::clone(&cache);
-        lc.ready_when(move || {
-            let probe = Arc::clone(&probe);
-            async move {
-                let key = brocanth_cache::Namespace::new("brocanth.readyz")
-                    .and_then(|ns| brocanth_cache::Key::new(ns, "probe"))
-                    .map_err(|e| e.to_string())?;
-                probe.get(&key).await.map(drop).map_err(|e| {
-                    format!("{e}\nhelp: check `[cache] url`, and that the Redis server runs")
-                })
-            }
-        });
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .help("check `[cache] url`, and that the Redis server runs"),
+        );
 "#;

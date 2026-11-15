@@ -939,6 +939,7 @@ dependencies = [
  "brocanth-scaffold",
  "brocanth-schema",
  "brocanth-search",
+ "brocanth-static",
  "brocanth-storage",
  "brocanth-webhooks",
  "cargo_metadata",
@@ -1533,6 +1534,7 @@ name = "brocanth-static"
 version = "0.1.0"
 dependencies = [
  "brocanth",
+ "brocanth-scaffold",
  "brocanth-server",
  "tokio",
 ]

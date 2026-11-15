@@ -70,7 +70,7 @@ async fn two_prefixes_do_not_meet_on_one_server() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_url_that_is_not_redis_says_what_to_write() {
-    let Err(e) = RedisCache::open("postgres://localhost/app") else {
+    let Err(e) = RedisCache::connect_lazy("postgres://localhost/app") else {
         panic!("a Postgres URL is not a Redis URL");
     };
     let said = e.to_string();

@@ -11,8 +11,20 @@ description = "Writes a brocanth application to files: every GET page, its parti
 # application's own handler. No runtime: `Export::run` is a future, and
 # the caller decides what drives it.
 [dependencies]
-brocanth.workspace = true
-brocanth-server.workspace = true
+brocanth = { workspace = true, optional = true }
+brocanth-server = { workspace = true, optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `static`. It lives beside the crate whose API the generated `export`
+# command calls, not in the CLI. Optional and off: an application that
+# exports links no generator, and the CLI takes `scaffold` alone.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[features]
+default = ["runtime"]
+# The export: everything but the scaffold module.
+runtime = ["dep:brocanth", "dep:brocanth-server"]
+scaffold = ["dep:brocanth-scaffold"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

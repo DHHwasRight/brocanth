@@ -35,6 +35,8 @@ fn locale_paths_keep_other_modules_routes_unprefixed() {
             "config",
             "rsx",
             "admin",
+            "middleware",
+            "middleware-csrf",
             "storage",
             "storage-routes",
             "i18n",

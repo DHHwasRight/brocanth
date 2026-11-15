@@ -136,8 +136,12 @@ fn collect(base: &Path, dir: &Path, fingerprint: bool, out: &mut Vec<File>) -> R
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         if path.is_dir() {
             // A directory of inputs (`_src/`) holds the modules a bundle
-            // imports; like an `_` file, nothing in it is published.
-            if !name.starts_with('_') {
+            // imports; like an `_` file, nothing in it is published. A
+            // hidden directory (`.cache/`, `.git/`) is a tool's, not the
+            // site's, except `.well-known/` (RFC 8615), which exists to be
+            // served: `security.txt` lives there.
+            let hidden = name.starts_with('.') && name != ".well-known";
+            if !name.starts_with('_') && !hidden {
                 collect(base, &path, fingerprint, out)?;
             }
             continue;
@@ -173,11 +177,21 @@ fn collect(base: &Path, dir: &Path, fingerprint: bool, out: &mut Vec<File>) -> R
 /// `css/site.css` + `a1b2c3d4` -> `css/site.a1b2c3d4.css`.
 ///
 /// Before the extension rather than after it, so a server, a CDN and a
-/// browser all still see a `.css`.
+/// browser all still see a `.css`. The extension is looked for in the file
+/// name only: `v1.2/LICENSE` becomes `v1.2/LICENSE.a1b2c3d4`, and a
+/// directory name never changes.
 fn stamp(logical: &str, hash: &str) -> String {
-    match logical.rsplit_once('.') {
-        Some((stem, extension)) => format!("{stem}.{hash}.{extension}"),
-        None => format!("{logical}.{hash}"),
+    let (dir, name) = match logical.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir), name),
+        None => (None, logical),
+    };
+    let stamped = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}.{hash}.{extension}"),
+        _ => format!("{name}.{hash}"),
+    };
+    match dir {
+        Some(dir) => format!("{dir}/{stamped}"),
+        None => stamped,
     }
 }
 
@@ -272,8 +286,9 @@ fn expand(files: &[File]) -> TokenStream2 {
                 Some(asset) => asset.published,
                 None => panic!(
                     "no asset `{logical}`; `assets!` publishes what is in the \
-                     directories it was given, and a file added since the last \
-                     build needs `touch src/assets.rs`"
+                     directories it was given\n\
+                     help: check the name against the files there; a file added \
+                     since the last build needs `touch src/assets.rs`"
                 ),
             }
         }
@@ -366,6 +381,39 @@ mod tests {
     fn the_hash_goes_before_the_extension_so_the_type_survives() {
         assert_eq!(stamp("css/site.css", "a1b2c3d4"), "css/site.a1b2c3d4.css");
         assert_eq!(stamp("robots", "a1b2c3d4"), "robots.a1b2c3d4");
+    }
+
+    #[test]
+    fn the_hash_never_goes_into_a_directory_name() {
+        assert_eq!(stamp("v1.2/LICENSE", "a1b2c3d4"), "v1.2/LICENSE.a1b2c3d4");
+        assert_eq!(
+            stamp(".well-known/security", "a1b2c3d4"),
+            ".well-known/security.a1b2c3d4"
+        );
+        assert_eq!(stamp("v1.2/app.js", "a1b2c3d4"), "v1.2/app.a1b2c3d4.js");
+        assert_eq!(stamp("a/.htaccess", "a1b2c3d4"), "a/.htaccess.a1b2c3d4");
+    }
+
+    #[test]
+    fn a_hidden_directory_is_not_published_but_well_known_is() {
+        let base =
+            std::env::temp_dir().join(format!("brocanth-assets-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for (path, text) in [
+            (".cache/x.js", "x"),
+            (".well-known/security.txt", "Contact: a@b"),
+            ("css/a.css", "a{}"),
+            (".hidden.css", "b{}"),
+        ] {
+            let at = base.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, text).unwrap();
+        }
+        let mut files = Vec::new();
+        collect(&base, &base, false, &mut files).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.logical.as_str()).collect();
+        assert_eq!(names, [".well-known/security.txt", "css/a.css"]);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

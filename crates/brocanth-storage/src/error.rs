@@ -25,7 +25,11 @@ pub enum StorageError {
 
     /// The text is not a size specification. The reason is a fixed string, so
     /// nothing a client sent reaches a log through here.
-    #[error("that is not a size specification: {0}")]
+    #[error(
+        "that is not a size specification: {0}\n\
+         help: write it as `300x200`, with `t`, `b` or `f` after it for a crop or a fit, \
+         or `300x0` to scale"
+    )]
     InvalidSpec(&'static str),
 
     /// A file token was forged, malformed, or past its expiry.
@@ -40,7 +44,11 @@ pub enum StorageError {
     ///
     /// Raised from the header, before any decoding. See
     /// [`MAX_SOURCE_PIXELS`](crate::MAX_SOURCE_PIXELS).
-    #[error("the image declares {width}x{height}, which is past the decode limit")]
+    #[error(
+        "the image declares {width}x{height}, which is past the decode limit\n\
+         help: upload a smaller image; the limit is `MAX_SOURCE_DIM` per side and \
+         `MAX_SOURCE_PIXELS` in all"
+    )]
     ImageTooLarge {
         /// Declared width, from the header.
         width: u32,
@@ -58,7 +66,11 @@ pub enum StorageError {
     /// refusal a caller can act on: it is a 413, it is the client's fault, and
     /// retrying it is pointless. Both numbers are the backend's own, so
     /// nothing a client sent reaches a log through here.
-    #[error("the object is {size} bytes, past this backend's limit of {limit}")]
+    #[error(
+        "the object is {size} bytes, past this backend's limit of {limit}\n\
+         help: store a smaller file, or raise the limit (`PgStorage::with_max_object_bytes`, \
+         `max_bytes` for the upload route)"
+    )]
     TooLarge {
         /// How many bytes the caller tried to store.
         size: u64,

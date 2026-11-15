@@ -1,8 +1,8 @@
 # `storage`
 
-Uploads on a local disk, addressed by content hash; no object store and no S3.
+Uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3.
 
-The wizard calls it: *Uploads on disk, addressed by content hash*.
+The wizard calls it: *Uploads on disk or in Postgres, addressed by content hash*.
 
 | | |
 |---|---|
@@ -12,11 +12,11 @@ The wizard calls it: *Uploads on disk, addressed by content hash*.
 | Presets | none |
 | Part of | nothing |
 | Needs | none |
-| After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| After | [`config`](config.md), [`db`](db.md) |
+| Adapts to | [`config`](config.md), [`db`](db.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-storage` |
+| Crates | `brocanth-storage` (feature `postgres` with [`db`](db.md)) |
 | Without it | no file storage; an upload has nowhere to go and no address to be read back from |
 
 ## What it writes
@@ -32,7 +32,6 @@ Slots:
 - src/plugins/mod.rs: `pub mod storage;`
 - src/plugins/mod.rs (the provider list): `storage crate::plugins::storage::Files`
 - config/<env>.toml: `[storage]`
-- .gitignore: `/var/uploads`
 
 ## Settings
 
@@ -40,9 +39,18 @@ Section `[storage]`. Environment variable: `$<APP>_STORAGE__<KEY>`. Flag: `--sto
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `root` | text | `"var/uploads"` | `--storage.root` | Where uploads are stored. |
+| `root` | text | `"var/uploads"` | `--storage.root` | Without `db` only. Where uploads are stored. The store writes a `.gitignore` that holds `*` into it, so the ignore rule follows this setting. |
+| `migrate` | bool | `true` | `--storage.migrate` | With `db` only. Create the two storage tables at startup if they are absent. Development only. |
 | `secret` | text | `"development only: replace before anything is uploaded in anger"` | none (secret) | Signs file tokens and keys object addresses. |
 | `token_ttl` | integer | `120` | `--storage.token_ttl` | Seconds a file token lives. |
+
+Outside development, the plugin refuses to start with the generated secret
+or a secret under 32 characters. Reason: anybody who read this repository
+knows the generated one, and with it can mint a token for any object.
+
+With `db`, the objects live in Postgres on the `db` pool (`PgStorage`), so
+every instance sees them. Without it, they are on one machine's disk, and
+`brocanth check --deploy` warns with `deploy/storage-local`.
 
 ## Read more
 

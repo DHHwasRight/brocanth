@@ -38,6 +38,15 @@
 //! fragment. The cost of the race is one wasted resize; the cost of avoiding
 //! it would be a coordination service.
 //!
+//! # Off the reactor, a few at a time
+//!
+//! A decode of a large source and its resize take tens or hundreds of
+//! milliseconds of CPU and up to [`MAX_DECODE_ALLOC`] bytes. [`derive_variant`]
+//! runs [`render`] on Tokio's blocking pool, so a request thread never waits
+//! on it, and at most [`MAX_CONCURRENT_RENDERS`] renders run at once: a
+//! burst of cold thumbnails waits its turn instead of taking every blocking
+//! thread and gigabytes of memory.
+//!
 //! # What the result is encoded as
 //!
 //! JPEG at quality 82 when the source has no alpha channel, PNG when it has.
@@ -49,6 +58,9 @@
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use std::io::Cursor;
+use std::sync::OnceLock;
+
+use tokio::sync::Semaphore;
 
 use crate::error::StorageError;
 use crate::key::ObjectKey;
@@ -59,6 +71,16 @@ use crate::{MAX_SOURCE_DIM, MAX_SOURCE_PIXELS};
 
 /// How many bytes the decoder may allocate: 256 MiB.
 const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// How many renders run at once, in this process. Each may hold up to
+/// [`MAX_DECODE_ALLOC`] bytes, so this also bounds the memory renders take.
+pub const MAX_CONCURRENT_RENDERS: usize = 4;
+
+/// The renders' turns. See [`MAX_CONCURRENT_RENDERS`].
+fn turns() -> &'static Semaphore {
+    static TURNS: OnceLock<Semaphore> = OnceLock::new();
+    TURNS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_RENDERS))
+}
 
 /// The quality a derived JPEG is encoded at.
 const JPEG_QUALITY: u8 = 82;
@@ -99,7 +121,12 @@ pub async fn derive_variant(
         });
     }
     let source = store.get(key).await?;
-    let variant = render(&source, spec)?;
+    // The semaphore is never closed, so `acquire` cannot fail.
+    let _turn = turns()
+        .acquire()
+        .await
+        .map_err(|e| StorageError::backend(format!("waiting for a render: {e}")))?;
+    let variant = crate::local::offload(move || render(&source, spec)).await?;
     store.put_variant(key, spec, &variant.bytes).await?;
     Ok(variant)
 }

@@ -69,11 +69,14 @@ A response is stored only when every one of these is true:
 | buffered body | a stream has no body to store |
 | no `Set-Cookie` | a cookie is for one client |
 | `Cache-Control` has no `no-store` or `private` | the handler's opt-out |
+| `Vary` names only the host and the rule's `vary` headers | `Vary: Cookie` (CSRF) or `*` differs between requests that share a key |
 | fits under `max_value_bytes` | the cap is an error elsewhere, a skip here |
 
-* **Key:** `GET`, path, query (unless `ignore_query()`), and each `vary`
-  header's value, escaped so one part cannot impersonate another. A key over
-  1024 bytes is not cached.
+* **Key:** `GET`, path, query (unless `ignore_query()`; only the named
+  parameters with `query_params([..])`), the host, and each `vary` header's
+  value, escaped so one part cannot impersonate another. A key over 1024
+  bytes is not cached. Each distinct query string is an entry: name the
+  parameters a page reads, so a random one cannot fill the cache.
 * **Tags:** the rule's tags, `route:{path}` (`route::path_tag`), and any
   the handler sets in the `brocanth-cache-tags` response header. The hook
   removes that header from every response.
@@ -81,9 +84,12 @@ A response is stored only when every one of these is true:
 * **Order:** declare the plugin so its response hook runs before any hook
   that rewrites the body (compression, `ETag`). On a hit those hooks run
   again over the stored body.
-* **Failure:** a lookup error fails the request, as `fetch` does. The store
-  is spawned on the Tokio runtime after the response is final; a failed
-  store is a later miss.
+* **Failure:** a lookup error is a miss that is not stored: the handler
+  serves the page and a warning goes to standard error, so a cache outage
+  is not a 500 on every cached page. The store is spawned on the Tokio
+  runtime after the response is final; a failed store is a later miss. At
+  most 64 stores run at once (`max_pending_stores`); past that, a response
+  is served and not stored.
 * **No single flight.** Concurrent misses on one path all run the handler.
 
 ## 3. Fragments

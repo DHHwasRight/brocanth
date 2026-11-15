@@ -47,8 +47,7 @@ image = { version = "0.25", default-features = false, features = [
 # driver, a connection pool, a TLS stack and a reactor is the largest tree in
 # this crate by a wide margin, and §8.2 asks that a feature which is off means
 # the code is absent rather than branched around. With `postgres` off there is
-# no `sqlx` and no `tokio` here: `cargo tree -p brocanth-storage -e normal
-# --depth 1` lists seven crates, exactly as it did before this backend existed.
+# no `sqlx` here.
 #
 # Version 0.9, with no default features, because that is the version `sea-orm`
 # 2.0.4 and `brocanth-jobs` already resolve to in this workspace. A second
@@ -59,14 +58,16 @@ sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
 ], optional = true }
 
-# Named here only so the Postgres tests can build a reactor to drive `sqlx`
-# on: `src/rt.rs` runs a future on the calling thread and has no I/O driver, so
-# it cannot drive a socket. This adds nothing to the tree that
-# `sqlx/runtime-tokio` has not already put there, and it is optional so that a
-# build without `postgres` has neither.
-tokio = { version = "1", default-features = false, features = [
-    "rt",
-], optional = true }
+# `LocalDisk` runs its `std::fs` calls, each write with an `fsync`, on
+# Tokio's blocking pool when a Tokio runtime calls it, and a thumbnail renders
+# there too. A reactor thread that waits on a disk or a decoder stops every
+# other request it holds. Only `rt`: no reactor, no timer, no thread of its
+# own; the application's runtime does the work. Outside a runtime the calls
+# run in place, so the tests in `src/rt.rs` need none. `variants` adds `sync`
+# for the semaphore that bounds concurrent renders. Optional, behind the
+# default `runtime` feature, so that the CLI, which links this crate for its
+# scaffold module alone, links no Tokio (`brocanth-cli/tests/lean.rs`).
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
 # `storage`. It lives beside the crate it writes into a project, and not in
@@ -97,7 +98,7 @@ brocanth-input = { workspace = true, optional = true }
 # `src/rt.rs`, because a runtime that exists only to make a test compile is
 # still a runtime in the tree (PLAN §8.2, and `brocanth-admin` set the
 # precedent). The Postgres tests need a real reactor and get it from the
-# optional `tokio` above, which the `postgres` feature turns on — a
+# `tokio` above, with the reactor `sqlx/runtime-tokio` turns on — a
 # dev-dependency cannot be optional, and one declared here would be compiled by
 # every `cargo test` in a tree that asked for no database.
 tempfile = "3"
@@ -113,11 +114,17 @@ brocanth-test.workspace = true
 brocanth-middleware.workspace = true
 
 [features]
-# Empty, and that is the rule rather than an oversight. Parsing a size
-# specification, caching a derived variant and serving one are all here with
-# the feature off; only the pixels need `image`.
-default = []
-variants = ["dep:image"]
+# `runtime` only. Parsing a size specification, caching a derived variant
+# and serving one are all here with `variants` off; only the pixels need
+# `image`.
+default = ["runtime"]
+
+# The blocking pool for `LocalDisk` and for renders. Without it, the store
+# runs its disk calls in place. The CLI turns it off with
+# `default-features = false`, because it links this crate for the scaffold
+# module alone.
+runtime = ["dep:tokio"]
+variants = ["runtime", "dep:image", "tokio/sync"]
 
 # The upload and download routes, as request hooks. See `crate::routes`.
 routes = ["dep:brocanth", "dep:http", "dep:brocanth-input"]
@@ -133,7 +140,7 @@ scaffold = ["dep:brocanth-scaffold"]
 # one is the other half of the resolution failure the comment above is about:
 # two crates in one workspace asking for two different OpenSSL bindings is a
 # link error nobody can fix from their own `Cargo.toml`.
-postgres = ["dep:sqlx", "dep:tokio", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+postgres = ["runtime", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
 
 [lints.rust]
 missing_docs = "warn"

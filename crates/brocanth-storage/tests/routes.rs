@@ -84,6 +84,14 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
+/// Identical uploads share one content address, so a test can name it.
+fn deduping() -> RoutesConfig {
+    RoutesConfig {
+        dedupe: true,
+        ..RoutesConfig::default()
+    }
+}
+
 fn rig(config: RoutesConfig, open: bool) -> Rig {
     rig_with(config, open, CsrfConfig::default(), &[])
 }
@@ -164,7 +172,7 @@ fn get(rig: &Rig, target: &str) -> TestResponse {
 
 #[test]
 fn a_form_uploads_without_a_script_and_comes_back_to_its_page() {
-    let rig = rig(RoutesConfig::default(), true);
+    let rig = rig(deduping(), true);
     let image = png(40, 20);
     let sent = upload(
         &rig,
@@ -205,7 +213,7 @@ fn a_form_uploads_without_a_script_and_comes_back_to_its_page() {
 
 #[test]
 fn an_upload_with_no_csrf_token_stops_at_the_check() {
-    let rig = rig(RoutesConfig::default(), true);
+    let rig = rig(deduping(), true);
     let sent = upload(&rig, form(&[], ("a.png", "image/png", &png(2, 2))));
     assert_eq!(sent.status(), 403);
     let forged = upload(
@@ -303,7 +311,11 @@ fn public_routes_serve_without_a_token_and_cache_for_ever() {
 
 #[test]
 fn a_thumbnail_is_rendered_once_and_then_read_from_the_cache() {
-    let rig = rig(RoutesConfig::default(), true);
+    let config = RoutesConfig {
+        thumb_sizes: vec!["30x20".parse().unwrap()],
+        ..RoutesConfig::default()
+    };
+    let rig = rig(config, true);
     let key = block_on(rig.store.put(&png(300, 200), &ObjectInfo::new())).unwrap();
     let url = rig.routes.url(&key);
     let thumb = get(&rig, &format!("{url}&thumb=30x20"));
@@ -322,6 +334,58 @@ fn a_thumbnail_is_rendered_once_and_then_read_from_the_cache() {
     let text = block_on(rig.store.put(b"plain text", &ObjectInfo::new())).unwrap();
     let text_url = rig.routes.url(&text);
     assert_eq!(get(&rig, &format!("{text_url}&thumb=30x20")).status(), 415);
+}
+
+#[test]
+fn a_size_outside_the_list_is_refused_before_anything_is_rendered() {
+    let rig = rig(RoutesConfig::default(), true);
+    let key = block_on(rig.store.put(&png(300, 200), &ObjectInfo::new())).unwrap();
+    let url = rig.routes.url(&key);
+    let refused = get(&rig, &format!("{url}&thumb=31x20"));
+    assert_eq!(refused.status(), 400);
+    assert!(refused
+        .text()
+        .contains("help: ask for one of 150x150t, 300x200, 600x600f"));
+    let spec = "31x20".parse().unwrap();
+    assert!(block_on(rig.store.get_variant(&key, spec))
+        .unwrap()
+        .is_none());
+    assert_eq!(get(&rig, &format!("{url}&thumb=300x200")).status(), 200);
+}
+
+#[test]
+fn two_uploads_of_one_file_get_two_addresses_unless_the_config_dedupes() {
+    let send = |rig: &Rig| {
+        upload(
+            rig,
+            form(&[("_csrf_token", CSRF)], ("a.txt", "text/plain", b"same")),
+        )
+    };
+    let rig = rig(RoutesConfig::default(), true);
+    let (one, two) = (send(&rig), send(&rig));
+    assert_eq!((one.status(), two.status()), (201, 201));
+    assert_ne!(one.text(), two.text(), "each upload has its own address");
+
+    let config = RoutesConfig {
+        dedupe: true,
+        ..RoutesConfig::default()
+    };
+    let rig = rig_with(config, true, CsrfConfig::default(), &[]);
+    let (one, two) = (send(&rig), send(&rig));
+    assert_eq!(one.text(), two.text(), "one address for one content");
+}
+
+#[test]
+fn a_name_outside_ascii_keeps_its_attachment_header() {
+    let rig = rig(RoutesConfig::default(), true);
+    let about = ObjectInfo::new().with_filename("résumé.pdf");
+    let key = block_on(rig.store.put(b"%PDF-1.7", &about)).unwrap();
+    let file = get(&rig, &rig.routes.url(&key));
+    assert_eq!(file.status(), 200);
+    assert_eq!(
+        file.header("content-disposition").unwrap(),
+        "attachment; filename=\"r_sum_.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"
+    );
 }
 
 #[test]
@@ -412,7 +476,7 @@ fn a_body_that_is_not_multipart_is_a_415_with_help() {
 fn a_file_of_exactly_max_bytes_is_taken_and_one_byte_more_is_not() {
     let config = RoutesConfig {
         max_bytes: 64,
-        ..RoutesConfig::default()
+        ..deduping()
     };
     let rig = rig(config, true);
     let fits = [1_u8; 64];
@@ -434,7 +498,7 @@ fn a_file_of_exactly_max_bytes_is_taken_and_one_byte_more_is_not() {
 
 #[test]
 fn a_refused_upload_stores_nothing() {
-    let rig = rig(RoutesConfig::default(), false);
+    let rig = rig(deduping(), false);
     let bytes = png(3, 3);
     let sent = upload(
         &rig,
@@ -446,7 +510,7 @@ fn a_refused_upload_stores_nothing() {
 
 #[test]
 fn a_fetch_caller_uploads_with_the_header_and_gets_201_with_the_link() {
-    let rig = rig(RoutesConfig::default(), true);
+    let rig = rig(deduping(), true);
     let bytes = b"notes from a script".to_vec();
     let sent = (rig.send)(
         TestRequest::post("/files")
@@ -575,7 +639,7 @@ fn a_return_to_off_this_site_is_never_followed() {
 
 #[test]
 fn a_return_to_keeps_its_query_and_its_fragment() {
-    let rig = rig(RoutesConfig::default(), true);
+    let rig = rig(deduping(), true);
     let bytes = b"with a query".to_vec();
     let hex = ObjectKey::of(&bytes).to_hex();
     let sent = upload(
@@ -668,7 +732,7 @@ fn a_source_image_too_large_for_a_thumbnail_is_a_413() {
     let rig = rig(RoutesConfig::default(), true);
     let wide = png(brocanth_storage::MAX_SOURCE_DIM + 1, 1);
     let key = block_on(rig.store.put(&wide, &ObjectInfo::new())).unwrap();
-    let answer = get(&rig, &format!("{}&thumb=10x10", rig.routes.url(&key)));
+    let answer = get(&rig, &format!("{}&thumb=150x150t", rig.routes.url(&key)));
     assert_eq!(answer.status(), 413, "{}", answer.text());
     // The original is still served: the limit is on decoding, not storing.
     assert_eq!(get(&rig, &rig.routes.url(&key)).status(), 200);
@@ -680,16 +744,16 @@ fn a_thumbnail_has_its_own_entity_tag() {
     let key = block_on(rig.store.put(&png(60, 40), &ObjectInfo::new())).unwrap();
     let url = rig.routes.url(&key);
     let original = get(&rig, &url);
-    let thumb = get(&rig, &format!("{url}&thumb=30x20"));
+    let thumb = get(&rig, &format!("{url}&thumb=150x150t"));
     let tag = thumb.header("etag").unwrap().to_string();
     assert_ne!(Some(tag.as_str()), original.header("etag"));
     let again =
-        (rig.send)(TestRequest::get(format!("{url}&thumb=30x20")).header("if-none-match", &tag));
+        (rig.send)(TestRequest::get(format!("{url}&thumb=150x150t")).header("if-none-match", &tag));
     assert_eq!(again.status(), 304);
     assert!(again.body().is_empty());
     // The original's tag does not stand for the thumbnail.
     let other = (rig.send)(
-        TestRequest::get(format!("{url}&thumb=30x20"))
+        TestRequest::get(format!("{url}&thumb=300x200"))
             .header("if-none-match", original.header("etag").unwrap()),
     );
     assert_eq!(other.status(), 200);

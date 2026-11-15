@@ -84,8 +84,9 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`rls`](rls.md) | Postgres row-level security declared in Rust; `rls make` writes the migration | Enhancer |  |
-| [`storage`](storage.md) | uploads on a local disk, addressed by content hash; no object store and no S3 | Enhancer, Middleware |  |
-| [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails | Middleware | storage |
+| [`storage`](storage.md) | uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3 | Enhancer, Middleware |  |
+| [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token | Middleware | storage |
+| [`storage-thumbnails`](storage-thumbnails.md) | ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders | Middleware | storage |
 | [`input`](input.md) | a form or a JSON body, read into a struct, with every fault at once | Enhancer, Renderer |  |
 | [`client`](client.md) | a subcommand that calls this application's own API, built from its routes | Enhancer |  |
 | [`middleware`](middleware.md) | proxy headers, method override, canonical host, content types, CORS | Middleware |  |

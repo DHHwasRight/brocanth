@@ -43,18 +43,23 @@
 //!
 //! # Blocking
 //!
-//! These are `std::fs` calls. The `_blocking` methods are the real
-//! implementation and the [`Storage`] impl calls them; the futures never
-//! yield. On a page-cache hit that is microseconds and costs an async runtime
-//! nothing; on a cold read of a large object it is a blocking syscall on a
-//! reactor thread, so an application on tokio wraps the call in
-//! `spawn_blocking` — which is why the synchronous methods are public rather
-//! than private. A CLI, a migration and a test use them directly and need no
-//! runtime at all.
+//! These are `std::fs` calls, with an `fsync` on every write. The `_blocking`
+//! methods are the real implementation. The [`Storage`] impl runs them on
+//! Tokio's blocking pool (`spawn_blocking`) when it is called inside a Tokio
+//! runtime, so no caller can block a reactor thread by forgetting to, and
+//! calls them in place outside one. A CLI, a migration and a test use the
+//! synchronous methods directly and need no runtime at all.
+//!
+//! # Not source
+//!
+//! [`LocalDisk::open`] writes a `.gitignore` that holds `*` into the root
+//! when it has none, so the uploads are never committed, wherever the root
+//! is.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -69,7 +74,8 @@ const VARIANTS: &str = "variants";
 const TMP: &str = "tmp";
 const META_SUFFIX: &str = ".meta";
 
-/// Objects in a directory tree.
+/// Objects in a directory tree. Cheap to clone: a clone is the same store.
+#[derive(Clone)]
 pub struct LocalDisk {
     root: PathBuf,
     hash_key: Option<HashKey>,
@@ -95,6 +101,17 @@ impl LocalDisk {
         let root =
             fs::canonicalize(root).map_err(|e| StorageError::io("resolve the storage root", e))?;
         restrict(&root)?;
+        // The uploads are not source, wherever the root is. A rule in the
+        // repository's own `.gitignore` would name a path the config can
+        // move, so the rule lives in the root and moves with it.
+        let ignore = root.join(".gitignore");
+        if !ignore.exists() {
+            let mut file = fs::File::create(&ignore)
+                .map_err(|e| StorageError::io("write the storage root's .gitignore", e))?;
+            restrict_file(&file)?;
+            file.write_all(b"# Uploads, written by brocanth-storage. Not source.\n*\n")
+                .map_err(|e| StorageError::io("write the storage root's .gitignore", e))?;
+        }
         for sub in [OBJECTS, VARIANTS, TMP] {
             let dir = root.join(sub);
             fs::create_dir_all(&dir)
@@ -160,18 +177,21 @@ impl LocalDisk {
         about: &ObjectInfo,
     ) -> Result<(), StorageError> {
         let path = self.object_path(key);
+        let meta = self.meta_path(key);
+        let content_type = ContentType::resolve(content, about.declared_type.as_ref());
+        let sidecar = sidecar(&content_type, about.filename.as_ref());
         // Already there: same address, same bytes. Returning here is what
         // makes a second upload free, and it is also what stops the second
-        // uploader rewriting the first one's media type.
+        // uploader rewriting the first one's media type. A sidecar that a
+        // failed put never wrote is written now, so a retry repairs it.
         if path.exists() {
+            if !meta.exists() {
+                self.write_atomic(&meta, sidecar.as_bytes())?;
+            }
             return Ok(());
         }
-        let content_type = resolve_type(content, about);
         self.write_atomic(&path, content)?;
-        self.write_atomic(
-            &self.meta_path(key),
-            sidecar(&content_type, about.filename.as_ref()).as_bytes(),
-        )?;
+        self.write_atomic(&meta, sidecar.as_bytes())?;
         Ok(())
     }
 
@@ -255,7 +275,20 @@ impl LocalDisk {
         spec: VariantSpec,
         content: &[u8],
     ) -> Result<(), StorageError> {
-        self.write_atomic(&self.variant_path(key, spec), content)
+        // A variant of an object that is gone is the object again: refuse it,
+        // as the Postgres backend's foreign key does.
+        if !self.object_path(key).exists() {
+            return Err(StorageError::NotFound);
+        }
+        let path = self.variant_path(key, spec);
+        self.write_atomic(&path, content)?;
+        // A delete that ran during the write removed the variants before
+        // this one landed. Look again, and take it back.
+        if !self.object_path(key).exists() {
+            remove_dir_if_present(&self.variant_dir(key), "remove an object's variants")?;
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
     }
 
     // -- paths, built from nothing a client supplied -----------------------
@@ -318,7 +351,8 @@ impl LocalDisk {
 #[async_trait]
 impl Storage for LocalDisk {
     async fn put(&self, content: &[u8], about: &ObjectInfo) -> Result<ObjectKey, StorageError> {
-        self.put_blocking(content, about)
+        let (this, content, about) = (self.clone(), Arc::from(content), about.clone());
+        offload(move || this.put_blocking(&content, &about)).await
     }
 
     async fn put_at(
@@ -327,23 +361,28 @@ impl Storage for LocalDisk {
         content: &[u8],
         about: &ObjectInfo,
     ) -> Result<(), StorageError> {
-        self.put_at_blocking(key, content, about)
+        let (this, key, content, about) = (self.clone(), *key, Arc::from(content), about.clone());
+        offload(move || this.put_at_blocking(&key, &content, &about)).await
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Vec<u8>, StorageError> {
-        self.get_blocking(key)
+        let (this, key) = (self.clone(), *key);
+        offload(move || this.get_blocking(&key)).await
     }
 
     async fn meta(&self, key: &ObjectKey) -> Result<ObjectMeta, StorageError> {
-        self.meta_blocking(key)
+        let (this, key) = (self.clone(), *key);
+        offload(move || this.meta_blocking(&key)).await
     }
 
     async fn exists(&self, key: &ObjectKey) -> Result<bool, StorageError> {
-        self.exists_blocking(key)
+        let (this, key) = (self.clone(), *key);
+        offload(move || this.exists_blocking(&key)).await
     }
 
     async fn delete(&self, key: &ObjectKey) -> Result<(), StorageError> {
-        self.delete_blocking(key)
+        let (this, key) = (self.clone(), *key);
+        offload(move || this.delete_blocking(&key)).await
     }
 
     async fn get_variant(
@@ -351,7 +390,8 @@ impl Storage for LocalDisk {
         key: &ObjectKey,
         spec: VariantSpec,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        self.get_variant_blocking(key, spec)
+        let (this, key) = (self.clone(), *key);
+        offload(move || this.get_variant_blocking(&key, spec)).await
     }
 
     async fn put_variant(
@@ -360,16 +400,42 @@ impl Storage for LocalDisk {
         spec: VariantSpec,
         content: &[u8],
     ) -> Result<(), StorageError> {
-        self.put_variant_blocking(key, spec, content)
+        let (this, key, content) = (self.clone(), *key, Arc::<[u8]>::from(content));
+        offload(move || this.put_variant_blocking(&key, spec, &content)).await
     }
 }
 
-/// The media type to store: what the bytes are, then what the client said,
-/// then nothing. See [`Storage::put`].
-fn resolve_type(content: &[u8], about: &ObjectInfo) -> ContentType {
-    ContentType::sniff(content)
-        .or_else(|| about.declared_type.clone())
-        .unwrap_or_else(ContentType::octet_stream)
+/// Runs blocking work on Tokio's blocking pool inside a Tokio runtime, and
+/// in place outside one. See the module documentation on blocking.
+///
+/// Without the `runtime` feature the work always runs in place: only a build
+/// that links no Tokio, such as the CLI's, turns it off.
+#[cfg(not(feature = "runtime"))]
+pub(crate) async fn offload<T, F>(work: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    work()
+}
+
+/// Runs blocking work on Tokio's blocking pool inside a Tokio runtime, and
+/// in place outside one. See the module documentation on blocking.
+#[cfg(feature = "runtime")]
+pub(crate) async fn offload<T, F>(work: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime.spawn_blocking(work).await.map_err(|e| {
+            StorageError::backend(format!(
+                "a blocking storage task did not finish: {e}\n\
+                 help: this is a panic in the store or a runtime shutting down; see the log above"
+            ))
+        })?,
+        Err(_) => work(),
+    }
 }
 
 /// The sidecar. A two-line text file, not JSON, because adding a JSON parser

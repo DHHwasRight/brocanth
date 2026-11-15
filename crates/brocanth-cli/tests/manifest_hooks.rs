@@ -139,7 +139,13 @@ const PLUGINS: &[Row] = &[
         ty: "crate::plugins::storage_routes::StorageRoutes",
         registered: || {
             written(
-                &["config", "storage", "storage-routes"],
+                &[
+                    "config",
+                    "middleware",
+                    "middleware-csrf",
+                    "storage",
+                    "storage-routes",
+                ],
                 "src/plugins/storage_routes/mod.rs",
             )
         },

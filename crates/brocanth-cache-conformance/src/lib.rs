@@ -18,8 +18,9 @@
 //!
 //! **What the suite does not check.** How many rows `purge_expired`
 //! removes: a backend whose store expires entries by itself (Redis) has
-//! nothing to remove and answers 0. Counts that include expired entries or
-//! leases: the trait does not promise them. Speed.
+//! nothing to remove and answers 0. Counts that include leases: the trait
+//! does not promise them. Speed. (An expired entry is never counted:
+//! `delete`, `clear` and `invalidate_tags` count live entries only.)
 
 #![forbid(unsafe_code)]
 

@@ -456,9 +456,10 @@ mod disk {
             for component in path.strip_prefix(&root).unwrap().components() {
                 let text = component.as_os_str().to_string_lossy().to_string();
                 let text = text.strip_suffix(".meta").unwrap_or(&text).to_string();
-                let allowed = matches!(text.as_str(), "objects" | "variants" | "tmp")
-                    || text.bytes().all(|b| b.is_ascii_hexdigit())
-                    || VariantSpec::parse(&text).is_ok();
+                let allowed =
+                    matches!(text.as_str(), "objects" | "variants" | "tmp" | ".gitignore")
+                        || text.bytes().all(|b| b.is_ascii_hexdigit())
+                        || VariantSpec::parse(&text).is_ok();
                 assert!(allowed, "{text:?} is not a name this crate generates");
             }
         }
@@ -476,8 +477,8 @@ mod disk {
     fn identical_content_is_stored_once_and_keeps_the_first_metadata() {
         let (_dir, store) = store();
         let first = ObjectInfo::new()
-            .with_filename("mine.png")
-            .with_declared_type("image/png");
+            .with_filename("mine.pdf")
+            .with_declared_type("application/pdf");
         let second = ObjectInfo::new()
             .with_filename("yours.html")
             .with_declared_type("text/html");
@@ -489,8 +490,8 @@ mod disk {
         // The second uploader must not be able to change what the first
         // person's file is served as.
         let meta = store.meta_blocking(&a).unwrap();
-        assert_eq!(meta.filename.unwrap().as_str(), "mine.png");
-        assert_eq!(meta.content_type.as_str(), "image/png");
+        assert_eq!(meta.filename.unwrap().as_str(), "mine.pdf");
+        assert_eq!(meta.content_type.as_str(), "application/pdf");
 
         let mut files = Vec::new();
         walk(&store.root().join("objects"), &mut files);
@@ -745,20 +746,12 @@ mod disk {
     /// The gap between "every write is atomic" and "an object is whole".
     ///
     /// `put_at` writes two files: the object, then the sidecar. Each one is
-    /// atomic on its own, which is what the module documentation claims and
-    /// what it delivers. The *pair* is not, and the consequence is not
-    /// transient: the early return on `path.exists()` is keyed on the object,
-    /// so the identical upload that would have written the missing sidecar
-    /// returns `Ok` and writes nothing. The media type is degraded to
-    /// `application/octet-stream` and the filename is lost for good.
-    ///
-    /// Degrading towards `octet_stream` is the safe direction -- the serving
-    /// half forces an attachment -- so this is a durability bug and not a
-    /// disclosure one. It is still unrecoverable through the public surface:
-    /// `delete` then `put` is the only repair, and that is a different
-    /// operation from the retry anybody would actually run.
+    /// atomic on its own; the pair is not. A crash between the two leaves
+    /// the object without its sidecar. The identical upload, which is what a
+    /// retry is, writes the missing sidecar, so the media type and the
+    /// filename come back.
     #[test]
-    fn a_half_written_object_keeps_its_bytes_loses_its_metadata_and_a_retry_does_not_heal_it() {
+    fn a_half_written_object_is_repaired_by_a_retry() {
         let (_dir, store) = store();
         let about = ObjectInfo::new()
             .with_filename("holiday.png")
@@ -769,37 +762,73 @@ mod disk {
 
         // What a crash between the two `write_atomic` calls leaves behind.
         std::fs::remove_file(meta_path(store.root(), &key)).unwrap();
+        let meta = store.meta_blocking(&key).unwrap();
+        assert_eq!(meta.content_type.as_str(), "application/octet-stream");
 
-        // The bytes are intact, which is the half content addressing can
-        // check for itself.
-        assert_eq!(store.get_blocking(&key).unwrap(), b"\x89PNG\r\n\x1a\nbody");
-        assert!(store.exists_blocking(&key).unwrap());
-
-        // The identical upload, which is what a retry is.
         assert_eq!(
             store
                 .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
                 .unwrap(),
             key
         );
-
-        // It did not write the sidecar, and this is the finding.
-        assert!(!meta_path(store.root(), &key).exists());
         let meta = store.meta_blocking(&key).unwrap();
-        assert_eq!(meta.size, 12);
+        assert_eq!(meta.content_type.as_str(), "image/png");
+        assert_eq!(meta.filename.unwrap().as_str(), "holiday.png");
+    }
+
+    #[test]
+    fn a_variant_of_an_object_that_is_gone_is_refused() {
+        let (_dir, store) = store();
+        let key = store.put_blocking(b"source", &ObjectInfo::new()).unwrap();
+        let spec = VariantSpec::parse("50x50t").unwrap();
+        store.delete_blocking(&key).unwrap();
+        assert!(matches!(
+            store.put_variant_blocking(&key, spec, b"thumb"),
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(store.get_variant_blocking(&key, spec).unwrap(), None);
+    }
+
+    #[test]
+    fn a_declared_image_type_is_not_believed_for_bytes_that_are_not_one() {
+        let (_dir, store) = store();
+        let lying = ObjectInfo::new().with_declared_type("image/png");
+        let key = store
+            .put_blocking(b"<script>alert(1)</script>", &lying)
+            .unwrap();
+        let meta = store.meta_blocking(&key).unwrap();
         assert_eq!(meta.content_type.as_str(), "application/octet-stream");
         assert!(!meta.content_type.is_safe_to_inline());
-        assert!(meta.filename.is_none());
+    }
 
-        // Only the long way round repairs it.
-        store.delete_blocking(&key).unwrap();
-        store
-            .put_blocking(b"\x89PNG\r\n\x1a\nbody", &about)
+    #[test]
+    fn the_root_ignores_itself_in_git() {
+        let (_dir, store) = store();
+        let ignore = std::fs::read_to_string(store.root().join(".gitignore")).unwrap();
+        assert!(ignore.lines().any(|l| l == "*"), "{ignore}");
+        // A second open keeps what is there.
+        std::fs::write(store.root().join(".gitignore"), "*\n!keep\n").unwrap();
+        let again = LocalDisk::open(store.root()).unwrap();
+        let ignore = std::fs::read_to_string(again.root().join(".gitignore")).unwrap();
+        assert_eq!(ignore, "*\n!keep\n");
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn inside_a_tokio_runtime_the_store_runs_on_the_blocking_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn Storage> =
+            std::sync::Arc::new(LocalDisk::open(dir.path()).unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
             .unwrap();
-        assert_eq!(
-            store.meta_blocking(&key).unwrap().content_type.as_str(),
-            "image/png"
-        );
+        runtime.block_on(async {
+            let key = store.put(b"bytes", &ObjectInfo::new()).await.unwrap();
+            assert_eq!(store.get(&key).await.unwrap(), b"bytes");
+            assert!(store.exists(&key).await.unwrap());
+            store.delete(&key).await.unwrap();
+            assert!(!store.exists(&key).await.unwrap());
+        });
     }
 
     /// The temporary directory is cleaned on the failure path and emptied by
@@ -1404,7 +1433,7 @@ mod images {
 #[cfg(feature = "postgres")]
 mod pg {
     use super::*;
-    use crate::postgres::{Postgres, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
+    use crate::postgres::{PgStorage, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
 
     /// Says, once and where it cannot be swallowed, that the suite did not
     /// run.
@@ -1441,7 +1470,7 @@ mod pg {
     /// nothing.
     fn with_store<F>(body: F)
     where
-        F: AsyncFnOnce(Postgres),
+        F: AsyncFnOnce(PgStorage),
     {
         let Some(url) = std::env::var("BROCANTH_TEST_DATABASE_URL")
             .ok()
@@ -1451,7 +1480,7 @@ mod pg {
             return;
         };
         reactor().block_on(async move {
-            let store = Postgres::connect(&url).await.expect("connecting");
+            let store = PgStorage::connect(&url).await.expect("connecting");
             store.migrate().await.expect("creating the tables");
             body(store).await;
         });
@@ -1602,7 +1631,7 @@ mod pg {
         with_store(async |store| {
             let body = unique("keyed addressing");
             let plain = store.address_of(&body);
-            let keyed = Postgres::with_pool(store.pool().clone())
+            let keyed = PgStorage::from_pool(store.pool().clone())
                 .with_hash_key(HashKey::from_secret(b"deployment secret"));
             let key = keyed.put(&body, &ObjectInfo::new()).await.expect("put");
             assert_ne!(key, plain, "the key must change the address");
@@ -1676,7 +1705,7 @@ mod pg {
     #[test]
     fn an_object_past_the_limit_is_refused_before_it_is_sent() {
         with_store(async |store| {
-            let small = Postgres::with_pool(store.pool().clone())
+            let small = PgStorage::from_pool(store.pool().clone())
                 .with_max_object_bytes(64)
                 .expect("a limit");
             let body = vec![b'x'; 65];
@@ -1736,7 +1765,7 @@ mod pg {
             let configure = |bytes| {
                 let pool = sqlx::postgres::PgPool::connect_lazy("postgres://localhost/unused")
                     .expect("a lazy pool");
-                Postgres::with_pool(pool).with_max_object_bytes(bytes)
+                PgStorage::from_pool(pool).with_max_object_bytes(bytes)
             };
             assert!(configure(0).is_err(), "a limit of zero stores nothing");
             assert!(configure(OBJECT_SIZE_CEILING + 1).is_err());

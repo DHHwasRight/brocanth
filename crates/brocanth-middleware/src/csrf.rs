@@ -59,7 +59,7 @@
 //! The token for this request is on the request state as a [`CsrfToken`],
 //! which is where a page reads it to write the hidden field.
 
-use brocanth::plugin_api::{Plugin, PluginError};
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_body::Body;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
@@ -360,6 +360,15 @@ impl Plugin for Csrf {
 
     fn new(config: Self::Config) -> Self {
         Self { config }
+    }
+
+    /// Publishes the configuration as a service, so a plugin that carries
+    /// the token in a body this check does not read (the file routes copy
+    /// it out of a multipart form) reads the same `field` and `header`
+    /// instead of a copy of them that can drift.
+    fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        lc.services_mut().insert(self.config.clone());
+        Ok(())
     }
 }
 

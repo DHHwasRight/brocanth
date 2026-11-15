@@ -40,9 +40,20 @@
 //!   is an attachment of type `application/octet-stream`, with `nosniff`
 //!   and a sandbox policy beside it. The type the client declared is not
 //!   repeated: it is the client's claim, and `text/html` is a page.
-//! * **A thumbnail is rendered at most once per size.** The first request
-//!   renders and caches it; the next ones read the cache. Without the
-//!   `variants` feature a thumbnail is served from the cache only.
+//! * **A thumbnail is rendered at most once per size, and only in a size
+//!   the application lists.** [`RoutesConfig::thumb_sizes`] is the list;
+//!   any other `?thumb=` is a `400` before anything is read or decoded, so a
+//!   token holder cannot fill the disk with one rendering per size. The
+//!   first request renders and caches it; the next ones read the cache.
+//!   Without the `variants` feature a thumbnail is served from the cache
+//!   only.
+//! * **Every upload gets an address of its own, unless the config dedupes.**
+//!   With [`RoutesConfig::dedupe`] off (the default), an upload is stored at
+//!   a random address, so one holder's `delete` never removes the file of
+//!   another holder who uploaded the same bytes. Turn it on only when the
+//!   application counts references before it deletes.
+//! * **A name outside ASCII survives.** `Content-Disposition` carries an
+//!   ASCII `filename=` and the real name in `filename*=` (RFC 6266).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -76,6 +87,12 @@ pub struct RoutesConfig {
     pub public: bool,
     /// Answer `?thumb=WxH`.
     pub thumbnails: bool,
+    /// The only sizes `?thumb=` may ask for. Any other is a `400`.
+    pub thumb_sizes: Vec<VariantSpec>,
+    /// Store identical uploads once, at their content address. Off, each
+    /// upload is stored at a random address of its own. See the module
+    /// header for why off is the default.
+    pub dedupe: bool,
     /// The form field that carries the CSRF token: `[csrf] field`.
     pub csrf_field: String,
     /// The header the CSRF check reads: `[csrf] header`.
@@ -86,6 +103,8 @@ pub struct RoutesConfig {
 /// buffers of a request body today.
 pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+pub use crate::spec::DEFAULT_THUMB_SIZES;
+
 impl Default for RoutesConfig {
     fn default() -> Self {
         Self {
@@ -94,6 +113,11 @@ impl Default for RoutesConfig {
             field: "file".to_string(),
             public: false,
             thumbnails: true,
+            thumb_sizes: DEFAULT_THUMB_SIZES
+                .iter()
+                .map(|text| VariantSpec::parse(text).expect("a valid default size"))
+                .collect(),
+            dedupe: false,
             csrf_field: "_csrf_token".to_string(),
             csrf_header: "x-csrf-token".to_string(),
         }
@@ -102,29 +126,58 @@ impl Default for RoutesConfig {
 
 /// Whether a request may store a file. The application writes it.
 ///
-/// A closure is one:
+/// Async, so it can ask a policy that loads a row (`brocanth-policy`). A
+/// closure that answers at once is one too:
 ///
 /// ```
 /// use brocanth_storage::routes::UploadGuard;
 ///
-/// let signed_in = |request: &http::Request<Vec<u8>>, _: &brocanth::plugin_hooks::RequestState| {
-///     request.headers().contains_key("cookie")
+/// /// What the application's session plugin puts in the state.
+/// struct SignedIn;
+///
+/// let signed_in = |_: &http::Request<Vec<u8>>, state: &brocanth::plugin_hooks::RequestState| {
+///     state.get::<SignedIn>().is_some()
 /// };
 /// fn takes(_: impl UploadGuard) {}
 /// takes(signed_in);
 /// ```
+///
+/// A guard that awaits implements the trait:
+///
+/// ```
+/// use brocanth::plugin_hooks::{Request, RequestState};
+/// use brocanth_storage::routes::{GuardFuture, UploadGuard};
+///
+/// struct Policy;
+///
+/// impl UploadGuard for Policy {
+///     fn may_upload<'a>(&'a self, request: &'a Request, state: &'a RequestState) -> GuardFuture<'a> {
+///         Box::pin(async move {
+///             // Load the account from `state`, then ask the policy.
+///             let _ = (request, state);
+///             false
+///         })
+///     }
+/// }
+/// ```
+///
+/// Never treat any cookie as a sign-in: a stranger's browser sends cookies
+/// too. Read what the session plugin put in `state`.
 pub trait UploadGuard: Send + Sync + 'static {
     /// `true` lets the upload through. The request has passed every hook
     /// ordered before the routes, the session and the CSRF check among them.
-    fn may_upload(&self, request: &Request, state: &RequestState) -> bool;
+    fn may_upload<'a>(&'a self, request: &'a Request, state: &'a RequestState) -> GuardFuture<'a>;
 }
+
+/// What [`UploadGuard::may_upload`] answers.
+pub type GuardFuture<'a> = BoxFuture<'a, bool>;
 
 impl<F> UploadGuard for F
 where
     F: Fn(&Request, &RequestState) -> bool + Send + Sync + 'static,
 {
-    fn may_upload(&self, request: &Request, state: &RequestState) -> bool {
-        self(request, state)
+    fn may_upload<'a>(&'a self, request: &'a Request, state: &'a RequestState) -> GuardFuture<'a> {
+        Box::pin(std::future::ready(self(request, state)))
     }
 }
 
@@ -173,6 +226,12 @@ impl FileRoutes {
             return Err(PluginError::new(
                 "[storage_routes] max_bytes is 0, so no upload is ever accepted\n\
                  help: set it to the largest file you take, in bytes",
+            ));
+        }
+        if config.thumbnails && config.thumb_sizes.is_empty() {
+            return Err(PluginError::new(
+                "[storage_routes] thumbnails are on and thumb_sizes is empty, so every thumbnail is refused\n\
+                 help: list the sizes the pages use, such as [\"150x150t\", \"300x200\"], or turn thumbnails off",
             ));
         }
         Ok(Self {
@@ -229,7 +288,7 @@ impl FileRoutes {
     /// Answers one upload. The request is a `POST` to the upload path.
     pub async fn upload(&self, request: &Request, state: &RequestState) -> Response {
         let config = &self.inner.config;
-        if !self.inner.guard.may_upload(request, state) {
+        if !self.inner.guard.may_upload(request, state).await {
             return plain(
                 403,
                 "this application takes no upload from this request\n\
@@ -256,7 +315,21 @@ impl FileRoutes {
         if let Some(declared) = file.declared_type() {
             about = about.with_declared_type(declared);
         }
-        let key = match self.inner.store.put(file.bytes(), &about).await {
+        let stored = if config.dedupe {
+            self.inner.store.put(file.bytes(), &about).await
+        } else {
+            // An address of its own: see the module header.
+            match ObjectKey::random() {
+                Ok(key) => self
+                    .inner
+                    .store
+                    .put_at(&key, file.bytes(), &about)
+                    .await
+                    .map(|()| key),
+                Err(e) => Err(e),
+            }
+        };
+        let key = match stored {
             Ok(key) => key,
             Err(e) => return failed(&e),
         };
@@ -309,13 +382,18 @@ impl FileRoutes {
                 return plain(404, "this application serves no thumbnail")
             }
             Some(text) => match VariantSpec::parse(text) {
-                Ok(spec) => Some(spec),
-                Err(e) => {
+                Ok(spec) if config.thumb_sizes.contains(&spec) => Some(spec),
+                Ok(_) => {
                     return plain(
                         400,
-                        &format!("{e}; write it as `300x200`, with `t`, `b` or `f` for a crop"),
+                        &format!(
+                            "this application serves no thumbnail of that size\n\
+                             help: ask for one of {}",
+                            sizes(&config.thumb_sizes)
+                        ),
                     )
                 }
+                Err(e) => return plain(400, &e.to_string()),
             },
         };
         let etag = match thumb {
@@ -391,7 +469,7 @@ impl FileRoutes {
             set(
                 &mut answer,
                 http::header::CONTENT_DISPOSITION,
-                &format!("attachment; filename=\"{name}\""),
+                &content_disposition(&name),
             );
             // Opened directly, it still runs nothing.
             set(
@@ -586,6 +664,38 @@ fn failed(error: &StorageError) -> Response {
     }
 }
 
+/// The sizes, as a reader writes them: `150x150t, 300x200`.
+fn sizes(specs: &[VariantSpec]) -> String {
+    specs
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `attachment` with the name twice (RFC 6266): `filename=` in ASCII, every
+/// other character as `_`, for an old client, and `filename*=` with the
+/// whole name, percent-encoded in UTF-8 (RFC 5987). The name is a
+/// [`Filename`](crate::Filename): no quote, no backslash, no control.
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '_' })
+        .collect();
+    if ascii == name {
+        return format!("attachment; filename=\"{name}\"");
+    }
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            encoded.push(char::from(b));
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 fn set(answer: &mut Response, name: http::HeaderName, value: &str) {
     if let Ok(value) = http::HeaderValue::from_str(value) {
         answer.headers_mut().insert(name, value);
@@ -616,6 +726,20 @@ mod tests {
         assert!(!is_local("https://evil.example"));
         assert!(!is_local("/\\evil.example"));
         assert!(!is_local("/a\r\nset-cookie: x"));
+    }
+
+    #[test]
+    fn a_name_outside_ascii_goes_out_twice() {
+        assert_eq!(
+            content_disposition("report.pdf"),
+            "attachment; filename=\"report.pdf\""
+        );
+        let header = content_disposition("résumé 2.pdf");
+        assert_eq!(
+            header,
+            "attachment; filename=\"r_sum_ 2.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9%202.pdf"
+        );
+        assert!(http::HeaderValue::from_str(&header).is_ok());
     }
 
     #[test]

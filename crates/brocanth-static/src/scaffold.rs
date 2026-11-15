@@ -1,4 +1,9 @@
-//! `static`: the page router, compiled to a directory of files.
+//! `static`: the page router, compiled to a directory of files -- what
+//! `brocanth create` writes when somebody asks for a static site.
+//!
+//! Here and not in the CLI, beside the crate whose API the generated
+//! command calls (`brocanth_static::Export`): when that API moves, this
+//! moves with it. Compiled only under the `scaffold` feature, which is off.
 //!
 //! The pages are the same pages. `export` builds the application, asks it
 //! for every route that answers GET, and writes each answer to `dist/`,
@@ -26,6 +31,7 @@
 
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
+/// The static site, as a choice on the `brocanth create` menu.
 pub struct StaticSite;
 
 impl Module for StaticSite {
@@ -47,7 +53,7 @@ impl Module for StaticSite {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         // `crate::assets` exists only when a module embeds files.
-        let assets = if project.has("rsx-tailwind") || project.has("rsx-htmx") {
+        let assets = if project.embeds_assets() {
             ASSETS_EMBEDDED
         } else {
             ASSETS_NONE

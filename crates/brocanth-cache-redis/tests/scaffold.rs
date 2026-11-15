@@ -29,7 +29,7 @@ fn cache_redis_writes_the_plugin_over_redis() {
             .unwrap_or_else(|| panic!("no {path} in the project"))
     };
     let plugin = file("src/plugins/cache/mod.rs");
-    assert!(plugin.contains("RedisCache::open(&self.settings.url)"));
+    assert!(plugin.contains("RedisCache::connect_lazy(&self.settings.url)"));
     assert!(!plugin.contains("Sweeper"));
     let cargo = file("Cargo.toml");
     assert!(cargo.contains("brocanth-cache-redis"));

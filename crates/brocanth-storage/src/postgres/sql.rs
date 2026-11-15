@@ -78,7 +78,7 @@
 //! SVGs wants it.
 
 /// The schema, applied in order by
-/// [`Postgres::migrate`](super::Postgres::migrate).
+/// [`PgStorage::migrate`](super::PgStorage::migrate).
 ///
 /// Public because an application with its own migration runner — `sqlx
 /// migrate`, `refinery`, a `.sql` file somebody reviews — wants the DDL rather
@@ -90,7 +90,7 @@
 /// already has the tables is a no-op. That is **not** on its own enough to
 /// make two simultaneous first migrations safe — `IF NOT EXISTS` checks the
 /// catalogue and then creates, and the loser of that race fails on a duplicate
-/// key in `pg_type` — which is why [`Postgres::migrate`](super::Postgres::migrate)
+/// key in `pg_type` — which is why [`PgStorage::migrate`](super::PgStorage::migrate)
 /// holds an advisory lock around the whole list.
 pub const SCHEMA: &[&str] = &[
     r#"CREATE TABLE IF NOT EXISTS brocanth_objects (

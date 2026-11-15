@@ -196,8 +196,9 @@ pub trait Cache: Send + Sync + 'static {
         self.invalidate_tags(std::slice::from_ref(tag)).await
     }
 
-    /// Removes every entry stored with any of `tags`, and answers how many
-    /// went. One round trip on a backend that can do it.
+    /// Removes every entry stored with any of `tags`, with all the tags of
+    /// those entries, and answers how many live entries went. One round trip
+    /// on a backend that can do it.
     ///
     /// # Errors
     /// [`CacheError::Backend`] when the delete failed.
@@ -218,7 +219,8 @@ pub trait Cache: Send + Sync + 'static {
     /// As [`Cache::set`].
     async fn add(&self, key: &Key, value: &[u8], ttl: Duration) -> Result<bool>;
 
-    /// Removes `key`, and answers whether anything was there.
+    /// Removes `key` and its tags, and answers whether a live entry was
+    /// there. An expired entry is a miss, so it does not count.
     ///
     /// Idempotent: deleting what is not there succeeds.
     ///
@@ -226,7 +228,8 @@ pub trait Cache: Send + Sync + 'static {
     /// [`CacheError::Backend`] when the delete failed.
     async fn delete(&self, key: &Key) -> Result<bool>;
 
-    /// Removes every entry in `namespace`, and answers how many went.
+    /// Removes every entry in `namespace` and their tags, and answers how
+    /// many live entries went.
     ///
     /// **Think before reaching for this.** It is correct and immediate, and it
     /// makes one dead tuple per row on the write-hottest table in the
@@ -302,9 +305,11 @@ pub fn expires_at(now_ms: i64, ttl: Duration) -> Result<i64> {
     if ttl.is_zero() {
         return Err(CacheError::InvalidTtl("a time to live of zero".into()));
     }
-    let ms = i64::try_from(ttl.as_millis()).map_err(|_| {
-        CacheError::InvalidTtl(format!("{ttl:?}, which does not fit in an instant"))
-    })?;
+    // At least one millisecond: a TTL under 1 ms would truncate to an entry
+    // that is expired the instant it is written. Redis rounds the same way.
+    let ms = i64::try_from(ttl.as_millis())
+        .map_err(|_| CacheError::InvalidTtl(format!("{ttl:?}, which does not fit in an instant")))?
+        .max(1);
     now_ms
         .checked_add(ms)
         .ok_or_else(|| CacheError::InvalidTtl(format!("{ttl:?}, which runs past the end of time")))
@@ -326,6 +331,14 @@ mod tests {
     fn a_ttl_that_would_overflow_is_refused() {
         assert!(expires_at(i64::MAX - 1, Duration::from_secs(60)).is_err());
         assert!(expires_at(0, Duration::from_secs(u64::MAX / 1000)).is_err());
+    }
+
+    #[test]
+    fn a_ttl_under_a_millisecond_still_outlives_the_write() {
+        assert_eq!(
+            expires_at(1_000, Duration::from_micros(500)).unwrap(),
+            1_001
+        );
     }
 
     #[test]

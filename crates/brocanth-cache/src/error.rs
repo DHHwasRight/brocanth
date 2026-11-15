@@ -43,7 +43,8 @@ pub enum CacheError {
     /// [`PgCache::with_max_value_bytes`]: crate::PgCache::with_max_value_bytes
     #[error(
         "the value for `{namespace}/{key}` is {bytes} bytes, over this cache's \
-         {limit}-byte cap"
+         {limit}-byte cap\n\
+         help: raise the cap with `with_max_value_bytes` on the cache, or cache a smaller value"
     )]
     TooLarge {
         /// The namespace the key is in.
@@ -59,7 +60,11 @@ pub enum CacheError {
     /// A namespace name is not usable.
     ///
     /// See [`Namespace`](crate::Namespace) for the rules and why there are any.
-    #[error("`{name}` is not a usable cache namespace: {reason}")]
+    #[error(
+        "`{name}` is not a usable cache namespace: {reason}\n\
+         help: use 1 to {max} bytes of `a-z A-Z 0-9 _ . : -`",
+        max = crate::key::MAX_NAMESPACE_BYTES
+    )]
     InvalidNamespace {
         /// What was handed in.
         name: String,
@@ -68,7 +73,11 @@ pub enum CacheError {
     },
 
     /// A key is not usable.
-    #[error("that cache key is not usable: {reason}")]
+    #[error(
+        "that cache key is not usable: {reason}\n\
+         help: use 1 to {max} bytes with no control character; hash a longer key",
+        max = crate::key::MAX_KEY_BYTES
+    )]
     InvalidKey {
         /// Why it was rejected.
         reason: &'static str,
@@ -77,7 +86,11 @@ pub enum CacheError {
     /// A tag is not usable.
     ///
     /// See [`Tag`](crate::Tag) for the rules.
-    #[error("`{tag}` is not a usable cache tag: {reason}")]
+    #[error(
+        "`{tag}` is not a usable cache tag: {reason}\n\
+         help: use 1 to {max} bytes with no control character",
+        max = crate::tag::MAX_TAG_BYTES
+    )]
     InvalidTag {
         /// What was handed in.
         tag: String,
@@ -92,7 +105,10 @@ pub enum CacheError {
     /// whether you meant it, and a write that is a no-op is the bug this crate
     /// is least able to help you find. Use
     /// [`Cache::delete`](crate::Cache::delete) to remove an entry.
-    #[error("{0} is not a usable time to live")]
+    #[error(
+        "{0} is not a usable time to live\n\
+         help: give a TTL above zero and below a few centuries; use `delete` to remove an entry"
+    )]
     InvalidTtl(String),
 
     /// The database URL names something this build cannot talk to.

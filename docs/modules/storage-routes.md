@@ -1,8 +1,8 @@
 # `storage-routes`
 
-The HTTP edge of `storage`: an upload route your guard allows, a download route behind a file token, thumbnails.
+The HTTP edge of `storage`: an upload route your guard allows, a download route behind a file token.
 
-The wizard calls it: *Upload and download routes, file tokens and thumbnails*.
+The wizard calls it: *Upload and download routes, behind a guard and file tokens*.
 
 | | |
 |---|---|
@@ -11,12 +11,12 @@ The wizard calls it: *Upload and download routes, file tokens and thumbnails*.
 | Default | off |
 | Presets | none |
 | Part of | [`storage`](storage.md), off until you tick it |
-| Needs | none |
+| Needs | [`middleware-csrf`](middleware-csrf.md): an upload is a form post, and the routes read the check's field and header |
 | After | [`storage`](storage.md), [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`storage-thumbnails`](storage-thumbnails.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
-| Crates | `brocanth-storage` (features `routes`, `variants`) |
+| Crates | `brocanth-storage` (feature `routes`; `variants` with [`storage-thumbnails`](storage-thumbnails.md)) |
 | Without it | no upload or download route; a handler stores and serves each file itself |
 
 ## What it does
@@ -27,18 +27,21 @@ The wizard calls it: *Upload and download routes, file tokens and thumbnails*.
 - `GET /files/{address}?token=` serves the file. The token comes from
   `FileStore::tokens`, which your page calls after your policy allowed the
   read. Without a valid token the answer is `403`.
-- `&thumb=WxH` serves a thumbnail. It is rendered once per size and kept.
+- With [`storage-thumbnails`](storage-thumbnails.md), `&thumb=WxH` serves a
+  thumbnail in a size that `thumb_sizes` lists. Any other size is a `400`.
 - A file that is not a known image is served as an attachment of type
   `application/octet-stream`, never inline. The type the client declared
   is not repeated.
 
 **Who may upload is your decision.** The module writes `may_upload` in
-`src/plugins/storage_routes/mod.rs`, and it answers no. Nobody can upload
+`src/plugins/storage_routes/mod.rs`, and it answers no. It is async, so it
+can await a policy check that loads a row. Nobody can upload
 until you edit it. Reason: a generated "yes" is a free disk for every
 stranger, and the generator cannot know your policy.
 
-**A plain form works with no script.** The CSRF check reads no multipart
-body. The `lift` hook runs before the check and copies the form's CSRF
+**A plain form works with no script.** The module needs `middleware-csrf`,
+and reads the check's field and header from the CSRF plugin, so it keeps no
+copy of either. The CSRF check reads no multipart body. The `lift` hook runs before the check and copies the form's CSRF
 field into the header that the check reads. The `answer` hook runs after
 the check, so an upload from another site stops there.
 
@@ -74,7 +77,6 @@ deployment.
 | hook `lift` | on | Copies an upload form's CSRF field into the header the CSRF check reads. |
 | `path` | `"/files"` | Where the routes answer. |
 | `public` | `false` | Serve a file to a request with no token. |
-| `thumbnails` | `true` | Answer `?thumb=WxH`. |
 
 ## Settings
 
@@ -83,11 +85,12 @@ Section `[storage_routes]`, the plugin's instance name, not the module key. Envi
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
 | `max_bytes` | integer | `2097152` | `--storage_routes.max_bytes` | The largest file accepted, in bytes. The server buffers at most 2 MiB of a body today, so a larger value takes effect only when that limit moves. |
-| `csrf_field` | text | `"_csrf_token"` | `--storage_routes.csrf_field` | The form field that carries the CSRF token: `[csrf] field`. |
-| `csrf_header` | text | `"x-csrf-token"` | `--storage_routes.csrf_header` | The header the CSRF check reads: `[csrf] header`. |
+| `dedupe` | bool | `false` | `--storage_routes.dedupe` | Store identical uploads once, at their content address. Off, each upload has an address of its own. On, a delete removes the file for every holder: count the references before you delete. |
+| `thumb_sizes` | list | `["150x150t", "300x200", "600x600f"]` | `--storage_routes.thumb_sizes` | With [`storage-thumbnails`](storage-thumbnails.md) only. The only sizes `?thumb=` may ask for; any other is a 400. |
 
 ## Read more
 
 - [`storage`](storage.md)
+- [`storage-thumbnails`](storage-thumbnails.md)
 - [brocanth-storage](../../crates/brocanth-storage/README.md)
 - Source: [`crates/brocanth-storage/src/scaffold.rs`](../../crates/brocanth-storage/src/scaffold.rs), [`crates/brocanth-storage/src/routes.rs`](../../crates/brocanth-storage/src/routes.rs)
