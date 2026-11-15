@@ -37,6 +37,13 @@ pub struct Made {
 const HEADER: &str = "-- Written by `rls make`. Read it before you commit it.\n\
      -- migrations/rls.json records the schema; this file is the step to it.\n";
 
+/// The first statement of each part. `ALTER TABLE … ENABLE ROW LEVEL
+/// SECURITY` and `CREATE POLICY` take an ACCESS EXCLUSIVE lock: behind a
+/// long read on a busy table they wait, and every later query on the table
+/// waits behind them. With a bound, the deploy fails fast and can run
+/// again. `LOCAL`: it ends with the migration's transaction.
+const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s';\n";
+
 /// The SQL migration: the up plan, a `-- down` line, the down plan.
 ///
 /// # Errors
@@ -55,7 +62,9 @@ pub fn sql_file(up: &Plan, down: &Plan) -> Result<String, RlsError> {
             ));
         }
     }
-    Ok(format!("{HEADER}\n{up}\n-- down\n{down}"))
+    Ok(format!(
+        "{HEADER}\n{LOCK_TIMEOUT}{up}\n-- down\n{LOCK_TIMEOUT}{down}"
+    ))
 }
 
 /// The SeaORM migration: the same statements, run with
@@ -99,9 +108,9 @@ pub fn seaorm_file(name: &str, up: &Plan, down: &Plan) -> String {
          \x20   }}\n\
          }}\n\
          \n\
-         const UP: &str = r{hashes}\"\n{up}\"{hashes};\n\
+         const UP: &str = r{hashes}\"\n{LOCK_TIMEOUT}{up}\"{hashes};\n\
          \n\
-         const DOWN: &str = r{hashes}\"\n{down}\"{hashes};\n"
+         const DOWN: &str = r{hashes}\"\n{LOCK_TIMEOUT}{down}\"{hashes};\n"
     )
 }
 

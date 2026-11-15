@@ -131,14 +131,14 @@ pub mod value;
 
 pub use audience::{Audience, NotInvertible};
 pub use entity::{Column, Entity, Ident, SortKind, Sortable};
-pub use errors::{CompileError, Denied, EvalError};
+pub use errors::{CompileError, Denied, EvalError, UpdateError};
 pub use eval::{MapRow, RowView, Truth};
 pub use mask::{FieldMask, MaskViolation};
 pub use policy::Policy;
 pub use pred::{EntityPred, Membership, Op, Opaque, Pred, Shape};
 pub use sql::{Condition, Dialect, Query};
 pub use value::{Bound, Missing, Value};
-pub use verified::{Admission, Verified, Write};
+pub use verified::{Admission, Refused, Verified, Write};
 
 #[cfg(feature = "macro")]
 pub use brocanth_policy_macros::policy;

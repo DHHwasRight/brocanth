@@ -99,9 +99,29 @@ enum Fate {
 /// The plan that turns a database described by `old` into one described by
 /// `new`: the up part of a migration. [`down`] is the other way.
 ///
+/// A table that leaves the schema keeps row-level security on: its
+/// policies and grants are dropped, and with no policy a forced table
+/// shows no row to anyone but a superuser. Disabling it would show every
+/// row to any role with a grant made elsewhere (default privileges, a SQL
+/// migration). To turn it off on purpose, write
+/// `ALTER TABLE … DISABLE ROW LEVEL SECURITY` in a SQL migration.
+///
 /// # Errors
 /// [`RlsError::Definition`] when either snapshot has a cycle.
 pub fn diff(old: &Snapshot, new: &Snapshot) -> Result<Plan, RlsError> {
+    plan(old, new, Direction::Up)
+}
+
+/// Which part of a migration a plan is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    /// Forward: a table that leaves the schema stays secured.
+    Up,
+    /// Back: a table the up part secured goes back to how it was.
+    Down,
+}
+
+fn plan(old: &Snapshot, new: &Snapshot, direction: Direction) -> Result<Plan, RlsError> {
     let old_order = graph::order(old)?;
     let new_order = graph::order(new)?;
     let old_nodes = graph::nodes(old);
@@ -154,7 +174,11 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Result<Plan, RlsError> {
 
     let mut steps = Vec::new();
     for key in old_order.iter().rev() {
-        if matches!(fates[key], Fate::Drop | Fate::Recreate) {
+        // Fail closed: see `diff`.
+        let kept_secured = direction == Direction::Up
+            && fates[key] == Fate::Drop
+            && matches!(key, NodeKey::Table(_));
+        if matches!(fates[key], Fate::Drop | Fate::Recreate) && !kept_secured {
             steps.push(Step {
                 node: key.clone(),
                 action: Action::Drop,
@@ -193,7 +217,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Result<Plan, RlsError> {
 /// # Errors
 /// [`RlsError::Definition`] when either snapshot has a cycle.
 pub fn down(new: &Snapshot, old: &Snapshot) -> Result<Plan, RlsError> {
-    let mut plan = diff(new, old)?;
+    let mut plan = plan(new, old, Direction::Down)?;
     plan.steps
         .retain(|s| !(s.action == Action::Drop && matches!(s.node, NodeKey::Role(_))));
     Ok(plan)
@@ -327,10 +351,15 @@ fn role_sql(name: &str, r: &RoleSpec) -> String {
     let help = literal(
         "help: the migration role needs CREATEROLE, ADMIN OPTION on a role it did not create, and CREATEDB to change CREATEDB (docs/rls.md §3); or run the ALTER ROLE as a superuser",
     );
+    // Roles are cluster-wide, and the migrate lock covers one database: two
+    // databases that migrate at once can both find no role. The one that
+    // loses the race catches the duplicate and checks the role as found.
     let body = format!(
         "BEGIN \
-         IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {lit}) THEN {create}; \
-         ELSIF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {lit} AND (rolsuper OR rolbypassrls)) THEN RAISE EXCEPTION USING MESSAGE = {bypass}; \
+         IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {lit}) THEN \
+         BEGIN {create}; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END; \
+         END IF; \
+         IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {lit} AND (rolsuper OR rolbypassrls)) THEN RAISE EXCEPTION USING MESSAGE = {bypass}; \
          END IF;{alters} \
          EXCEPTION WHEN insufficient_privilege THEN RAISE EXCEPTION USING MESSAGE = {refused} || SQLERRM || chr(10) || {help}; \
          END"
@@ -353,6 +382,22 @@ fn role_drop_sql(name: &str) -> String {
          END IF; \
          END",
         q = quote(name),
+    );
+    let tag = dollar_tag(&body);
+    format!("DO {tag} {body} {tag}")
+}
+
+/// `REVOKE role FROM member`, in a `DO` block that skips it when the
+/// member role does not exist.
+fn revoke_if_exists_sql(role: &str, member: &str) -> String {
+    let body = format!(
+        "BEGIN \
+         IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = {lit}) THEN REVOKE {r} FROM {m}; \
+         END IF; \
+         END",
+        lit = literal(member),
+        r = quote(role),
+        m = quote(member),
     );
     let tag = dollar_tag(&body);
     format!("DO {tag} {body} {tag}")
@@ -512,13 +557,16 @@ fn alter_sql(old: &Node<'_>, new: &Node<'_>, dropped_roles: &BTreeSet<&str>) -> 
             if (a.inherit, a.createdb, a.createrole) != (b.inherit, b.createdb, b.createrole) {
                 out.push(role_sql(name, b));
             }
-            // A member that is dropped in this plan leaves with its role.
-            for gone in a
-                .members
-                .difference(&b.members)
-                .filter(|m| !dropped_roles.contains(m.as_str()))
-            {
-                out.push(format!("REVOKE {} FROM {}", quote(name), quote(gone)));
+            // A member that this plan drops is gone by now (drops run before
+            // alters), unless the drop kept it: `role_drop_sql` keeps a role
+            // that something on the server depends on, and `down` drops no
+            // role at all. So its revoke runs only when it still exists.
+            for gone in a.members.difference(&b.members) {
+                if dropped_roles.contains(gone.as_str()) {
+                    out.push(revoke_if_exists_sql(name, gone));
+                } else {
+                    out.push(format!("REVOKE {} FROM {}", quote(name), quote(gone)));
+                }
             }
             for added in b.members.difference(&a.members) {
                 out.push(format!("GRANT {} TO {}", quote(name), quote(added)));

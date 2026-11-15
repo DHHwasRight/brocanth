@@ -53,3 +53,14 @@ pub enum Direction {
     /// Largest first.
     Descending,
 }
+
+#[cfg(feature = "runtime")]
+impl Direction {
+    /// The SQL keyword: `ASC` or `DESC`.
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Direction::Ascending => "ASC",
+            Direction::Descending => "DESC",
+        }
+    }
+}

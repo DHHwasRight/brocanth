@@ -147,7 +147,7 @@ impl<C: Column> FieldMask<C> {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MaskViolation {
     /// These columns are not writable by this subject.
-    #[error("not writable: {}", fields.join(", "))]
+    #[error("not writable: {}\nhelp: leave these columns out of the write, or add them to the policy's `writable` mask", fields.join(", "))]
     Forbidden {
         /// The rejected column names, as the database spells them.
         fields: Vec<String>,
@@ -157,7 +157,7 @@ pub enum MaskViolation {
     ///
     /// The mask and the tracked record disagree about which table they are
     /// looking at. An error rather than a guess, in either direction.
-    #[error("not a column of this entity: {}", fields.join(", "))]
+    #[error("not a column of this entity: {}\nhelp: check the mask against the same entity the record belongs to", fields.join(", "))]
     UnknownField {
         /// The unrecognised names.
         fields: Vec<String>,

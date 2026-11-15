@@ -118,11 +118,14 @@ impl Table {
     /// The escape hatch: a table by a string, for a table with no entity
     /// and no `Iden`. Nothing checks the name before Postgres runs the
     /// migration. Prefer [`Table::of`].
+    ///
+    /// The table is forced ([`Table::force`]) unless [`Table::no_force`]
+    /// says otherwise.
     pub fn named(name: impl Into<String>) -> Table {
         Table {
             schema: None,
             name: name.into(),
-            force: false,
+            force: true,
             grants: Vec::new(),
         }
     }
@@ -136,9 +139,19 @@ impl Table {
     }
 
     /// `FORCE ROW LEVEL SECURITY`: the table's owner obeys the policies too.
-    /// Use it on every table with tenant data. A superuser still bypasses.
+    /// The default, so this call only says it again. A superuser and a role
+    /// with `BYPASSRLS` still bypass.
     pub fn force(mut self) -> Table {
         self.force = true;
+        self
+    }
+
+    /// No `FORCE ROW LEVEL SECURITY`: the table's owner bypasses the
+    /// policies. The application often connects as the owner, and it then
+    /// sees every row of an unforced table. Use it only for a table the
+    /// owner must read whole, and say why next to the call.
+    pub fn no_force(mut self) -> Table {
+        self.force = false;
         self
     }
 

@@ -182,7 +182,9 @@ fn an_author_cannot_give_their_post_to_somebody_else() {
 
     match refused {
         Err(Failure::NotWritable(violation)) => {
-            assert_eq!(violation.to_string(), "not writable: author_id");
+            assert!(violation
+                .to_string()
+                .starts_with("not writable: author_id\nhelp: "));
         }
         other => panic!("expected a mask violation, got {other:?}"),
     }

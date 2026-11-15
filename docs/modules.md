@@ -102,8 +102,8 @@ The CLI links the scaffold side of each crate and nothing else. It takes
 each module crate with `default-features = false, features = ["scaffold"]`.
 A crate with a heavy runtime keeps it behind a default `runtime` feature:
 `brocanth-cache`, `brocanth-db`, `brocanth-auth`, `brocanth-jobs`,
-`brocanth-client`, `brocanth-input`, `brocanth-observe` and
-`brocanth-admin`. `brocanth-resource` and `brocanth-schema` split theirs
+`brocanth-client`, `brocanth-input`, `brocanth-observe`,
+`brocanth-admin`, `brocanth-rls` and `brocanth-filters`. `brocanth-resource` and `brocanth-schema` split theirs
 more finely (`plugin`, `pages`, `derive`, `pattern`), and the CLI takes
 none of those. The rest (`middleware`, `openapi`, `robots`, `policy`,
 `storage`, `realtime`) have no default features and a runtime of small,
@@ -125,7 +125,9 @@ asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
 | `logging` (in-CLI) | edge | `PluginsMod`, `PluginsLayers`, `AppContext` | `MiddlewareCatalog`, `ProvidesContext` |
 | `sessions` (in-CLI) | edge | `PluginsMod`, `AppContext` | `ProvidesContext` |
 | `brocanth-auth` | edge + bundle | `ConfigSections`, `AppContext` | `Plugin`, `ProvidesContext` |
-| `brocanth-policy` | edge | `AppUses` | `ModelHook` |
+| `brocanth-policy` | edge | a file, `src/plugins/policy/mod.rs`; `PluginsMod`, `AppPlugins`, `PluginsInstalled`, `AppUses`, `AppContext` | `Plugin`, `ProvidesContext<Rules>` |
+| `brocanth-rls` | tooling | two files, `src/plugins/rls/mod.rs` and `src/commands/rls.rs`; `PluginsMod`, `CommandsMod`, `AgentsSections` | none: `rls make` writes migrations, and a request runs `transact_as` from `brocanth-db` |
+| `brocanth-filters` | boundary | `PagesItems` (`ctx.filters()`), `AgentsSections` | none: a library that pages call |
 | `brocanth-input` | boundary | `PagesItems` | the page signature |
 | `brocanth-schema` | boundary | `PagesItems` | — |
 | `brocanth-openapi` | boundary + bundle | page file at `/openapi.json` | `RouteSource` (unmounted) |

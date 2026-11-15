@@ -58,7 +58,8 @@
 use std::marker::PhantomData;
 
 use crate::entity::{Column, Entity};
-use crate::errors::{CompileError, Denied};
+use crate::errors::{CompileError, Denied, UpdateError};
+use crate::mask::FieldMask;
 use crate::pred::Pred;
 use crate::sql::{write_admission, write_delete, write_update, Condition, Dialect, Query};
 use crate::value::Value;
@@ -197,7 +198,8 @@ impl<E: Entity> Verified<E> {
         &self.expect_live().condition
     }
 
-    /// `UPDATE <table> SET … WHERE <pk> = ? AND (<condition>)`.
+    /// `UPDATE <table> SET … WHERE <pk> = ? AND (<condition>)`, for the
+    /// columns that `mask` permits.
     ///
     /// The condition is the one the admission test passed, re-applied inside
     /// the write. That is PLAN.md §9 obligation 2: between the check and the
@@ -205,36 +207,62 @@ impl<E: Entity> Verified<E> {
     /// policy, and the only statement that cannot lose that race is one that
     /// re-asks the question while it writes.
     ///
-    /// Takes `self`. The witness is gone afterwards and a second write needs a
-    /// second check.
+    /// The condition reads the row as stored, so it cannot refuse a change of
+    /// owner. The mask can: pass [`crate::Policy::writable`] for the same
+    /// subject. Each assigned column must be one that the mask permits, so
+    /// the list of columns checked and the list of columns written are the
+    /// same list.
+    ///
+    /// Takes `self`. The witness is gone after a write, and a second write
+    /// needs a second check. When the update is refused (a column outside
+    /// the mask, no assignment, a bad identifier), nothing is built and
+    /// [`Refused::into_verified`] gives the witness back.
     pub fn update(
         mut self,
         dialect: Dialect,
+        mask: &FieldMask<E::Column>,
         assignments: impl IntoIterator<Item = (E::Column, Value)>,
-    ) -> Result<Write<E>, CompileError> {
-        let inner = self.take();
+    ) -> Result<Write<E>, Refused<E>> {
         let assignments: Vec<(E::Column, Value)> = assignments.into_iter().collect();
-        let query = write_update::<E, E::Column>(
+        match self.build_update(dialect, mask, &assignments) {
+            Ok(query) => {
+                let _spent = self.take();
+                Ok(Write {
+                    query,
+                    entity: PhantomData,
+                })
+            }
+            Err(error) => Err(Refused {
+                error,
+                inner: self.take(),
+            }),
+        }
+    }
+
+    fn build_update(
+        &self,
+        dialect: Dialect,
+        mask: &FieldMask<E::Column>,
+        assignments: &[(E::Column, Value)],
+    ) -> Result<Query, UpdateError> {
+        if assignments.is_empty() {
+            return Err(UpdateError::Compile(CompileError::EmptyUpdate));
+        }
+        mask.check(assignments.iter().map(|(column, _)| column.name()))?;
+        let inner = self.expect_live();
+        Ok(write_update::<E, E::Column>(
             dialect,
             &inner.id,
-            &assignments,
-            &recompiled(&inner.condition, dialect)?,
-        )?;
-        Ok(Write {
-            query,
-            entity: PhantomData,
-        })
+            assignments,
+            &inner.condition,
+        )?)
     }
 
     /// `DELETE FROM <table> WHERE <pk> = ? AND (<condition>)`, with the same
     /// re-application and the same consumption.
     pub fn delete(mut self, dialect: Dialect) -> Result<Write<E>, CompileError> {
         let inner = self.take();
-        let query = write_delete::<E, E::Column>(
-            dialect,
-            &inner.id,
-            &recompiled(&inner.condition, dialect)?,
-        )?;
+        let query = write_delete::<E, E::Column>(dialect, &inner.id, &inner.condition)?;
         Ok(Write {
             query,
             entity: PhantomData,
@@ -278,6 +306,56 @@ impl<E: Entity> Drop for Verified<E> {
                 std::any::type_name::<E>()
             );
         }
+    }
+}
+
+/// An update that [`Verified::update`] refused before it built anything.
+///
+/// It holds the witness, disarmed: drop it and nothing fires, because no
+/// write ran. Call [`Refused::into_verified`] to try again, to delete, or to
+/// release.
+pub struct Refused<E: Entity> {
+    error: UpdateError,
+    inner: VerifiedInner<E>,
+}
+
+impl<E: Entity> Refused<E> {
+    /// Why the update was refused.
+    pub fn error(&self) -> &UpdateError {
+        &self.error
+    }
+
+    /// The reason, without the witness.
+    pub fn into_error(self) -> UpdateError {
+        self.error
+    }
+
+    /// The witness, live again: it must be spent like any other.
+    pub fn into_verified(self) -> Verified<E> {
+        Verified {
+            inner: Some(self.inner),
+        }
+    }
+}
+
+impl<E: Entity> std::fmt::Display for Refused<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl<E: Entity> std::fmt::Debug for Refused<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Refused")
+            .field("entity", &std::any::type_name::<E>())
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl<E: Entity> std::error::Error for Refused<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -372,19 +450,4 @@ impl<E: Entity> std::fmt::Debug for Write<E> {
             .field("query", &self.query)
             .finish()
     }
-}
-
-/// A condition compiled for one dialect, re-targeted at another.
-///
-/// Mixing dialects is a mistake worth catching rather than a conversion worth
-/// doing, so this refuses instead. With one dialect the check always passes;
-/// it stays so that the API keeps its shape.
-fn recompiled(condition: &Condition, dialect: Dialect) -> Result<Condition, CompileError> {
-    if condition.dialect() == dialect {
-        return Ok(condition.clone());
-    }
-    Err(CompileError::DialectMismatch {
-        checked: condition.dialect(),
-        writing: dialect,
-    })
 }

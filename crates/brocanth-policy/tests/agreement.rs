@@ -198,6 +198,70 @@ fn a_predicate_with_only_one_interpretation_is_not_a_disagreement() {
 }
 
 #[test]
+fn nan_orders_as_postgresql_orders_it() {
+    // PostgreSQL's float8: NaN equals NaN and is greater than every number.
+    // An in-memory order that calls NaN "equal" to everything admits a NaN
+    // row under `score = 1.0`, and the database does not.
+    let schema = SCHEMA.replace("score     BIGINT", "score     DOUBLE PRECISION");
+    let Some(mut db) = postgres::Postgres::new(&schema) else {
+        return;
+    };
+    let rows = vec![
+        MapRow::new().with(C::Id, 1i64).with(C::Score, f64::NAN),
+        MapRow::new().with(C::Id, 2i64).with(C::Score, 1.0f64),
+        MapRow::new().with(C::Id, 3i64).with(C::Score, f64::MAX),
+    ];
+    for r in &rows {
+        db.execute(
+            "INSERT INTO posts (id, score) VALUES ($1, $2)",
+            &[cell(r, C::Id), cell(r, C::Score)],
+        );
+    }
+    let cases = [
+        ("= 1.0", Pred::eq(C::Score, 1.0f64)),
+        ("<> 1.0", Pred::ne(C::Score, 1.0f64)),
+        ("> max", Pred::gt(C::Score, f64::MAX)),
+        ("< NaN", Pred::lt(C::Score, f64::NAN)),
+        ("= NaN", Pred::eq(C::Score, f64::NAN)),
+        ("in (1.0)", Pred::one_of(C::Score, [1.0f64])),
+    ];
+    for (name, pred) in cases {
+        match check::<Post, _, _>(&pred, &rows, Dialect::Postgres, &mut db) {
+            Ok(()) => {}
+            Err(HarnessError::Disagreed(d)) => panic!(
+                "case `{name}` disagreed: eval() said {:?}, the query said {}, for row {}",
+                d.evaluated, d.selected, d.id
+            ),
+            Err(other) => panic!("case `{name}` could not be checked: {other}"),
+        }
+    }
+}
+
+#[test]
+fn a_text_ordering_is_not_evaluated_in_memory() {
+    // `<` on text follows the column's collation (`en_US`: 'a' < 'B'; bytes:
+    // 'B' < 'a'). One row does not carry the collation, so eval() refuses
+    // rather than guesses, and the harness reports one interpretation.
+    use brocanth_policy::EvalError;
+
+    let row = MapRow::new().with(C::Status, "a");
+    assert_eq!(
+        Pred::lt(C::Status, "B").eval(&row),
+        Err(EvalError::Collation)
+    );
+    // Equality has no collation question under a deterministic collation.
+    assert!(Pred::eq(C::Status, "a").eval(&row).is_ok());
+
+    let Some((mut db, rows)) = fixture() else {
+        return;
+    };
+    assert!(matches!(
+        check::<Post, _, _>(&Pred::lt(C::Status, "B"), &rows, Dialect::Postgres, &mut db),
+        Err(HarnessError::NotEvaluable(EvalError::Collation))
+    ));
+}
+
+#[test]
 fn the_admission_query_and_the_list_query_select_the_same_rows() {
     // The default §9 asks for is one interpretation used everywhere. This is
     // the assertion that the per-row guard and the list filter are the same

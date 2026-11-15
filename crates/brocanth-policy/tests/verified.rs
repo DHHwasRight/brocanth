@@ -5,7 +5,9 @@
 
 mod common;
 
-use brocanth_policy::{Denied, Dialect, Pred, Value};
+use brocanth_policy::{
+    CompileError, Denied, Dialect, FieldMask, MaskViolation, Pred, UpdateError, Value,
+};
 use common::{Post, PostColumn as C};
 
 fn policy() -> Pred<C> {
@@ -57,6 +59,7 @@ fn the_witness_carries_the_condition_into_the_write() {
         .expect("one row")
         .update(
             Dialect::Postgres,
+            &FieldMask::all(),
             [(C::Status, Value::Text("published".into()))],
         )
         .expect("compiles");
@@ -118,18 +121,59 @@ fn zero_rows_affected_by_the_write_is_an_authorisation_failure() {
 }
 
 #[test]
-fn an_update_that_sets_nothing_is_refused() {
-    use brocanth_policy::CompileError;
-
+fn an_update_that_sets_nothing_is_refused_and_keeps_the_witness() {
+    // An empty form submit. The witness comes back with the error, so the
+    // caller can still delete, release or write again.
     let verified = policy()
         .admission::<Post>(Dialect::Postgres, 42i64)
         .expect("compiles")
         .resolve(1)
         .expect("one row");
+    let refused = verified
+        .update(Dialect::Postgres, &FieldMask::all(), [])
+        .unwrap_err();
     assert_eq!(
-        verified.update(Dialect::Postgres, []).unwrap_err(),
-        CompileError::EmptyUpdate
+        refused.error(),
+        &UpdateError::Compile(CompileError::EmptyUpdate)
     );
+    let write = refused
+        .into_verified()
+        .update(
+            Dialect::Postgres,
+            &FieldMask::all(),
+            [(C::Status, "x".into())],
+        )
+        .expect("the witness is live again");
+    assert!(write.query().sql().starts_with("UPDATE"));
+}
+
+#[test]
+fn an_update_of_a_column_outside_the_mask_is_refused() {
+    // The condition reads the row as stored, so it cannot refuse a change of
+    // owner. The mask on the write does: the columns checked and the columns
+    // written are one list.
+    let verified = policy()
+        .admission::<Post>(Dialect::Postgres, 42i64)
+        .expect("compiles")
+        .resolve(1)
+        .expect("one row");
+    let mask = FieldMask::only([C::Status]);
+    let refused = verified
+        .update(
+            Dialect::Postgres,
+            &mask,
+            [(C::Status, "x".into()), (C::AuthorId, 8i64.into())],
+        )
+        .unwrap_err();
+    assert_eq!(
+        refused.error(),
+        &UpdateError::Mask(MaskViolation::Forbidden {
+            fields: vec!["author_id".into()]
+        })
+    );
+    assert!(refused.to_string().contains("\nhelp: "));
+    // Dropping a refusal does not fire the drop check: no write ran.
+    drop(refused);
 }
 
 #[test]
@@ -158,4 +202,26 @@ fn releasing_a_witness_is_a_choice_rather_than_an_accident() {
     let (id, condition) = verified.release();
     assert_eq!(id, Value::Int(42));
     assert!(condition.sql().contains("author_id"));
+}
+
+#[test]
+fn debug_output_names_the_binds_but_never_prints_them() {
+    // A `?write` in a tracing field must not send an assigned token to the
+    // logs. The SQL and the bind count are enough to debug a statement.
+    let secret = "a-session-token-0123";
+    let rule = Pred::eq(C::Status, secret);
+    let write = rule
+        .admission::<Post>(Dialect::Postgres, 42i64)
+        .expect("compiles")
+        .resolve(1)
+        .expect("one row")
+        .update(
+            Dialect::Postgres,
+            &FieldMask::all(),
+            [(C::Status, Value::Text(secret.into()))],
+        )
+        .expect("compiles");
+    let printed = format!("{write:?} {:?}", rule.condition::<Post>(Dialect::Postgres));
+    assert!(!printed.contains(secret), "{printed}");
+    assert!(printed.contains("binds: 3"), "{printed}");
 }

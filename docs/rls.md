@@ -18,9 +18,9 @@ No Rust library does this today: the crates on crates.io (`umbral-rls`,
 ```rust
 use brocanth_rls::{crud, Command, Function, Policy, Privilege, Role, Schema, Setting, SqlExpr, SqlType, Table};
 
-let member = Role::new("app_member").member("app_login");    // NOLOGIN, granted to the login
+let member = Role::new("app_user").member("app_login");      // NOLOGIN, granted to the login
 let tenant = Setting::new("tenant_id", SqlType::BigInt);     // brocanth.tenant_id
-let posts = Table::of(post::Entity).force();                // ENABLE + FORCE
+let posts = Table::of(post::Entity);                        // ENABLE + FORCE
 
 let mine = SqlExpr::column(post::Column::TenantId).eq(tenant.get());
 
@@ -40,8 +40,8 @@ let schema = Schema::new()
 | `Role::new(name)` | `CREATE ROLE "name" NOLOGIN` | `INHERIT`, no `CREATEDB`, no `CREATEROLE` |
 | `Role::existing(name)` | nothing: a role made elsewhere (the login, `postgres`) | |
 | `.member(login)` | `GRANT "name" TO "login"` | |
-| `Table::of(Entity)` / `Table::of_in(s, Entity)`; strings: `Table::named(name)` / `Table::named_in(s, name)` | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` | enabled, not forced |
-| `.force()` | `ALTER TABLE … FORCE ROW LEVEL SECURITY` | |
+| `Table::of(Entity)` / `Table::of_in(s, Entity)`; strings: `Table::named(name)` / `Table::named_in(s, name)` | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `… FORCE ROW LEVEL SECURITY` | enabled and forced |
+| `.no_force()` | no `FORCE`: the owner bypasses the policies | |
 | `.grant(&role, privileges)` | `GRANT SELECT, … ON … TO …` | |
 | `Policy::new(name, &table)` | `CREATE POLICY` | `AS PERMISSIVE FOR ALL TO PUBLIC` |
 | `.restrictive()`, `.command(Command::Select)`, `.to(&role)` | `AS RESTRICTIVE`, `FOR SELECT`, `TO "role"` | |
@@ -186,7 +186,21 @@ create and alter (new graph, topological order).
 
 The `-- down` part is not the inverse of each step. It is the diff from the
 new snapshot to the old one (`down`), so it follows the same rules and the
-same order, with one exception: it drops no role (see below).
+same order, with one exception: it drops no role (see below). So a removed
+membership is always revoked; when the plan drops the member role too, the
+`REVOKE` runs only if that role still exists.
+
+A table that leaves `schema()` keeps row-level security in the up part:
+its policies and grants are dropped, and `ENABLE` and `FORCE` stay. Fail
+closed: disabling it would show every row to a role with a grant made
+elsewhere. To turn row-level security off on purpose, write
+`ALTER TABLE … DISABLE ROW LEVEL SECURITY` in a SQL migration. The down
+part of the migration that added the table still disables it.
+
+Each part starts with `SET LOCAL lock_timeout = '5s'`. `ENABLE` and
+`CREATE POLICY` take an `ACCESS EXCLUSIVE` lock; behind a long read they
+wait, and every later query waits behind them. With the bound, a deploy
+fails fast and can run again.
 
 A rename is a drop and a create. drizzle-kit asks whether a pair is a
 rename. Here a policy holds no data, so a drop plus a create loses nothing,
@@ -204,6 +218,9 @@ re-created test database, meet a role that exists. So a role is made in a
 
 - Missing: `CREATE ROLE … NOLOGIN`, with only the attributes that differ
   from the `CREATE ROLE` defaults (`NOINHERIT`, `CREATEDB`, `CREATEROLE`).
+  The migrate lock covers one database, so another database can create
+  the role at the same time: the block catches `duplicate_object` and
+  checks the role as it finds it.
 - Present: the migration fails, with a `help:` line, when the role has
   `SUPERUSER` or `BYPASSRLS`: either bypasses every policy, so adopting it
   would make the policies a lie. Otherwise each attribute that differs is
@@ -265,14 +282,14 @@ USING ("tenant_id" = CAST(NULLIF(current_setting('brocanth.tenant_id', TRUE), ''
 
 ```rust
 const TENANT: Setting = Setting::of("tenant_id", SqlType::BigInt);   // the policy reads TENANT.get()
-let me = DbIdentity::new().role("app_member").setting(&TENANT, 7);
+let me = DbIdentity::new().role("app_user").setting(&TENANT, 7);
 db.transact_as(&me, async |tx| tx.all(&query).await).await?;
 ```
 
 `Tx::assume(&identity)` runs, inside the transaction:
 
 ```sql
-SET LOCAL ROLE "app_member";
+SET LOCAL ROLE "app_user";
 SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
 ```
 
@@ -308,46 +325,29 @@ SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
   request; `brocanth_db::DbIdentity` is who the database transaction runs
   as. A request maps the first to the second.
 
-The login role needs `GRANT app_member TO app_login` (`Role::member`) for
+The login role needs `GRANT app_user TO app_login` (`Role::member`) for
 `SET ROLE`. It needs no privilege on the tables.
 
 ### FORCE ROW LEVEL SECURITY
 
 The owner of a table bypasses its policies unless the table is forced.
 Migrations often run as the owner, and a small deployment often connects
-the application as the owner too. `Table::force()` makes the owner obey the
-policies. Use it on every table with tenant data. A superuser and a role
-with `BYPASSRLS` still bypass.
+the application as the owner too. So a table is forced by default: the
+owner obeys the policies. `Table::no_force()` is the exception, for a table
+the owner must read whole. A superuser and a role with `BYPASSRLS` still
+bypass. (Decision 2026-11-12: the default was "not forced", and an
+application that connected as the owner saw every row.)
 
 ## 5. The bridge to `brocanth-policy`
 
 Goal: one rule, written once, drives the application's `WHERE` and the
-database policy.
+database policy. The design is `docs/policy-rls-bridge.md` (not built yet).
 
-`brocanth-policy` compiles a `Pred<C>` to a `WHERE` fragment with bind
-values. Its values come from the subject (`who.user_id`), so the `Pred` for
-user 7 holds the literal `7`. A database policy cannot hold `7`: it must
-read the setting.
-
-The bridge:
-
-1. **A symbolic bound in `brocanth-policy`.** `Bound::setting("user_id")`, a
-   value that `condition()` compiles as a bind of the subject's value and
-   that the RLS compiler writes as `setting.get()`. The `policy!` macro
-   writes it when a value comes from a field of the subject
-   (`author_id == who.user_id else deny`).
-2. **A walk in `brocanth-rls`.** `SqlExpr::from_pred::<E>(&pred)` maps
-   each public `Pred` variant: `Cmp` to a comparison, `In` to `IN`, `All`
-   and `Any` to `AND` and `OR`, `Exists` to `EXISTS`, `Is` to
-   `IS NOT DISTINCT FROM`. `Opaque` is refused: its SQL has `?`
-   placeholders.
-3. **`Policy::from_rule::<P>()`.** It asks the policy for `list`, `create`,
-   `update` and `delete` with a symbolic subject, and writes the four
-   database policies, as `crud` does.
-
-Step 1 changes `Value` and `Bound` in `brocanth-policy`. Another change to
-that crate (its write masks) is in progress, so this task does not build
-the bridge. Steps 2 and 3 depend on step 1. It is the next step.
+An earlier sketch here walked the `Pred` that a rule returns for a
+symbolic subject. It fails on the first guard: `who.admin => always` is a
+Rust `if`, so the walk sees one branch only, and `who.user_id` is folded
+into a literal before the walk sees it. The bridge reads the `policy!`
+syntax instead.
 
 Until then, write the database rule with `SqlExpr` and keep the application
 rule. The database rule is the floor: a missing `WHERE` shows nothing it
@@ -386,7 +386,7 @@ masks.
 
 ## 7. What is not done
 
-- The `brocanth-policy` bridge (§5).
+- The `brocanth-policy` bridge (§5, `docs/policy-rls-bridge.md`).
 - Expression drift in `rls check`. It compares structure only.
 - `USAGE` on a schema other than `public`, column-level grants, sequence
   grants (`USAGE` on a `serial` sequence for `INSERT`), and default

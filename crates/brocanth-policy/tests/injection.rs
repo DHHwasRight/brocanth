@@ -8,7 +8,7 @@
 
 mod common;
 
-use brocanth_policy::{Dialect, Membership, Op, Pred, Value};
+use brocanth_policy::{Dialect, FieldMask, Membership, Op, Pred, Value};
 use common::{Post, PostColumn as C, MEMBERS, MEMBERS_TEAM, MEMBERS_USER};
 
 const PG: Dialect = Dialect::Postgres;
@@ -86,7 +86,11 @@ fn no_payload_reaches_a_whole_statement() {
         let write = admission
             .resolve(1)
             .expect("one row")
-            .update(PG, [(C::Status, Value::Text((*payload).to_owned()))])
+            .update(
+                PG,
+                &FieldMask::all(),
+                [(C::Status, Value::Text((*payload).to_owned()))],
+            )
             .expect("compiles");
         assert!(
             !write.query().sql().contains(payload),
@@ -147,6 +151,18 @@ fn an_identifier_that_is_not_an_identifier_is_refused() {
     // A leading digit is not an identifier, which is also what every dialect
     // says.
     assert!(Ident::new("9lives").is_err());
+    // PostgreSQL truncates a name past 63 bytes without an error, so two long
+    // names could become one. 63 is the last length that is kept whole.
+    let sixty_three: &'static str =
+        "a23456789_123456789_123456789_123456789_123456789_123456789_123";
+    assert_eq!(sixty_three.len(), 63);
+    assert!(Ident::new(sixty_three).is_ok());
+    let sixty_four: &'static str =
+        "a23456789_123456789_123456789_123456789_123456789_123456789_1234";
+    assert!(matches!(
+        Ident::new(sixty_four),
+        Err(CompileError::BadIdentifier { .. })
+    ));
 }
 
 #[test]
@@ -216,4 +232,15 @@ fn an_opaque_fragment_may_not_carry_a_literal() {
         pred.condition::<Post>(PG),
         Err(CompileError::PlaceholderSyntax { .. })
     ));
+
+    // A fragment is one expression inside `(`…`)`. A `--` comments out the
+    // closing parenthesis; a `/*` and a `;` are no better.
+    for sql in ["score > ? --", "score > ? /* x */", "score > ?; SELECT 1"] {
+        let pred: Pred<C> = Pred::Opaque(Opaque::new("a comment", sql, vec![Value::Int(1)]));
+        let refused = pred.condition::<Post>(PG);
+        assert!(
+            matches!(refused, Err(CompileError::NotAnExpression { .. })),
+            "{sql}: {refused:?}"
+        );
+    }
 }

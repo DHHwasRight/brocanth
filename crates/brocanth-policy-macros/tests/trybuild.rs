@@ -6,7 +6,8 @@
 //! * a column the entity does not have, in a rule or in a field mask;
 //! * a value of the wrong type for its column;
 //! * an `Option` value, with no word for what absence means;
-//! * a column that does not match the model struct it names.
+//! * a column that does not match the model struct it names;
+//! * `!` over `else deny` or `else allow`, which turns the absent case around.
 //!
 //! The snapshots keep the wording and the spans from drifting.
 
@@ -22,4 +23,5 @@ fn the_macro_accepts_what_it_should_and_refuses_the_typo_class() {
     t.compile_fail("tests/ui/fail_model_mismatch.rs");
     t.compile_fail("tests/ui/fail_unknown_rule.rs");
     t.compile_fail("tests/ui/fail_no_key.rs");
+    t.compile_fail("tests/ui/fail_negated_absence.rs");
 }

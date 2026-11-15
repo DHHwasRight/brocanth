@@ -22,7 +22,7 @@
 //! nobody made must not be announced; `tests/events.rs` asserts both halves.
 
 use brocanth_events::{RowChange, RowId};
-use brocanth_policy::{Column, FieldMask, MapRow, Policy, Value};
+use brocanth_policy::{Column, FieldMask, MapRow, Policy, UpdateError, Value};
 use std::borrow::Cow;
 
 use crate::data::{FetchQuery, ListQuery, ResourceData};
@@ -236,7 +236,8 @@ pub fn update<R: Resource>(
 
     // Before the admission query, and the status table explains why: a 403 for
     // a forbidden column must not also mean "and the row is there".
-    check_mask(resource.policy().writable(subject), &values)?;
+    let mask = resource.policy().writable(subject);
+    check_mask(mask.clone(), &values)?;
 
     let changed: Vec<&'static str> = values.iter().map(|(c, _)| c.name()).collect();
 
@@ -246,7 +247,12 @@ pub fn update<R: Resource>(
     // same answer as "no such row".
     let verified = admission.resolve(rows)?;
 
-    let write = verified.update(R::DIALECT, values)?;
+    let write = verified
+        .update(R::DIALECT, &mask, values)
+        .map_err(|refused| match refused.into_error() {
+            UpdateError::Mask(violation) => Failure::NotWritable(violation),
+            UpdateError::Compile(error) => Failure::Compile(error),
+        })?;
     let affected = resource.data().write(&Statement::from(write.query()))?;
     // Zero here is `Denied::RaceLost`. The condition was re-applied inside the
     // write, so the row stopped matching between the check and the write.

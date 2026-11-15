@@ -100,6 +100,8 @@ fn agents(project: &Project) -> String {
          \x20 after a paginated load: the total is then wrong and pages overlap.\n\
          - Order with `applied.order_by::<E>(key)`: the primary key comes last,\n\
          \x20 so two pages never share a row.\n\
+         - Sort only on a NOT NULL column. A row with a NULL sort key drops out\n\
+         \x20 of every page after the first.\n\
          - Do not parse a filter from the query string by hand. A name that is\n\
          \x20 not declared names no column, and that is the guarantee.\n{links}"
     )

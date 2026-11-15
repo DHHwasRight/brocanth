@@ -29,7 +29,7 @@ mod filters;
 pub mod scaffold;
 
 #[cfg(feature = "runtime")]
-pub use filters::{Active, Applied, FilterError, Filters, Kind, Lookup, Sort, SORT};
+pub use filters::{Active, Applied, FilterError, Filters, Kind, Lookup, Sort, MAX_VALUES, SORT};
 
 #[cfg(feature = "runtime")]
 pub use brocanth_pagination::Direction;

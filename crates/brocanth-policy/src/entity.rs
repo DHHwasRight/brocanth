@@ -65,11 +65,16 @@ use crate::errors::CompileError;
 ///    `&'static str`, which a request body is not. The only way to produce one
 ///    from a runtime string is to leak it, which is a deliberate act that
 ///    shows up in review.
-/// 2. **They are checked anyway**, against `[A-Za-z_][A-Za-z0-9_]*`, and the
-///    compiler also quotes them. A name that would need quoting to be safe is
-///    rejected before it reaches the quoting.
+/// 2. **They are checked anyway**, against `[A-Za-z_][A-Za-z0-9_]*` and at
+///    most 63 bytes, and the compiler also quotes them. A name that would need
+///    quoting to be safe is rejected before it reaches the quoting, and a name
+///    PostgreSQL would truncate is rejected before two names become one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ident(&'static str);
+
+/// PostgreSQL's `NAMEDATALEN - 1`: a longer name is truncated without an
+/// error, so two long names can become the same name.
+const MAX_IDENT: usize = 63;
 
 impl Ident {
     /// Check a name. `Err` names the offending byte.
@@ -77,6 +82,9 @@ impl Ident {
         let bytes = name.as_bytes();
         if bytes.is_empty() {
             return Err(CompileError::EmptyIdentifier);
+        }
+        if bytes.len() > MAX_IDENT {
+            return Err(CompileError::BadIdentifier { name });
         }
         match bytes[0] {
             b'A'..=b'Z' | b'a'..=b'z' | b'_' => {}

@@ -192,6 +192,8 @@ impl<C: Column> Pred<C> {
             } => Ok(Audience::AnyOf(
                 values
                     .iter()
+                    // `IN (NULL)` matches no row: `col = NULL` is unknown.
+                    .filter(|value| !value.is_null())
                     .map(|value| Audience::Keyed {
                         column: *column,
                         value: value.clone(),
@@ -230,6 +232,11 @@ impl<C: Column> Pred<C> {
                         return Err(NotInvertible {
                             reason: "the membership filter is not a plain equality",
                         });
+                    }
+                    // `= NULL` admits no link row, as at the top level.
+                    // `IS NULL` does, so only the null-safe op keys on NULL.
+                    if value.is_null() && !op.is_null_safe() {
+                        return Ok(Audience::NoOne);
                     }
                     filter.push((*column, value.clone()));
                 }
