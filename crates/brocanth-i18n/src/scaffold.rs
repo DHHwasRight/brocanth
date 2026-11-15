@@ -50,22 +50,6 @@ impl Module for I18n {
             "i18n-routing",
             "the hook reads the locale from the path's first segment and redirects a GET without one",
         )
-        .adapts_to(
-            "admin",
-            "with `i18n-routing`, the admin's `mount_at` is unprefixed, read from src/modules/admin.rs",
-        )
-        .adapts_to(
-            "storage-routes",
-            "with `i18n-routing`, the file routes' `path` is unprefixed, read from src/modules/storage_routes.rs",
-        )
-        .adapts_to(
-            "auth-oauth",
-            "with `i18n-routing`, the sign-in routes' `mount_at` is unprefixed, read from src/modules/auth_oauth.rs",
-        )
-        .adapts_to(
-            "oauth-client",
-            "with `i18n-routing`, the connect pages' `mount_at` is unprefixed, read from src/modules/oauth_client.rs",
-        )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
         .outside_runtime()
@@ -177,15 +161,11 @@ fn routing_adjust(project: &Project) -> String {
     // A provider sends the browser back to `<mount_at>/<provider>/callback`
     // exactly as registered at its console, so the OAuth routes keep no
     // locale segment either.
-    for (key, field) in [
-        ("admin", "mount_at"),
-        ("storage-routes", "path"),
-        ("auth-oauth", "mount_at"),
-        ("oauth-client", "mount_at"),
-    ] {
-        if project.has(key) {
-            chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
-        }
+    //
+    // Every mount option of every chosen module ([`Opt::mount`]), so a
+    // module that adds one is covered and this list names nobody.
+    for (key, field) in project.mounts() {
+        chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
     }
     chain
 }

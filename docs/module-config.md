@@ -1091,6 +1091,22 @@ run time. Without one, the test keeps the sorted literal array.
 known only at `cargo build`, so the test sorts it. A project without a
 mounted module keeps the shorter test.
 
+**Decision 7: a module that treats every mounted module alike reads the
+mounts, not a list of keys.** An option that is a mount path is declared
+with `Opt::mount`, not `Opt::text`: `admin`, `auth-oauth` and
+`oauth-client` declare `mount_at` so, and `storage-routes` its `path`.
+The CLI hands each chosen module's mount options to the view, and
+`Project::mounts()` lists them as `(module key, option key)`. `i18n-routing`
+keeps each of them unprefixed with `keep_unprefixed(module_ref(..))`; it
+names no module. **Reason:** the list of four keys in the `i18n` scaffold
+missed every module added after it, and each new mounted module had to
+edit `i18n`. Now a new module declares its option once. `analytics`,
+`gtag`, `robots` and `sitemap` still name `admin`'s `mount_at`, through
+decision 1: they exclude the backoffice in particular, not every mount.
+`brocanth.toml`'s `adapted_to` for `i18n` no longer lists the mounted
+modules. Nothing reads it for correctness: `remove` generates every other
+module again.
+
 The tests: each of `analytics`, `gtag` and `robots` (`sitemap` and
 `robots`) has a test in `tests/scaffold.rs` that checks the generated
 code and the file, then, with `BROCANTH_BUILD=1`, moves the admin to

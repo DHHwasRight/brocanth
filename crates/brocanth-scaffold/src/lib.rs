@@ -603,6 +603,11 @@ pub struct Opt {
     pub default: String,
     /// One line for the module file, above the field.
     pub help: &'static str,
+    /// The value is a path the module's routes answer under. Set with
+    /// [`Opt::mount()`]; [`Project::mounts`] lists every such option of the
+    /// chosen modules, so a module that treats routes it does not own
+    /// (i18n keeps them unprefixed) reads them all and names none.
+    pub mount: bool,
 }
 
 /// The type of an [`Opt`].
@@ -636,6 +641,15 @@ impl Opt {
         Self::new(key, OptKind::Text, format!("{default:?}"), help)
     }
 
+    /// A string that is a mount path: where the module's routes answer.
+    /// See the [`mount`](Opt#structfield.mount) field.
+    pub fn mount(key: &'static str, default: &str, help: &'static str) -> Self {
+        Self {
+            mount: true,
+            ..Self::text(key, default, help)
+        }
+    }
+
     /// A boolean.
     pub fn bool(key: &'static str, default: bool, help: &'static str) -> Self {
         Self::new(key, OptKind::Bool, default.to_string(), help)
@@ -657,6 +671,7 @@ impl Opt {
             kind,
             default,
             help,
+            mount: false,
         }
     }
 }
@@ -889,6 +904,7 @@ pub struct Project<'a> {
     pub title: &'a str,
     on: &'a [&'a str],
     known: &'a [&'a str],
+    mounts: &'a [(&'a str, &'a str)],
     /// Keys asked about that no module declares. Collected rather than
     /// answered `false`, because a typo that reads as "the user did not want
     /// it" is a bug that produces a working project with a piece missing.
@@ -907,9 +923,33 @@ impl<'a> Project<'a> {
             title,
             on,
             known,
+            mounts: &[],
             unknown: std::cell::RefCell::new(Vec::new()),
             asked: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Give the view the mount options of the modules: `(module key, option
+    /// key)` for each [`Opt::mount()`]. The CLI passes them from the
+    /// manifests; a view without them has no mounts.
+    pub fn with_mounts(mut self, mounts: &'a [(&'a str, &'a str)]) -> Self {
+        self.mounts = mounts;
+        self
+    }
+
+    /// Every mount option of a chosen module, as `(module key, option
+    /// key)`, in the order the CLI gave them: what to pass to
+    /// [`snippet::module_ref`] for the path.
+    ///
+    /// Not a question about one module, so it is not recorded as one: a
+    /// module that reads it treats every chosen module's routes alike,
+    /// and a module that adds a mount option is covered with no change
+    /// to the reader.
+    pub fn mounts(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        self.mounts
+            .iter()
+            .copied()
+            .filter(|(key, _)| self.on.contains(key))
     }
 
     /// Whether another choice is part of this project.

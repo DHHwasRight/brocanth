@@ -816,7 +816,19 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 /// than as a project that compiles and is missing a piece.
 fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
     let known = all();
-    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known);
+    let mounts: Vec<(&str, &str)> = a
+        .picks
+        .iter()
+        .flat_map(|&key| {
+            about(key)
+                .options
+                .into_iter()
+                .filter(|option| option.mount)
+                .map(move |option| (key, option.key))
+        })
+        .collect();
+    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
+        .with_mounts(&mounts);
     let order = brocanth_scaffold::order(&a.picks, |key| about(key).after).map_err(|stuck| {
         vec![Diagnostic::error(
             "cycle",

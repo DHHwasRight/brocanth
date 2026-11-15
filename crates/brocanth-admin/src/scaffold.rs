@@ -81,7 +81,7 @@ impl Module for Backoffice {
             "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
         .asked_in("doors", "A backoffice at /admin, locked until you open it")
-        .option(Opt::text(
+        .option(Opt::mount(
             "mount_at",
             "/admin",
             "Where the backoffice answers. A page of yours under this path is a build error, not a race. Every environment serves the same routes, so this is a constant and not a setting.",

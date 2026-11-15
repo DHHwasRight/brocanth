@@ -57,7 +57,7 @@ impl Module for AuthOauth {
             "middleware-csrf",
             "the button and the link forms carry the CSRF token",
         )
-        .option(Opt::text(
+        .option(Opt::mount(
             "mount_at",
             "/oauth",
             "Where the sign-in routes answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",

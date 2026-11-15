@@ -396,7 +396,7 @@ impl Module for StorageRoutes {
             "copy an upload form's CSRF field into the header the CSRF check reads",
             Hook::on(),
         )
-        .option(Opt::text(
+        .option(Opt::mount(
             "path",
             "/files",
             "Where the routes answer: uploads at {path}, files at {path}/{address}.",
