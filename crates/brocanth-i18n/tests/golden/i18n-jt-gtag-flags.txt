@@ -582,6 +582,12 @@ impl Signals {
 /// `begin_async` and not `begin`: it runs a hook that waits as well as
 /// one that does not. With no hook that waits, it is ready on its first
 /// poll.
+///
+/// A panic in a request hook, the chain or the page is a 500, and the
+/// response hooks still see it: a logger that never saw the 500 would
+/// not be a logger. Without the net the panic unwinds into the
+/// server's connection task and the client gets a closed socket with
+/// no status. The net catches nothing under `panic = "abort"`.
 pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {
     let Ok(mut request) = brocanth_server::bridge::to_core(request) else {
         // The path and the query do not make a URI. The table was not
@@ -589,9 +595,20 @@ pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_se
         return brocanth_server::Response::text(400, "Bad Request");
     };
     let mut state = RequestState::new();
-    let outcome = match app.core.begin_async(&mut request, &mut state).await {
-        Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
-        Begin::Answered(outcome) => outcome,
+    let caught = brocanth_server::bridge::catch_unwind(std::panic::AssertUnwindSafe(async {
+        match app.core.begin_async(&mut request, &mut state).await {
+            Begin::Dispatch => Ok(sent(dispatch(app, &request, &mut state).await)),
+            Begin::Answered(outcome) => outcome,
+        }
+    }))
+    .await;
+    let outcome = match caught {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = brocanth_server::bridge::panic_message(&*payload);
+            plugins::say!(error, "a request panicked: {message}"; %message);
+            Ok(sent(Response::new(500, "Internal Server Error")))
+        }
     };
     let response = app.core.finish(&mut request, &mut state, outcome);
     brocanth_server::bridge::from_core(response)
