@@ -31,8 +31,6 @@ edition = "2021"
 #   brocanth-rls          no row-level security; a query that forgets its WHERE shows every tenant's rows
 #   brocanth-input        no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-client       no client; calling this application means writing the URL and the JSON by hand
-#   brocanth-middleware   no edge hooks; a forwarded address, a preflight and a canonical host are each a handler's own problem
-#   csrf                  no CSRF check; any page on any site can post a form here and the browser sends the cookies with it
 #   security-headers      no security headers; a browser sniffs types, frames the pages and runs any inline script
 #   rate-limit            no rate limit; a password guesser gets as many tries as the server answers
 #   conditional-get       no ETag and no 304; a browser downloads an unchanged page again in full
@@ -63,7 +61,8 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
-brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants"] }
+brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes"] }
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
@@ -74,7 +73,6 @@ serde = { version = "1", features = ["derive"] }  # the config plugin reads type
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 ===== .gitignore =====
 /target
-/var/uploads
 ===== rust-toolchain.toml =====
 [toolchain]
 channel = "1.98"
@@ -1596,6 +1594,63 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
 
+        // -- brocanth-middleware ------------------------------------------
+        //
+        // Five edge hooks, none of them on. Each encodes a fact about this
+        // deployment, so each is turned on by somebody who knows it.
+        //
+        // This file is generated, so do not uncomment them here. Copy the
+        // line to `build()` in `src/app.rs`, after `plugins::register!`,
+        // and widen `type Core` there by the plugin's hook families:
+        //
+        //     brocanth::plugin_hooks::Both<
+        //         <brocanth_middleware::Cors as brocanth::plugin_hooks::HookSource>::Families,
+        //         plugins::Hooks,
+        //     >
+
+        // Who the client is, behind a proxy. The list is the addresses of
+        // YOUR load balancers: `X-Forwarded-For` is a claim anybody who
+        // reaches the socket may make, so there is no "trust everything".
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::ProxyHeaders as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::ProxyHeadersConfig::trusting([
+        //             "10.0.0.1".parse().expect("an address"),
+        //         ]),
+        //     ),
+        // );
+
+        // A DELETE sent from an HTML form, through `_method` or
+        // `X-HTTP-Method-Override`. Only a POST is overridden, and only
+        // into PUT, PATCH or DELETE.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::MethodOverride as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::MethodOverrideConfig::default(),
+        //     ),
+        // );
+
+        // One host, so cookies and caches agree. 308 keeps the verb; 301
+        // is what crawlers prefer and may turn a POST into a GET.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::CanonicalHost as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::CanonicalHostConfig::to("https://example.com"),
+        //     ),
+        // );
+
+        // 415 before a handler parses nonsense.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::ContentTypes as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::ContentTypesConfig::json(),
+        //     ),
+        // );
+
+        // A browser on another origin. Name the origins: a wildcard with
+        // credentials is refused at startup, because a browser refuses it.
+        // let builder = builder.plugin_hooking(
+        //     <brocanth_middleware::Cors as brocanth::plugin_api::Plugin>::new(
+        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
+        //     ),
+        // );
+
         // -- brocanth-i18n: a locale per request --------------------------
         //
         // Reads `?locale=`, then the `locale` cookie, then Accept-Language,
@@ -1615,6 +1670,23 @@ macro_rules! register {
             "src/modules/i18n.rs",
             crate::modules::i18n::MODULE.hooks.off(),
         );
+
+        // -- brocanth-middleware: CSRF ------------------------------------
+        //
+        // Not one of the five above. Each of those encodes a fact about
+        // this deployment; this one encodes a fact about browsers: any
+        // page on any site can post a form here, and the cookies ride
+        // along. That is true wherever this runs, so this hook is on, and
+        // the only thing to decide is which paths are exempt -- a webhook,
+        // or anything else whose caller is not a browser:
+        //
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
+        //
+        // The token for the request is `ctx.hooked::<CsrfToken>()`;
+        // `token.hidden_field()` is the input a form carries.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
@@ -1652,13 +1724,15 @@ pub(crate) use register;
 /// plugins all provide nothing.
 type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
 type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
-type WithStorage = After<crate::plugins::storage::Files, WithI18n>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithI18n>;
+type WithStorage = After<crate::plugins::storage::Files, WithMiddlewareCsrf>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithStorage>;
 pub type Installed = WithStorageRoutes;
 
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, NoHooks>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
 type HookedStorageRoutes =
-    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedI18n>;
+    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedCsrf>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1843,6 +1917,42 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "storage.root",
         help: "Where uploads are stored.",
         flag: true,
@@ -1879,22 +1989,13 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "storage_routes.csrf_field",
-        help: "The form field that carries the CSRF token: `[csrf] field`.",
+        path: "storage_routes.dedupe",
+        help: "Store identical uploads once, at their content address.",
         flag: true,
         file: "src/modules/storage_routes.rs",
         flags: crate::modules::storage_routes::MODULE.flags,
         none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "storage_routes.csrf_header",
-        help: "The header the CSRF check reads: `[csrf] header`.",
-        flag: true,
-        file: "src/modules/storage_routes.rs",
-        flags: crate::modules::storage_routes::MODULE.flags,
-        none_as: None,
-        text: true,
+        text: false,
     },
     Setting {
         path: "server.shutdown_grace_secs",
@@ -1968,6 +2069,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::admin::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::middleware_csrf::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::storage::MODULE.rename {
@@ -2141,6 +2245,7 @@ pub fn read_line() -> Result<bool, String> {
 fn defaults() -> Vec<(&'static str, String)> {
     let admin = crate::plugins::admin::Settings::default();
     let i18n = brocanth_i18n::NegotiatorConfig::default();
+    let csrf = brocanth_middleware::CsrfConfig::default();
     let storage = crate::plugins::storage::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let server = crate::plugins::ServerSettings::default();
@@ -2154,6 +2259,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("i18n.cookie", format!("{:?}", i18n.cookie)),
         ("i18n.default", format!("{:?}", i18n.default)),
         ("i18n.remember", format!("{:?}", i18n.remember)),
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
@@ -2162,12 +2271,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", storage_routes.max_bytes),
         ),
         (
-            "storage_routes.csrf_field",
-            format!("{:?}", storage_routes.csrf_field),
-        ),
-        (
-            "storage_routes.csrf_header",
-            format!("{:?}", storage_routes.csrf_header),
+            "storage_routes.dedupe",
+            format!("{:?}", storage_routes.dedupe),
         ),
         (
             "server.shutdown_grace_secs",
@@ -2292,7 +2397,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ec2e953c70782b4d
+// brocanth-digest: 15472b5d3a6100e1
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2447,6 +2552,60 @@ pub mod admin {
     }
 }
 
+/// The shape of src/modules/middleware.rs.
+pub mod middleware {
+    /// What src/modules/middleware.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/middleware_csrf.rs.
+pub mod middleware_csrf {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[csrf]` that has a flag. A secret or a list has no flag,
+    /// so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Cookie,
+        Field,
+        Header,
+        Secure,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Cookie => "csrf.cookie",
+                Key::Field => "csrf.field",
+                Key::Header => "csrf.header",
+                Key::Secure => "csrf.secure",
+            }
+        }
+    }
+
+    /// What src/modules/middleware_csrf.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/storage.rs.
 pub mod storage {
     pub use super::{Flag, Flags};
@@ -2495,8 +2654,7 @@ pub mod storage_routes {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         MaxBytes,
-        CsrfField,
-        CsrfHeader,
+        Dedupe,
     }
 
     impl Key {
@@ -2504,8 +2662,7 @@ pub mod storage_routes {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::MaxBytes => "storage_routes.max_bytes",
-                Key::CsrfField => "storage_routes.csrf_field",
-                Key::CsrfHeader => "storage_routes.csrf_header",
+                Key::Dedupe => "storage_routes.dedupe",
             }
         }
     }
@@ -2545,8 +2702,6 @@ pub mod storage_routes {
         /// Serve a file to a request with no token. Off, every download needs a
         /// token.
         pub public: bool,
-        /// Answer ?thumb=WxH with a thumbnail, rendered once per size.
-        pub thumbnails: bool,
     }
 
     impl Module {
@@ -2557,7 +2712,6 @@ pub mod storage_routes {
             hooks: Hooks::DEFAULT,
             path: "/files",
             public: false,
-            thumbnails: true,
         };
     }
 }
@@ -2643,7 +2797,7 @@ pub mod i18n_routing {
     }
 }
 
-// brocanth-digest: ad62e53cff753c80
+// brocanth-digest: a463c8b3cfe27e0a
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2666,6 +2820,8 @@ pub mod admin;
 pub mod config;
 pub mod i18n;
 pub mod i18n_routing;
+pub mod middleware;
+pub mod middleware_csrf;
 pub mod rsx;
 pub mod storage;
 pub mod storage_routes;
@@ -2676,13 +2832,15 @@ pub const ALL: &[&str] = &[
     "config",
     "rsx",
     "admin",
+    "middleware",
+    "middleware-csrf",
     "storage",
     "storage-routes",
     "i18n",
     "i18n-routing",
 ];
 
-// brocanth-digest: d3e2a972a9ad68fa
+// brocanth-digest: 6681bf80c50daa1e
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -2773,9 +2931,58 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/middleware.rs =====
+//! `middleware`: proxy headers, method override, canonical host, content types,
+//! CORS.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::middleware::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/middleware_csrf.rs =====
+//! `middleware-csrf`: a double-submit cookie, checked on every verb that is not
+//! a read.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [csrf] in
+//! the config file, an environment variable, or a flag.
+//!
+//! No field turns these hooks off, because the module needs them:
+//! - `csrf.check`: refuse an unsafe request that does not send the token
+//!   back.
+//! - `csrf.mint`: set the token cookie on a response.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::middleware_csrf::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [csrf]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Cookie, Flag::As("cookie")),
+    //   (Key::Cookie, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
 ===== src/modules/storage.rs =====
-//! `storage`: uploads on a local disk, addressed by content hash; no object
-//! store and no S3.
+//! `storage`: uploads on a local disk, or in Postgres with `db`, addressed by
+//! content hash; no S3.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2805,7 +3012,7 @@ pub const MODULE: Module = Module {
 };
 ===== src/modules/storage_routes.rs =====
 //! `storage-routes`: POST /files and GET /files/{address}?token=: uploads your
-//! guard allows, downloads behind a file token, thumbnails.
+//! guard allows, downloads behind a file token.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2847,9 +3054,6 @@ pub const MODULE: Module = Module {
     // Serve a file to a request with no token. Off, every download needs a
     // token.
     public: false,
-
-    // Answer ?thumb=WxH with a thumbnail, rendered once per size.
-    thumbnails: true,
 
     ..Module::DEFAULT
 };
@@ -2958,18 +3162,31 @@ remember = true
 # src/plugins/mod.rs, from their files in src/modules/.
 unprefixed = ["/api"]
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
 [storage]
 # Where uploads are stored.
-# Below the working directory, so an upload is not source and `.gitignore`
-# already says so. Move it off the deployment's disk and every instance stops
-# seeing the same files: an object store is a separate crate behind the same
-# trait, and swapping to it is a change in src/plugins/storage/mod.rs alone.
+# Created with a `.gitignore` that holds `*`, so an upload is never source.
+# It is one machine's disk: a second instance does not see these files. Add
+# the `db` module and the files live in Postgres instead.
 root = "var/uploads"
 # Signs file tokens and keys object addresses.
 # Development only, and the one line to change first. While it is this
 # string, anybody who has read this repository can mint a token for any
-# object, and anybody holding a copy of a file can compute whether somebody
-# uploaded it. No flag sets it: a flag is readable by every user on the host.
+# object; outside development the plugin refuses to start with it. No flag
+# sets it: a flag is readable by every user on the host.
 secret = "development only: replace before anything is uploaded in anger"
 # Seconds a file token lives.
 # It cannot be revoked, so this number is the window in which a URL pasted
@@ -2982,10 +3199,10 @@ token_ttl = 120
 # The server buffers at most 2 MiB of a request body today, so a larger
 # value takes effect only when that limit moves.
 max_bytes = 2097152
-# The form field that carries the CSRF token: `[csrf] field`.
-csrf_field = "_csrf_token"
-# The header the CSRF check reads: `[csrf] header`.
-csrf_header = "x-csrf-token"
+# Store identical uploads once, at their content address.
+# Off, each upload has an address of its own. On, a delete removes the file
+# for every holder: count the references before you delete.
+dedupe = false
 ===== build.rs =====
 //! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
 //! which `src/plugins/i18n/mod.rs` includes.
@@ -3268,13 +3485,27 @@ fn screen(admin: Arc<Admin>) -> Handler {
                 .dispatch(who, method, &ctx.path, &ctx.query, &form)
                 .await?;
             Ok(match answer {
-                brocanth_admin::Response::Page { status, html } => Response::new(status, html),
+                brocanth_admin::Response::Page { status, html } => {
+                    Response::new(status, stamped(ctx, html))
+                }
                 brocanth_admin::Response::Redirect { status, location } => {
                     Response::empty(status).with_header("location", location)
                 }
             })
         })
     })
+}
+
+/// The page with the CSRF token in every form that posts.
+///
+/// The admin renders its own forms and does not know the token, so the
+/// field goes in here. Without a token on the request -- a test that built
+/// the context by hand -- the page goes out unchanged.
+fn stamped(ctx: &Ctx, html: String) -> String {
+    match ctx.hooked::<brocanth_middleware::CsrfToken>() {
+        Some(token) => token.stamp_forms(&html),
+        None => html,
+    }
 }
 
 /// Who is asking, as the admin's policy sees it.
@@ -3424,17 +3655,20 @@ mod tests {
 //! defanged for the `Content-Disposition` header it ends up in, and never
 //! touches the filesystem.
 //!
+//! The objects live under `root`, on this machine's disk. A second instance
+//! does not see them, and `brocanth check --deploy` says so: add the `db`
+//! module and they live in Postgres instead.
+//!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
 //! through no other route. Delete the registration in `src/plugins/mod.rs`
 //! and delete this file, and the application stores no files and links
 //! nothing to store them with.
 //!
-//! # Uploading
+//! # Uploading and serving
 //!
-//! There is no upload route here, on purpose: `brocanth-storage` parses no
-//! multipart body and knows nothing about HTTP, and whether *this*
-//! application lets *this* request store a file is a policy question a
-//! generator cannot answer. A handler that has already asked it writes:
+//! The `storage-routes` module writes the HTTP edge: an upload route behind a
+//! guard this project writes, and a download route behind a file token.
+//! Without it, a handler that has already asked its own policy stores a file:
 //!
 //! ```ignore
 //! let files = ctx.provided::<FileStore, _>().expect("a dispatched request");
@@ -3448,12 +3682,10 @@ mod tests {
 //! bytes rather than from `sent_type`, because a client that labels a file
 //! `text/html` is choosing what this origin serves back to the next visitor.
 //!
-//! # Serving
-//!
-//! Also the application's, and for a sharper reason: a file token says "the
-//! bearer may read this object" and carries no identity at all. Mint one only
-//! for a request that has already passed the policy, because after that the
-//! token is the only thing between the object and whoever the URL reaches.
+//! A file token says "the bearer may read this object" and carries no
+//! identity at all. Mint one only for a request that has already passed the
+//! policy, because after that the token is the only thing between the object
+//! and whoever the URL reaches.
 //!
 //! ```ignore
 //! let token = files.tokens.issue(&key);           // after the policy said yes
@@ -3461,18 +3693,14 @@ mod tests {
 //! let meta = files.store.meta(&key).await?;
 //! ```
 //!
-//! `ObjectMeta::content_type` answers `is_safe_to_inline`, which is the bit
-//! the download route needs to force an attachment for everything that is not
-//! a recognised image.
-//!
 //! # Thumbnails
 //!
-//! `get_variant` and `put_variant` are here already, with the `variants`
-//! feature off: moving derived bytes needs no codec, so this build can serve
-//! a variant another process computed and cannot compute one itself. Turning
-//! the feature on in `Cargo.toml` adds `derive_variant`, and adds png, jpeg,
-//! gif and webp decoders pointed at stranger-supplied bytes. An application
-//! that stores documents should leave it off.
+//! `get_variant` and `put_variant` are here already: moving derived bytes
+//! needs no codec, so this build can serve a variant another process
+//! computed. The `storage-thumbnails` module turns on the `variants` feature,
+//! which adds `derive_variant` and png, jpeg, gif and webp decoders pointed
+//! at stranger-supplied bytes. An application that stores documents should
+//! leave it off.
 //!
 //! # One secret, two keys
 //!
@@ -3481,8 +3709,10 @@ mod tests {
 //! separators, so an address key cannot sign a token and a token key cannot
 //! address an object. Rotating the secret invalidates every outstanding token
 //! at once, which is the break-glass, and it also changes the address new
-//! uploads are stored at -- objects already on disk keep the address they
+//! uploads are stored at -- objects already stored keep the address they
 //! were written under, so rotate it with a plan rather than on a Friday.
+//! Outside development the plugin refuses the scaffold's secret and any
+//! secret shorter than 32 characters.
 
 use std::sync::Arc;
 
@@ -3531,24 +3761,37 @@ impl Default for Settings {
     }
 }
 
+/// The scaffold's secret, which the repository shows to anybody.
+const DEVELOPMENT_SECRET: &str = "development only: replace before anything is uploaded in anger";
+
+/// Whether this process runs in development or a test: `$<APP>_ENV` unset,
+/// `development` or `test`. The variable the config plugin reads too.
+fn development() -> bool {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    match std::env::var(var) {
+        Ok(env) => env == "development" || env == "test",
+        Err(_) => true,
+    }
+}
+
+/// Whether `secret` may sign tokens here. In development anything goes;
+/// elsewhere not the scaffold's secret, which this repository shows to
+/// anybody, and not one shorter than 32 characters.
+fn usable_secret(secret: &str, development: bool) -> bool {
+    development || (secret != DEVELOPMENT_SECRET && secret.len() >= 32)
+}
+
 /// What this plugin puts on the context.
 ///
 /// A wrapper and not the two values loose, because `ContextItem` is
-/// brocanth's trait and both of these are `brocanth-storage`'s types. That
-/// crate deliberately does not depend on the core -- it has no routes, parses
-/// no multipart body and knows nothing about HTTP -- so the impl that joins
-/// the two belongs in the one crate that can see both, which is this one.
+/// brocanth's trait and both of these are `brocanth-storage`'s types, so the
+/// impl that joins the two belongs in this crate, which names both.
 pub struct FileStore {
-    /// The store, behind the trait rather than as a `LocalDisk`, so swapping
-    /// the backend is a change in this file and nowhere else.
+    /// The store, behind the trait, so swapping the backend is a change in
+    /// this file and nowhere else.
     ///
-    /// Allowed to be unread, and only until one thing changes. Every
-    /// `Storage` method is `async` and the startup line below is not, so
-    /// nothing the generator writes can touch this field — a handler is
-    /// what uses it, and a handler cannot reach the per-request context
-    /// yet, because `Ctx` in `src/pages/mod.rs` has no extractor. Delete
-    /// this attribute the moment you write the first upload route; it is
-    /// a note about today, not about the field.
+    /// Nothing this project generated reads it: a handler does, with
+    /// `ctx.provided::<FileStore, _>()`. Delete this attribute when one does.
     #[allow(dead_code)]
     pub store: Arc<dyn Storage>,
     /// Mints and verifies the short-lived tokens a download route checks.
@@ -3594,6 +3837,12 @@ impl Plugin for Files {
                  help: set `secret` under [storage], or the variable for `storage.secret`, to a long random string",
             ));
         }
+        if !usable_secret(&self.settings.secret, development()) {
+            return Err(PluginError::new(
+                "[storage] secret is the scaffold's development value or shorter than 32 characters\n\
+                 help: set the variable for `storage.secret` to 32 random bytes, such as the output of `head -c 32 /dev/urandom | base64`",
+            ));
+        }
         if self.settings.token_ttl <= 0 {
             return Err(PluginError::new(
                 "[storage] token_ttl must be at least one second, or no token is ever valid\n\
@@ -3616,8 +3865,7 @@ impl Plugin for Files {
         let tokens = FileTokens::new(FileTokenKey::from_secret(self.settings.secret.as_bytes()))
             .with_ttl(self.settings.token_ttl);
         // On the services too, where a plugin registered after this one
-        // reads them at its own `configure`: the upload and download routes
-        // of `storage-routes` do.
+        // reads them: the upload and download routes of `storage-routes` do.
         lc.services_mut().insert(Arc::clone(&store));
         lc.services_mut().insert(tokens.clone());
         self.store = Some(store);
@@ -3639,6 +3887,16 @@ impl Plugin for Files {
 
 #[cfg(test)]
 mod tests {
+    use super::{usable_secret, DEVELOPMENT_SECRET};
+
+    #[test]
+    fn the_development_secret_is_refused_outside_development() {
+        assert!(usable_secret(DEVELOPMENT_SECRET, true));
+        assert!(!usable_secret(DEVELOPMENT_SECRET, false));
+        assert!(!usable_secret("short", false));
+        assert!(usable_secret(&"x".repeat(32), false));
+    }
+
     #[test]
     fn a_printed_settings_never_shows_a_secret() {
         let settings = super::Settings {
@@ -3656,13 +3914,13 @@ mod tests {
 //! `POST /files` takes a `multipart/form-data` form, stores its `file` part
 //! and answers `303` to the form's `return_to` field, with `?file=` and
 //! `&token=` added, or `201` with the address. `GET /files/{address}` serves
-//! the file to a request whose `?token=` opens it; add `&thumb=300x200` for
-//! a thumbnail. The path, `public` and `thumbnails` are in
-//! `src/modules/storage_routes.rs`.
+//! the file to a request whose `?token=` opens it.
+//! The path and `public` are in `src/modules/storage_routes.rs`.
 //!
 //! A plain form works with no script. The CSRF check reads no multipart
-//! body, so the `lift` hook copies the form's `_csrf_token` field into the
-//! header the check reads, before it runs:
+//! body, so the `lift` hook copies the form's CSRF field into the header the
+//! check reads, before it runs. The field and the header are the `[csrf]`
+//! ones: this plugin reads them from the CSRF plugin and keeps no copy.
 //!
 //! ```html
 //! <form method="post" action="/files" enctype="multipart/form-data">
@@ -3671,6 +3929,10 @@ mod tests {
 //!   <button>Upload</button>
 //! </form>
 //! ```
+//!
+//! Each upload is stored at an address of its own, unless `dedupe` is on.
+//! With `dedupe`, identical files share one object, and a `delete` removes
+//! it for every holder: count the references before you delete.
 //!
 //! A page shows a stored file with a link it mints after its own policy
 //! allowed the read:
@@ -3687,17 +3949,27 @@ use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
 use brocanth::plugin_order::Order;
-use brocanth_storage::routes::{FileRoutes, RoutesConfig};
+use brocanth_middleware::CsrfConfig;
+use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage};
 
 /// Whether this request may store a file.
 ///
 /// It answers no, so nobody can upload until you say who may. The request
 /// has passed the session and the CSRF check by now; read the signed-in
-/// account from `state` and ask your policy. A "yes" for everyone is a free
-/// disk for every stranger.
-fn may_upload(_request: &Request, _state: &RequestState) -> bool {
+/// account from `state` and ask your policy, which may await a row. A "yes"
+/// for everyone is a free disk for every stranger.
+async fn may_upload(_request: &Request, _state: &RequestState) -> bool {
     false
+}
+
+/// `may_upload`, as the routes call it.
+struct Guard;
+
+impl UploadGuard for Guard {
+    fn may_upload<'a>(&'a self, request: &'a Request, state: &'a RequestState) -> GuardFuture<'a> {
+        Box::pin(may_upload(request, state))
+    }
 }
 
 /// What this plugin is built from.
@@ -3710,25 +3982,22 @@ fn may_upload(_request: &Request, _state: &RequestState) -> bool {
 pub struct Settings {
     /// The largest file accepted, in bytes.
     pub max_bytes: usize,
-    /// The form field that carries the CSRF token: `[csrf] field`.
-    pub csrf_field: String,
-    /// The header the CSRF check reads: `[csrf] header`.
-    pub csrf_header: String,
+    /// Store identical uploads once, at their content address.
+    pub dedupe: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_bytes: 2_097_152,
-            csrf_field: "_csrf_token".to_string(),
-            csrf_header: "x-csrf-token".to_string(),
+            dedupe: false,
         }
     }
 }
 
 pub struct StorageRoutes {
     settings: Settings,
-    /// Built at `configure`, from the store the storage plugin published.
+    /// Built at `after_config`, from the store the storage plugin published.
     routes: Option<FileRoutes>,
 }
 
@@ -3745,7 +4014,9 @@ impl Plugin for StorageRoutes {
         }
     }
 
-    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn after_config(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // After every plugin registered: the store and the tokens are the
+        // storage plugin's, the field and the header the CSRF plugin's.
         let store = lc.services().get::<Arc<dyn Storage>>().cloned();
         let tokens = lc.services().get::<FileTokens>().cloned();
         let (Some(store), Some(tokens)) = (store, tokens) else {
@@ -3754,16 +4025,29 @@ impl Plugin for StorageRoutes {
                  help: register the storage plugin before this one in src/app.rs",
             ));
         };
+        let Some(csrf) = lc.services().get::<CsrfConfig>() else {
+            return Err(PluginError::new(
+                "[storage_routes] no CSRF check is registered, so any site could post files here\n\
+                 help: register `brocanth_middleware::Csrf` with `plugin_hooking` in src/plugins/mod.rs",
+            ));
+        };
+        let Some(csrf_header) = csrf.header.clone() else {
+            return Err(PluginError::new(
+                "[storage_routes] [csrf] header is unset, so an upload form's token has no way to the check\n\
+                 help: set `header` under [csrf], such as \"x-csrf-token\"",
+            ));
+        };
         let config = RoutesConfig {
             path: crate::modules::storage_routes::MODULE.path.to_string(),
             max_bytes: self.settings.max_bytes,
             public: crate::modules::storage_routes::MODULE.public,
-            thumbnails: crate::modules::storage_routes::MODULE.thumbnails,
-            csrf_field: self.settings.csrf_field.clone(),
-            csrf_header: self.settings.csrf_header.clone(),
+            thumbnails: false,
+            dedupe: self.settings.dedupe,
+            csrf_field: csrf.field.clone(),
+            csrf_header,
             ..RoutesConfig::default()
         };
-        self.routes = Some(FileRoutes::new(store, tokens, config, may_upload)?);
+        self.routes = Some(FileRoutes::new(store, tokens, config, Guard)?);
         Ok(())
     }
 }
@@ -3850,12 +4134,14 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
-- `storage`  uploads on a local disk, addressed by content hash; no object store and no S3
-- `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token, thumbnails
+- `middleware`  proxy headers, method override, canonical host, content types, CORS
+- `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
+- `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
+- `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `i18n-routing`  a locale segment in the path (/fr/about), a redirect from a path without one
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage-thumbnails`, `input`, `client`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `robots`, `sitemap`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3969,6 +4255,17 @@ A model reaches the admin through `AdminConfig::resource(..)`: a
 the model's rows. A model with no resource answers 403. Never filter
 rows after a read; the row policy goes into the query.
 
+## Edge middleware
+
+`src/plugins/mod.rs` holds five commented registrations from
+`brocanth-middleware`. Each encodes a fact about the deployment --
+which proxy to trust, which host is canonical, which origins may call
+-- so each is turned on by somebody who knows that fact. Do not
+enable them as a set, and do not invent an address or an origin to
+make one compile. To turn one on, copy it to `build()` in
+`src/app.rs` and widen `type Core` by its hook families; the comment
+above the five shows the type.
+
 ## Translations
 
 Text a visitor reads lives in `locales/<tag>.toml`, one file per
@@ -4007,13 +4304,31 @@ remembers the choice in the cookie. A path under an `unprefixed`
 prefix of `[i18n]` (`/api`), the routes of other modules (the admin,
 the file routes) and a file such as `/robots.txt` keep no segment.
 
+## CSRF
+
+`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
+is a double-submit cookie: the hook mints a token, sets it as its own
+cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
+unless the request sends the same value back -- in the `_csrf_token`
+field, or in the `X-CSRF-Token` header.
+
+So every form that posts carries the hidden field. In a page, read
+the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
+write `token.hidden_field()` inside the `<form>`. For HTML this
+project did not template, `token.stamp_forms(html)` adds the field to
+every posting form; the admin uses it.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
 ## File routes
 
 Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
-answers no until you change it; ask the policy there, not in a page. A
-download needs a token: mint it with `FileStore::tokens` after your policy
-allowed the read, and never log the URL. Do not write an upload or
-download page beside these routes.
+answers no until you change it. It is async: ask the policy there, not in
+a page. A download needs a token: mint it with `FileStore::tokens` after
+your policy allowed the read, and never log the URL. Do not write an
+upload or download page beside these routes.
 
 ## Decisions that belong to the person
 
@@ -4043,7 +4358,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 1173593aa2248bf7 -->
+<!-- brocanth-digest: e107b4d1d98cc213 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -4055,7 +4370,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["config", "rsx", "admin", "storage", "storage-routes", "i18n", "i18n-routing"]
+enabled = ["config", "rsx", "admin", "middleware", "middleware-csrf", "storage", "storage-routes", "i18n", "i18n-routing"]
 
 [modules.config]
 version = "0.1.0"
@@ -4079,6 +4394,22 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
+adapted_to = ["config", "middleware-csrf"]
+
+[modules.middleware]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/middleware.rs"]
+config = []
+crates = ["brocanth-middleware"]
+adapted_to = []
+
+[modules.middleware-csrf]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/middleware_csrf.rs"]
+config = ["csrf"]
+crates = []
 adapted_to = ["config"]
 
 [modules.storage]
@@ -4113,4 +4444,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: 4fc8389b20a311c4
+# brocanth-digest: 632f8e8bdf353552

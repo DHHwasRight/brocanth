@@ -613,7 +613,8 @@ impl Module for StorageRoutes {
 }
 
 /// Thumbnails on the file routes: `storage-thumbnails`, a child of
-/// `storage-routes`.
+/// `storage` that needs `storage-routes`. Its key starts with its parent's,
+/// as every child key does.
 ///
 /// It writes no file. It turns on the `variants` feature, which links the
 /// image decoders, and `storage-routes` then answers `?thumb=` in the sizes
@@ -628,11 +629,14 @@ impl Module for StorageThumbnails {
             "?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders",
         )
         .category(Category::Middleware)
-        .part_of_but_off("storage-routes")
-        .because("it renders thumbnails for the file routes, so without them nothing asks for one")
+        .part_of_but_off("storage")
+        .because("it renders the stored images, which the parent brings")
         .asked_in("data", "")
+        .needs(
+            "storage-routes",
+            "the thumbnails answer `?thumb=` on the file routes, so without them nothing asks for one",
+        )
         .krate(Dep::brocanth("brocanth-storage").feature("variants"))
-        .after("storage-routes")
     }
 
     fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
