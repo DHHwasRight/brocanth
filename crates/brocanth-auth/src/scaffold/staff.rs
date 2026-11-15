@@ -50,7 +50,10 @@ impl Module for Superuser {
         )
         .adapts_to("jobs", "`createsuperuser` opens the accounts in Postgres")
         .adapts_to("cache", "`createsuperuser` opens the accounts in Postgres")
-        .adapts_to("db", "`createsuperuser` opens the accounts in Postgres")
+        .adapts_to(
+            "db",
+            "`createsuperuser` opens the accounts in Postgres, on the `[db]` database",
+        )
         .integration(
             "admin",
             "the admin's policy is StaffPolicy: a superuser passes every check, a role holder what its roles grant",
@@ -98,7 +101,7 @@ impl Module for Superuser {
         if project.has("commands") && postgres {
             s.file(
                 "src/commands/createsuperuser.rs",
-                command_rs(project.has("config")),
+                command_rs(project.has("config"), project.has("db")),
             );
             s.at(Slot::CommandsMod).line("pub mod createsuperuser;");
         }
@@ -298,16 +301,48 @@ impl Plugin for Superuser {
 }
 "##;
 
-fn command_rs(configured: bool) -> String {
-    COMMAND_RS.replace(
-        "@SETTINGS@",
-        if configured {
-            COMMAND_SETTINGS_FROM_CONFIG
-        } else {
-            COMMAND_SETTINGS_FROM_ENV
-        },
-    )
+/// `src/commands/createsuperuser.rs`. With `db`, `[auth]` has no `url`: the
+/// accounts are on the `db` plugin's database, so the command opens `[db]`
+/// as `migrate` does.
+fn command_rs(configured: bool, db: bool) -> String {
+    let settings = match (configured, db) {
+        (true, false) => COMMAND_SETTINGS_FROM_CONFIG,
+        (false, false) => COMMAND_SETTINGS_FROM_ENV,
+        (true, true) => COMMAND_DB_SETTINGS_FROM_CONFIG,
+        (false, true) => COMMAND_DB_SETTINGS_FROM_ENV,
+    };
+    let text = COMMAND_RS.replace("@SETTINGS@", settings);
+    if !db {
+        return text;
+    }
+    let mut text = text;
+    for (from, to) in COMMAND_DB_EDITS {
+        assert!(text.contains(from), "the superuser command lost `{from}`");
+        text = text.replacen(from, to, 1);
+    }
+    text
 }
+
+/// The command on `[db]`, not `[auth] url`.
+const COMMAND_DB_EDITS: &[(&str, &str)] = &[
+    (
+        "//! Opens the accounts at `[auth] url` and makes",
+        "//! Opens the accounts in the `[db]` database and makes",
+    ),
+    (
+        "use brocanth_command::{anyhow, clap, cmd, Command, Context};\n",
+        "use brocanth_command::{anyhow, clap, cmd, Command, Context};\nuse brocanth_db::{Db, DbConfig};\n",
+    ),
+    (
+        "        let (auth, superuser) = settings()?;\n",
+        "        let (database, superuser) = settings()?;\n",
+    ),
+    (
+        "            let store = Arc::new(PgStore::connect(&auth.url).await?);\n",
+        "            let db = Db::connect(&database).await?;\n\
+         \x20           let store = Arc::new(PgStore::from_pool(db.pool().clone()));\n",
+    ),
+];
 
 const COMMAND_RS: &str = r#"//! `createsuperuser` -- an operator account that passes every check of the
 //! admin.
@@ -392,6 +427,33 @@ fn settings() -> anyhow::Result<(
     Ok((
         crate::plugins::auth_settings(&[]).map_err(anyhow::Error::msg)?,
         crate::plugins::superuser_settings(&[]).map_err(anyhow::Error::msg)?,
+    ))
+}
+"#;
+
+const COMMAND_DB_SETTINGS_FROM_CONFIG: &str = r#"
+/// `[db]` and `[superuser]`, through the loader the server uses.
+fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
+    let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
+    Ok((
+        loaded
+            .section::<crate::plugins::db::Settings>("db")?
+            .config(),
+        loaded.section("superuser")?,
+    ))
+}
+"#;
+
+const COMMAND_DB_SETTINGS_FROM_ENV: &str = r#"
+/// `[db]` and `[superuser]` as the server reads them without a file: the
+/// defaults, then the variables, then the flags.
+fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
+    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
+    Ok((
+        crate::plugins::db_settings(&given)
+            .map_err(anyhow::Error::msg)?
+            .config(),
+        crate::plugins::superuser_settings(&given).map_err(anyhow::Error::msg)?,
     ))
 }
 "#;

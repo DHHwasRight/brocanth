@@ -10788,7 +10788,7 @@ impl Command for Check {
 //! `createsuperuser` -- an operator account that passes every check of the
 //! admin.
 //!
-//! Opens the accounts at `[auth] url` and makes the account with the
+//! Opens the accounts in the `[db]` database and makes the account with the
 //! address a superuser. It creates the account first when there is none,
 //! with the password in the variable that `[superuser] password_env` names.
 //! An account that exists keeps its password. Run it twice and nothing
@@ -10803,6 +10803,7 @@ use brocanth_auth::{
     ensure_superuser, Accounts, Passwords, PgStore, SuperuserOutcome, SystemClock,
 };
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_db::{Db, DbConfig};
 
 /// Make the account with this address a superuser, creating it if needed
 #[cmd]
@@ -10816,14 +10817,15 @@ pub struct Createsuperuser {
 impl Command for Createsuperuser {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
         std::env::set_current_dir(ctx.root())?;
-        let (auth, superuser) = settings()?;
+        let (database, superuser) = settings()?;
         let name = superuser.password_env;
         let password = std::env::var(&name).unwrap_or_default();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let outcome = runtime.block_on(async {
-            let store = Arc::new(PgStore::connect(&auth.url).await?);
+            let db = Db::connect(&database).await?;
+            let store = Arc::new(PgStore::from_pool(db.pool().clone()));
             store.migrate().await?;
             let accounts = Accounts::new(
                 Arc::clone(&store),
@@ -10846,13 +10848,15 @@ impl Command for Createsuperuser {
     }
 }
 
-/// `[auth]` and `[superuser]`, through the loader the server uses.
-fn settings() -> anyhow::Result<(
-    crate::plugins::auth::Settings,
-    crate::plugins::superuser::Settings,
-)> {
+/// `[db]` and `[superuser]`, through the loader the server uses.
+fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
     let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok((loaded.section("auth")?, loaded.section("superuser")?))
+    Ok((
+        loaded
+            .section::<crate::plugins::db::Settings>("db")?
+            .config(),
+        loaded.section("superuser")?,
+    ))
 }
 ===== src/commands/css.rs =====
 //! `css` -- build assets/css/site.css from assets/css/_tailwind.css.
