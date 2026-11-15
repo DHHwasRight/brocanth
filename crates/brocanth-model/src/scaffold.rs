@@ -219,7 +219,8 @@ pub fn migrator_file() -> String {
     EMPTY_MIGRATOR.to_string()
 }
 
-const EMPTY_MIGRATOR: &str = "//! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
+const EMPTY_MIGRATOR: &str =
+    "//! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
 //! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
 //!
 //! The migrations in this directory, oldest first.

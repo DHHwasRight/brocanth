@@ -65,4 +65,4 @@ unknown key, and the application refuses to start.
 
 - [Migrations](../migrations.md)
 - [brocanth-model](../../crates/brocanth-model/README.md)
-- Source: [`crates/brocanth-cli/src/modules/model.rs`](../../crates/brocanth-cli/src/modules/model.rs)
+- Source: [`crates/brocanth-model/src/scaffold.rs`](../../crates/brocanth-model/src/scaffold.rs)

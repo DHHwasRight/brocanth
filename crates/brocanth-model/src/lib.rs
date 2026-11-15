@@ -123,14 +123,14 @@ pub mod prelude;
 pub mod probe;
 #[cfg(feature = "runtime")]
 pub mod registry;
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
 #[cfg(feature = "runtime")]
 pub mod testing;
 #[cfg(feature = "runtime")]
 pub mod validation;
 #[cfg(feature = "runtime")]
 pub mod validators;
-#[cfg(feature = "scaffold")]
-pub mod scaffold;
 
 #[cfg(feature = "runtime")]
 mod dirty;
