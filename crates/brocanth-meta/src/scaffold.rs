@@ -43,6 +43,10 @@ impl Module for PageMeta {
             "rsx",
             "a test reads the tags the root layout writes on the home page",
         )
+        .adapts_to(
+            "sitemap",
+            "with a config file, an unset `base_url` is `[sitemap] base_url`, so the two never disagree",
+        )
         // The export renders every page through the layouts, so a static
         // site takes it.
         .outside_runtime()
@@ -91,10 +95,15 @@ fn settings(project: &Project) -> Vec<Setting> {
         .optional(),
         Setting::text(
             "base_url",
-            "https://example.com",
+            "http://localhost:3000",
             "The site's address, scheme and host. A canonical URL and og:url need it.",
         )
-        .note("Unset, a page has no canonical URL: a relative one is worse than none.")
+        .note(if project.has("sitemap") && project.has("config") {
+            "Unset, it is [sitemap] base_url, so a canonical URL and a sitemap <loc>\n\
+             name one site."
+        } else {
+            "Unset, a page has no canonical URL: a relative one is worse than none."
+        })
         .optional(),
         Setting::text(
             "description",
@@ -159,9 +168,12 @@ impl Ctx {
 }
 "#;
 
-const HEAD_LANG: &str = r#"        if let Some(current) = self.state.get::<brocanth_i18n::Current>() {
-            head = head.lang(current.tag());
-        }
+const HEAD_LANG: &str = r#"        // The locale the `i18n` plugin chose. This compiles only while that
+        // plugin is in the project, so removing it is an error here and not
+        // a page with no `lang`.
+        head = head.lang(brocanth_i18n::Locales::tag(crate::plugins::i18n::locale(
+            self,
+        )));
 "#;
 
 const HEAD_ALTERNATES: &str = r#"        // One URL per locale: the canonical one keeps the segment, and each
@@ -181,7 +193,20 @@ fn plugin_rs(project: &Project) -> String {
     } else {
         String::new()
     };
+    let fallback = project.has("sitemap") && project.has("config");
     PLUGIN_RS
+        .replace(
+            "@LC@",
+            if fallback {
+                SITEMAP_FALLBACK
+            } else {
+                "_lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {\n"
+            },
+        )
+        .replace(
+            "@SITEMAP_ADDRESS@",
+            if fallback { SITEMAP_ADDRESS } else { "" },
+        )
         .replace("@DERIVE@", &derive)
         .replace("@NOTE@", &note)
         .replace("@NAME@", &format!("{:?}", project.title))
@@ -205,6 +230,31 @@ fn app_test(project: &Project) -> String {
         .replace("@TAG@", canonical)
         .replace("@NAME@", project.title)
 }
+
+/// `configure` when `[sitemap]` gives the address `[meta]` left out.
+const SITEMAP_FALLBACK: &str = r#"lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // `[meta] base_url` unset: the address `[sitemap]` lists the pages
+        // under, so a canonical URL and a sitemap <loc> name one site.
+        if !self.has_base_url {
+            if let Some(url) = sitemap_base_url(lc) {
+                self.site = std::mem::take(&mut self.site).base_url(url);
+            }
+        }
+"#;
+
+/// The reader `SITEMAP_FALLBACK` calls.
+const SITEMAP_ADDRESS: &str = r#"
+/// `[sitemap] base_url`, from the configuration the config plugin loaded.
+fn sitemap_base_url(lc: &Lifecycle<'_>) -> Option<String> {
+    #[derive(Default, serde::Deserialize)]
+    struct Address {
+        base_url: Option<String>,
+    }
+    let effective = brocanth_config::effective_of(lc.services())?;
+    let address: Address = effective.config().section("sitemap").ok()?;
+    address.base_url.filter(|url| !url.is_empty())
+}
+"#;
 
 const PLUGIN_RS: &str = r#"//! Written by `brocanth`. What every page says about itself in `<head>`.
 //!
@@ -260,6 +310,9 @@ impl Default for Settings {
 /// Puts the site's metadata on the context, where `ctx.head()` reads it.
 pub struct Meta {
     site: Site,
+    /// Whether `[meta]` named the site's address itself.
+    #[allow(dead_code)]
+    has_base_url: bool,
 }
 
 impl Plugin for Meta {
@@ -273,6 +326,7 @@ impl Plugin for Meta {
         if let Some(template) = set(config.title_template) {
             site = site.title_template(template);
         }
+        let has_base_url = config.base_url.as_ref().is_some_and(|v| !v.is_empty());
         if let Some(url) = set(config.base_url) {
             site = site.base_url(url);
         }
@@ -285,13 +339,12 @@ impl Plugin for Meta {
         if let Some(handle) = set(config.twitter) {
             site = site.twitter(handle);
         }
-        Self { site }
+        Self { site, has_base_url }
     }
 
     /// A template with no `%s` or a base URL with no scheme stops the
     /// start: every page would carry the wrong tag.
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        self.site
+    fn configure(&mut self, @LC@        self.site
             .check()
             .map_err(|why| PluginError::new(format!("[meta] {why}")))
     }
@@ -300,7 +353,7 @@ impl Plugin for Meta {
         cx.insert(self.site.clone());
     }
 }
-
+@SITEMAP_ADDRESS@
 #[cfg(test)]
 mod tests {
     use brocanth::routing::{Params, Verb};

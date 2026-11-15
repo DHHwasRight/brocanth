@@ -2197,12 +2197,24 @@ pub const MODULE: Module = Module {
 //!    `Mailbox::recv_blocking`. This is how a cache invalidator or an audit
 //!    log is written, and it is the reason to have a broker before there is a
 //!    transport at all.
-//! 3. **Long polling.** Keep the `Client` in the session; each request calls
+//! 3. **Long polling.** Keep each session's `Client` on the server, in a map
+//!    from session id to `Client` with an idle timeout (a `Client` holds the
+//!    broker, so it cannot go into a cookie); each request calls
 //!    `Mailbox::recv_timeout` for a few seconds, then `Mailbox::drain`, and
 //!    returns the frames as one finished body. Every hook runs exactly as
 //!    specified. It costs a request per interval and a little latency.
 //! 4. **Nothing.** The index costs what it holds, and an application that
 //!    publishes without subscribers pays for a map lookup that finds no one.
+//!
+//! # One process
+//!
+//! The broker lives in this process, and so do its subscribers. Two
+//! instances behind a load balancer do not see each other's writes: a
+//! browser connected to one hears nothing of a write handled by the other.
+//! `brocanth-realtime`'s `listen-notify` feature has the codec and the sink
+//! for Postgres `LISTEN/NOTIFY`; this file does not wire it. The frame ids
+//! start at the clock, so a browser that reconnects to a new process is told
+//! `lagged` rather than trusted to have missed nothing.
 
 use std::sync::Arc;
 
@@ -2311,6 +2323,9 @@ impl Plugin for Realtime {
                     queue: self.settings.queue,
                     overflow,
                 })
+                // An id from an earlier process never equals one from this
+                // process, so a reconnect across a restart reads `lagged`.
+                .frame_ids_from_clock()
                 .build(),
         );
         Ok(())

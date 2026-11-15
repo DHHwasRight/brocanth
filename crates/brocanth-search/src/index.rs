@@ -66,9 +66,15 @@ pub struct Statement {
 pub struct SearchQuery {
     /// The ranked page.
     pub select: Statement,
-    /// `count(*)` over the same `WHERE`.
+    /// `count(*)` over the same `WHERE`, stopped at [`MAX_COUNT`] + 1 rows.
     pub count: Statement,
 }
+
+/// The most matches a search counts. A count past it reads as "more than
+/// this", so a common word on a large table costs at most this many rows
+/// and not every match. The pages past it are not reachable; a visitor who
+/// needs them needs a narrower term.
+pub const MAX_COUNT: u64 = 1000;
 
 /// The longest search term this crate sends, in characters. A longer term
 /// is cut, not refused: nobody types 200 characters into a search box, and
@@ -147,12 +153,40 @@ impl<E: Entity> Index<E> {
     /// [`Index::trigram`]. It is a trusted extension since Postgres 13, so
     /// the database owner can create it.
     ///
+    /// # Locks
+    ///
+    /// The `ALTER TABLE` adds a stored generated column, so Postgres
+    /// rewrites every row under an `ACCESS EXCLUSIVE` lock: no read and no
+    /// write until it ends. Each `CREATE INDEX` then blocks writes while it
+    /// builds. On a new or a small table that is a moment. On a large table
+    /// that takes traffic, run the `ALTER` in a quiet window and build the
+    /// indexes with [`Index::migration_concurrently`].
+    ///
     /// # Errors
     ///
     /// [`SearchError::NoSource`] when no column was declared, and
     /// [`SearchError::Compile`] for a column name that is not a bare SQL
     /// identifier.
     pub fn migration(&self) -> Result<Migration, SearchError> {
+        self.migration_with("")
+    }
+
+    /// [`Index::migration`], with each index built by
+    /// `CREATE INDEX CONCURRENTLY`, so the build does not block writes.
+    ///
+    /// `CONCURRENTLY` cannot run inside a transaction: apply these
+    /// statements one at a time, outside one (a `-- no-transaction` file, or
+    /// by hand). The `ALTER TABLE` still rewrites the table under an
+    /// `ACCESS EXCLUSIVE` lock; see [`Index::migration`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Index::migration`].
+    pub fn migration_concurrently(&self) -> Result<Migration, SearchError> {
+        self.migration_with("CONCURRENTLY ")
+    }
+
+    fn migration_with(&self, concurrently: &str) -> Result<Migration, SearchError> {
         let table = E::TABLE.as_str();
         let column = self.column.as_str();
         let mut up = String::new();
@@ -164,17 +198,21 @@ impl<E: Entity> Index<E> {
             self.vector()?
         ));
         up.push_str(&format!(
-            "CREATE INDEX \"{table}_{column}_idx\" ON \"{table}\" USING gin (\"{column}\");\n"
+            "CREATE INDEX {concurrently}\"{table}_{column}_idx\" ON \"{table}\" USING gin (\"{column}\");\n"
         ));
         let mut down = String::new();
         for source in &self.trigram {
             let name = source.ident()?.as_str();
             up.push_str(&format!(
-                "CREATE INDEX \"{table}_{name}_trgm_idx\" ON \"{table}\" USING gin (\"{name}\" gin_trgm_ops);\n"
+                "CREATE INDEX {concurrently}\"{table}_{name}_trgm_idx\" ON \"{table}\" USING gin (\"{name}\" gin_trgm_ops);\n"
             ));
-            down.push_str(&format!("DROP INDEX \"{table}_{name}_trgm_idx\";\n"));
+            down.push_str(&format!(
+                "DROP INDEX {concurrently}\"{table}_{name}_trgm_idx\";\n"
+            ));
         }
-        down.push_str(&format!("DROP INDEX \"{table}_{column}_idx\";\n"));
+        down.push_str(&format!(
+            "DROP INDEX {concurrently}\"{table}_{column}_idx\";\n"
+        ));
         down.push_str(&format!(
             "ALTER TABLE \"{table}\" DROP COLUMN \"{column}\";\n"
         ));
@@ -262,7 +300,12 @@ impl<E: Entity> Index<E> {
              ORDER BY search_rank DESC, \"{table}\".\"{key}\" ASC LIMIT {limit} OFFSET {offset}",
             columns.join(", ")
         );
-        let count = format!("SELECT count(*) FROM \"{table}\" WHERE {filter}");
+        // Capped: a common word must not make every search read every
+        // match. One past the cap says "more".
+        let cap = MAX_COUNT + 1;
+        let count = format!(
+            "SELECT count(*) FROM (SELECT 1 FROM \"{table}\" WHERE {filter} LIMIT {cap}) AS capped"
+        );
         Ok(SearchQuery {
             select: Statement {
                 sql: select,

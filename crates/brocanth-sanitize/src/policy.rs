@@ -71,6 +71,34 @@ pub struct Policy {
     builder: ammonia::Builder<'static>,
 }
 
+/// URL attributes ammonia does not check the scheme of.
+const UNCHECKED_URLS: &[&str] = &[
+    "cite",
+    "srcset",
+    "formaction",
+    "action",
+    "poster",
+    "background",
+    "data",
+    "ping",
+    "longdesc",
+    "xlink:href",
+];
+
+/// Why [`Policy::allow_attributes`] refuses `attribute`, or `None`.
+fn refused(attribute: &str) -> Option<&'static str> {
+    let lower = attribute.to_ascii_lowercase();
+    if lower.starts_with("on") {
+        Some("is an event handler, and its value runs as script")
+    } else if matches!(lower.as_str(), "style" | "class" | "id") {
+        Some("lets the writer restyle the page, fake its interface or clobber a global name")
+    } else if UNCHECKED_URLS.contains(&lower.as_str()) {
+        Some("is a URL ammonia does not check, so a `javascript:` value would pass")
+    } else {
+        None
+    }
+}
+
 /// A builder that keeps nothing.
 ///
 /// `ammonia::Builder::empty()` empties the tags only. It keeps ammonia's
@@ -161,10 +189,21 @@ impl Policy {
     ///
     /// # Panics
     ///
-    /// On an `on*` attribute (`onclick`, `onerror`, ...). ammonia keeps any
-    /// attribute it is told to keep, handlers too, and a handler runs the
-    /// value as script. A policy is built once at start-up, so the mistake
-    /// stops the program before it serves a page.
+    /// On an attribute no policy here keeps, so the promise at the top of
+    /// this type holds for every policy built with this method:
+    ///
+    /// - an `on*` attribute (`onclick`, `onerror`, ...): ammonia keeps any
+    ///   attribute it is told to keep, handlers too, and a handler runs the
+    ///   value as script;
+    /// - `style`, `class` or `id`: CSS injection, a fake interface, DOM
+    ///   clobbering;
+    /// - a URL attribute ammonia does not check the scheme of (`cite`,
+    ///   `srcset`, `formaction`, `action`, `poster`, `background`, `data`,
+    ///   `ping`, `longdesc`, `xlink:href`): a `javascript:` value would pass.
+    ///
+    /// A policy is built once at start-up, so the mistake stops the program
+    /// before it serves a page. [`Policy::from_builder`] takes any ammonia
+    /// builder and checks nothing.
     #[must_use]
     pub fn allow_attributes(
         mut self,
@@ -172,15 +211,13 @@ impl Policy {
         attributes: impl IntoIterator<Item = &'static str>,
     ) -> Self {
         let attributes: Vec<&'static str> = attributes.into_iter().collect();
-        if let Some(handler) = attributes
-            .iter()
-            .find(|a| a.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("on")))
-        {
-            panic!(
-                "Policy::allow_attributes: `{handler}` on <{tag}> is an event handler, \
-                 and its value runs as script\n\
-                 help: remove `{handler}` from the list; a policy never keeps an `on*` attribute"
-            );
+        for attribute in &attributes {
+            if let Some(why) = refused(attribute) {
+                panic!(
+                    "Policy::allow_attributes: `{attribute}` on <{tag}> {why}\n\
+                     help: remove `{attribute}` from the list; no policy here keeps it"
+                );
+            }
         }
         self.builder.add_tag_attributes(tag, attributes);
         self
@@ -248,6 +285,24 @@ mod tests {
     #[should_panic(expected = "event handler")]
     fn a_handler_in_upper_case_cannot_be_allowed_either() {
         let _ = Policy::comment().allow_attributes("img", ["OnError"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "help: remove `style`")]
+    fn style_cannot_be_allowed() {
+        let _ = Policy::comment().allow_attributes("p", ["style"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "help: remove `Class`")]
+    fn class_cannot_be_allowed() {
+        let _ = Policy::comment().allow_attributes("p", ["Class"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a URL ammonia does not check")]
+    fn an_unchecked_url_attribute_cannot_be_allowed() {
+        let _ = Policy::comment().allow_attributes("blockquote", ["cite"]);
     }
 
     #[test]

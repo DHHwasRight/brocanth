@@ -1,6 +1,7 @@
 //! Turning parsed arguments into one request.
 
 use brocanth::routing::Verb;
+use brocanth::routing_path::{encode_catch_all, encode_segment};
 use brocanth_input::Described;
 use clap::ArgMatches;
 use zod::node::{Field, Node};
@@ -29,29 +30,48 @@ pub struct Call {
 /// A message ready to print: an operation nobody matched, a path
 /// parameter with no value, or a pair that is not `name=value`.
 pub fn plan(routes: &[Described], matches: &ArgMatches) -> Result<Call, String> {
-    let (name, sub) = matches
-        .subcommand()
-        .ok_or_else(|| "no operation was named".to_string())?;
+    let (name, sub) = matches.subcommand().ok_or_else(|| {
+        "no operation was named\nhelp: run `--help` to list the operations".to_string()
+    })?;
     let route = routes
         .iter()
         .find(|route| route.command() == name)
-        .ok_or_else(|| format!("`{name}` is not an operation of this application"))?;
+        .ok_or_else(|| {
+            format!(
+                "`{name}` is not an operation of this application\n\
+                 help: run `--help` to list the operations"
+            )
+        })?;
 
     let base = matches
         .get_one::<String>("base")
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_default();
 
+    // Each value is percent-encoded, so `--id 'a/b?c'` stays one segment
+    // and cannot add a path or a query. A catch-all keeps its slashes.
     let path = route
-        .fill(|parameter| sub.get_one::<String>(&parameter.replace('_', "-")).cloned())
-        .map_err(|missing| format!("`--{missing}` is in the path and was not given"))?;
+        .fill(|parameter| {
+            let value = sub.get_one::<String>(&parameter.replace('_', "-"))?;
+            Some(if route.path.contains(&format!("{{*{parameter}}}")) {
+                encode_catch_all(value)
+            } else {
+                encode_segment(value)
+            })
+        })
+        .map_err(|missing| {
+            format!(
+                "`--{missing}` is in the path and was not given\n\
+                 help: write `--{missing} <VALUE>`"
+            )
+        })?;
 
     let mut url = format!("{base}{path}");
     let query = pairs(matches, "query", '=')?;
     if !query.is_empty() {
         let written: Vec<String> = query
             .iter()
-            .map(|(name, value)| format!("{}={}", escape(name), escape(value)))
+            .map(|(name, value)| format!("{}={}", encode_segment(name), encode_segment(value)))
             .collect();
         url.push('?');
         url.push_str(&written.join("&"));
@@ -83,6 +103,10 @@ fn body_of(route: &Described, sub: &ArgMatches) -> Option<String> {
     let object = route.takes.as_ref().and_then(Node::object)?;
     let mut fields: Vec<(String, Value)> = Vec::new();
     for field in &object.fields {
+        // No flag of its own, so a value under its id is another flag's.
+        if crate::clashes(route, field) {
+            continue;
+        }
         if let Some(value) = value_of(field, sub) {
             fields.push((field.name.to_string(), value));
         }
@@ -115,11 +139,13 @@ fn value_of(field: &Field, sub: &ArgMatches) -> Option<Value> {
             .ok()
             .flatten()
             .map(|n| Value::Real(*n)),
-        Node::List { .. } => sub
-            .try_get_many::<String>(&name)
-            .ok()
-            .flatten()
-            .map(|values| Value::List(values.map(|v| Value::Text(v.clone())).collect())),
+        // Each item as the value parser `argument` gave it.
+        Node::List { item, .. } => match item.bare() {
+            Node::Int(_) => many(sub, &name, |n: &i64| Value::Int(*n)),
+            Node::Real(_) => many(sub, &name, |n: &f64| Value::Real(*n)),
+            Node::Bool => many(sub, &name, |b: &bool| Value::Bool(*b)),
+            _ => many(sub, &name, |text: &String| Value::Text(text.clone())),
+        },
         Node::Object(_) => None,
         _ => sub
             .try_get_one::<String>(&name)
@@ -127,6 +153,18 @@ fn value_of(field: &Field, sub: &ArgMatches) -> Option<Value> {
             .flatten()
             .map(|text| Value::Text(text.clone())),
     }
+}
+
+/// Every value of a repeated flag, as JSON values.
+fn many<T: Clone + Send + Sync + 'static>(
+    sub: &ArgMatches,
+    name: &str,
+    each: impl Fn(&T) -> Value,
+) -> Option<Value> {
+    sub.try_get_many::<T>(name)
+        .ok()
+        .flatten()
+        .map(|values| Value::List(values.map(each).collect()))
 }
 
 /// `name=value` or `name:value`, repeated.
@@ -138,25 +176,14 @@ fn pairs(matches: &ArgMatches, id: &str, between: char) -> Result<Vec<(String, S
         .map(|raw| {
             raw.split_once(between)
                 .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-                .ok_or_else(|| format!("`{raw}` is not `name{between}value`"))
+                .ok_or_else(|| {
+                    format!(
+                        "`{raw}` is not `name{between}value`\n\
+                         help: write `--{id} name{between}value`"
+                    )
+                })
         })
         .collect()
-}
-
-/// Percent encoding for a query value, by the rule that everything not
-/// explicitly safe is escaped. Short, because getting this wrong sends
-/// somebody's `&` as a separator.
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char);
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -305,20 +332,105 @@ mod tests {
     }
 
     #[test]
-    fn whole_json_replaces_the_flags() {
+    fn whole_json_replaces_the_required_flags() {
         let call = call(&[
             "blog",
             "signup-post",
-            "--handle",
-            "ada-lovelace",
-            "--age",
-            "36",
-            "--tags",
-            "x",
             "--body",
             r#"{"handle":"someone-else"}"#,
         ]);
         assert_eq!(call.body.as_deref(), Some(r#"{"handle":"someone-else"}"#));
+    }
+
+    #[test]
+    fn whole_json_and_a_field_flag_do_not_mix() {
+        let routes = routes();
+        let error = command("blog", &routes)
+            .try_get_matches_from([
+                "blog",
+                "signup-post",
+                "--handle",
+                "ada-lovelace",
+                "--body",
+                r#"{"handle":"someone-else"}"#,
+            ])
+            .expect_err("one body, not two");
+        assert!(error.to_string().contains("--body"), "{error}");
+    }
+
+    #[test]
+    fn a_path_value_is_encoded_so_it_stays_one_segment() {
+        let call = call(&["blog", "users-id-get", "--id", "7/edit?x=1 y"]);
+        assert_eq!(call.url, "http://127.0.0.1:3000/users/7%2Fedit%3Fx%3D1%20y");
+    }
+
+    #[test]
+    fn a_catch_all_value_keeps_its_slashes() {
+        let routes = vec![Described {
+            path: "/files/{*rest}",
+            verb: Verb::Get,
+            takes: None,
+            gives: None,
+        }];
+        let matches = command("blog", &routes)
+            .try_get_matches_from(["blog", "files-rest-get", "--rest", "a b/c"])
+            .expect("parses");
+        let call = plan(&routes, &matches).expect("plans");
+        assert_eq!(call.url, "http://127.0.0.1:3000/files/a%20b/c");
+    }
+
+    #[test]
+    fn a_list_of_numbers_is_sent_as_numbers() {
+        #[derive(Entry)]
+        struct Pick {
+            ids: Vec<i64>,
+        }
+        let routes = vec![Described {
+            path: "/pick",
+            verb: Verb::Post,
+            takes: Some(Pick::describe()),
+            gives: None,
+        }];
+        let matches = command("blog", &routes)
+            .try_get_matches_from(["blog", "pick-post", "--ids", "1", "--ids", "2"])
+            .expect("parses");
+        let call = plan(&routes, &matches).expect("plans");
+        assert_eq!(call.body.as_deref(), Some(r#"{"ids":[1,2]}"#));
+    }
+
+    #[test]
+    fn a_field_named_like_a_path_parameter_or_a_flag_goes_through_body() {
+        #[derive(Entry)]
+        struct Comment {
+            id: i64,
+            body: String,
+            title: String,
+        }
+        let routes = vec![Described {
+            path: "/posts/{id}",
+            verb: Verb::Put,
+            takes: Some(Comment::describe()),
+            gives: None,
+        }];
+        let tree = command("blog", &routes);
+        // No duplicate id: clap's debug assertions accept the tree.
+        tree.clone().debug_assert();
+        let matches = tree
+            .try_get_matches_from(["blog", "posts-id-put", "--id", "7", "--title", "Hi"])
+            .expect("parses");
+        let call = plan(&routes, &matches).expect("plans");
+        assert_eq!(call.url, "http://127.0.0.1:3000/posts/7");
+        assert_eq!(call.body.as_deref(), Some(r#"{"title":"Hi"}"#));
+    }
+
+    #[test]
+    fn the_default_base_is_the_callers() {
+        let routes = routes();
+        let matches = crate::command_at("blog", &routes, "http://127.0.0.1:8080")
+            .try_get_matches_from(["blog", "users-id-get", "--id", "7"])
+            .expect("parses");
+        let call = plan(&routes, &matches).expect("plans");
+        assert_eq!(call.url, "http://127.0.0.1:8080/users/7");
     }
 
     #[test]
@@ -335,6 +447,7 @@ mod tests {
             .expect("clap takes any string");
         let error = plan(&routes, &matches).expect_err("but this is not a header");
         assert!(error.contains("nonsense"), "{error}");
+        assert!(error.contains("\nhelp: "), "{error}");
     }
 
     #[test]

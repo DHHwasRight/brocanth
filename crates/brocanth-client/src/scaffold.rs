@@ -40,8 +40,12 @@ impl Module for Client {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.file("src/commands/api.rs", API_RS);
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let addr_var = format!("{}_ADDR", project.ident().to_uppercase());
+        s.file(
+            "src/commands/api.rs",
+            API_RS.replace("{ADDR_VAR}", &addr_var),
+        );
         s.at(Slot::CommandsMod).line("pub mod api;");
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
@@ -60,6 +64,9 @@ const API_RS: &str = r##"//! This application, from the outside.
 //! $ cargo run -- api signup-post --handle ada-lovelace --age 36
 //! {"id":"0191a3f0-0000-7000-8000-000000000000","handle":"ada-lovelace"}
 //! ```
+//!
+//! The client calls the address `serve` listens on: `${ADDR_VAR}`, or
+//! `127.0.0.1:3000`. `--base <URL>` reaches a server anywhere else.
 //!
 //! The flags come from the request body's own schema, and their help text
 //! is the sentence each field carries. Nothing here re-checks a rule: the
@@ -85,8 +92,10 @@ impl Command for Api {
         let mut argv: Vec<std::ffi::OsString> = vec!["api".into()];
         argv.extend(self.rest.into_iter().map(std::ffi::OsString::from));
 
-        let answered =
-            brocanth_client::run("api", &routes, &wire, argv).map_err(anyhow::Error::msg)?;
+        // The same address `serve` listens on, so the two agree without a flag.
+        let base = format!("http://{}", crate::app::default_addr());
+        let answered = brocanth_client::run_at("api", &routes, &wire, &base, argv)
+            .map_err(anyhow::Error::msg)?;
 
         println!("{}", answered.body);
         // The status is the exit code, so `api ... && something` means what

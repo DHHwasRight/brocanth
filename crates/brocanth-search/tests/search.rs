@@ -27,7 +27,7 @@ fn the_rule_comes_first_and_the_term_is_a_bind() {
         .unwrap();
     assert!(
         query.count.sql.starts_with(
-            "SELECT count(*) FROM \"search_documents\" WHERE (\"search_documents\".\"kind\" = $1) AND ("
+            "SELECT count(*) FROM (SELECT 1 FROM \"search_documents\" WHERE (\"search_documents\".\"kind\" = $1) AND ("
         ),
         "{}",
         query.count.sql
@@ -55,6 +55,43 @@ fn the_rule_comes_first_and_the_term_is_a_bind() {
         ]
     );
     assert_eq!(query.select.binds, query.count.binds, "one WHERE for both");
+}
+
+#[test]
+fn the_count_stops_one_past_the_cap() {
+    let query = documents::index()
+        .query(&condition(Pred::Always), "postgres", 0, 20)
+        .unwrap();
+    assert!(
+        query.count.sql.ends_with(&format!(
+            "LIMIT {}) AS capped",
+            brocanth_search::MAX_COUNT + 1
+        )),
+        "{}",
+        query.count.sql
+    );
+}
+
+#[test]
+fn the_concurrent_migration_builds_each_index_without_blocking_writes() {
+    let plain = documents::index().migration().unwrap();
+    let concurrent = documents::index().migration_concurrently().unwrap();
+    assert!(!plain.up.contains("CONCURRENTLY"));
+    assert_eq!(
+        concurrent.up.matches("CREATE INDEX CONCURRENTLY").count(),
+        2
+    );
+    assert_eq!(
+        concurrent.down.matches("DROP INDEX CONCURRENTLY").count(),
+        2
+    );
+    assert_eq!(
+        plain
+            .up
+            .replace("CREATE INDEX ", "CREATE INDEX CONCURRENTLY "),
+        concurrent.up,
+        "the same statements otherwise"
+    );
 }
 
 #[test]
@@ -297,6 +334,35 @@ async fn the_rule_narrows_the_hits_and_the_total() {
         .await
         .unwrap();
     assert!(empty.items.is_empty(), "an empty term finds nothing");
+    scoped.drop_schema().await;
+}
+
+#[tokio::test]
+async fn upsert_refuses_a_script_url_and_runs_in_the_callers_transaction() {
+    let Some(scoped) = scoped().await else { return };
+    let refused = documents::upsert(&scoped.db, "post", "9", "x", "y", "javascript:alert(1)")
+        .await
+        .expect_err("a script URL");
+    assert!(
+        matches!(refused, SearchError::UnsafeUrl { .. }),
+        "{refused}"
+    );
+    assert!(refused.to_string().contains("\nhelp: "), "{refused}");
+
+    let mut tx = scoped.db.begin().await.expect("begin");
+    documents::upsert(&mut tx, "post", "9", "Rolled back", "postgres", "/post/9")
+        .await
+        .expect("upsert in the transaction");
+    tx.rollback().await.expect("rollback");
+    let hits = documents::index()
+        .search::<Hit>(&scoped.db, &condition(Pred::Always), "postgres", 1, 20)
+        .await
+        .unwrap();
+    assert!(
+        hits.items.is_empty(),
+        "the row rolled back with the transaction"
+    );
+    assert!(!hits.more);
     scoped.drop_schema().await;
 }
 

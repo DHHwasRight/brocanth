@@ -21,6 +21,10 @@ impl Module for Sanitize {
         .category(Category::Renderer)
         .asked_in("pages", "Show HTML that users write, cleaned")
         .krate(Dep::brocanth("brocanth-sanitize").feature_with("rsx", "rsx"))
+        .adapts_to(
+            "rsx",
+            "`SafeHtml` is an rsx template, so a page writes it with `{! value }`",
+        )
         // A library a page calls. A static export renders pages too, and a
         // page that shows Markdown from a file needs it there as much.
         .outside_runtime()
@@ -30,8 +34,14 @@ impl Module for Sanitize {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
-        s.at(Slot::AgentsSections).block(AGENTS.to_string());
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let write = if project.has("rsx") {
+            AGENTS_RSX
+        } else {
+            AGENTS_STRING
+        };
+        s.at(Slot::AgentsSections)
+            .block(AGENTS.replace("@WRITE@", write));
     }
 }
 
@@ -39,14 +49,21 @@ impl Module for Sanitize {
 const AGENTS: &str = "\n\
     ## HTML from users\n\
     \n\
-    HTML a user wrote reaches a template only as a\n\
+    HTML a user wrote reaches a page only as a\n\
     `brocanth_sanitize::SafeHtml`. Make one with a policy:\n\
     `brocanth_sanitize::comment(&row.body)` for a comment,\n\
     `brocanth_sanitize::rich_text(&row.body)` for editor output, or a\n\
-    `Policy` built once in a `static` for anything else. Write it with\n\
-    `{! value }`.\n\
+    `Policy` built once in a `static` for anything else. @WRITE@\n\
     \n\
-    Never write a `String` with `{! }`, and never widen a policy with\n\
-    `style`, `class`, `id`, an `on*` attribute or a `javascript:` URL.\n\
-    Store what the user wrote and clean it when the page renders, so a\n\
-    stricter policy also covers old rows.\n";
+    Never widen a policy with `style`, `class`, `id`, an `on*` attribute\n\
+    or a `javascript:` URL. Store what the user wrote and clean it when\n\
+    the page renders, so a stricter policy also covers old rows.\n";
+
+/// How a page writes it, in an rsx template.
+const AGENTS_RSX: &str = "Write it with\n\
+    `{! value }`, and never write a `String` with `{! }`.";
+
+/// How a page writes it, into the HTML string it returns.
+const AGENTS_STRING: &str = "Push\n\
+    `safe.as_str()` into the page string, and escape every other value\n\
+    with `SafeHtml::escape`.";

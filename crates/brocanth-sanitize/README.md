@@ -53,7 +53,11 @@ assert_eq!(text("<b>Bold</b> name").as_str(), "Bold name");
 
 Every policy drops `<script>` and `<style>` with their content, every
 `on*`, `style`, `class` and `id` attribute, comments, and every URL that is
-not relative, `http`, `https` or `mailto`.
+not relative, `http`, `https` or `mailto`. `Policy::allow_attributes`
+panics on an `on*`, `style`, `class` or `id` attribute and on a URL
+attribute ammonia does not check (`cite`, `srcset`, `formaction`, ...), so
+a policy widened with it keeps that promise. `Policy::from_builder` takes
+any ammonia builder and checks nothing.
 
 For another use, start from one and change it. Build it once:
 

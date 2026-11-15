@@ -114,11 +114,30 @@ impl Answer {
     }
 }
 
-/// The command tree for a surface.
+/// Where the server is when the caller names no other address.
+#[cfg(feature = "runtime")]
+pub const DEFAULT_BASE: &str = "http://127.0.0.1:3000";
+
+/// The flags this client defines itself. A body field with one of these
+/// names gets no flag of its own: `--body` carries it.
+#[cfg(feature = "runtime")]
+const RESERVED: &[&str] = &["base", "header", "query", "body", "help"];
+
+/// The command tree for a surface, with [`DEFAULT_BASE`] as the default
+/// `--base`.
 ///
 /// `name` is the program's own name, as `--help` should print it.
 #[cfg(feature = "runtime")]
 pub fn command(name: &'static str, routes: &[Described]) -> Command {
+    command_at(name, routes, DEFAULT_BASE)
+}
+
+/// The command tree for a surface, with `base` as the default `--base`.
+///
+/// A generated project passes the address its own `serve` listens on, so
+/// the client and the server agree without a flag.
+#[cfg(feature = "runtime")]
+pub fn command_at(name: &'static str, routes: &[Described], base: &str) -> Command {
     let mut root = Command::new(name)
         .about("Talk to this application over HTTP")
         .arg(
@@ -127,7 +146,7 @@ pub fn command(name: &'static str, routes: &[Described]) -> Command {
                 .global(true)
                 .value_name("URL")
                 .help("Where the server is")
-                .default_value("http://127.0.0.1:3000"),
+                .default_value(base.to_string()),
         )
         .arg(
             Arg::new("header")
@@ -174,7 +193,7 @@ fn operation(route: &Described) -> Command {
 
     if let Some(object) = route.takes.as_ref().and_then(Node::object) {
         for field in &object.fields {
-            if let Some(arg) = argument(field) {
+            if let Some(arg) = argument(route, field) {
                 command = command.arg(arg);
             }
         }
@@ -188,19 +207,45 @@ fn operation(route: &Described) -> Command {
     command
 }
 
+/// Whether a field gets no flag of its own, because its flag would take
+/// the name of a path parameter or of a flag this client defines.
+///
+/// Two clap arguments with one id panic in a debug build. `--body` carries
+/// such a field instead.
+#[cfg(feature = "runtime")]
+pub(crate) fn clashes(route: &Described, field: &Field) -> bool {
+    let name = flag(field.name);
+    RESERVED.contains(&name.as_str())
+        || route
+            .parameters()
+            .into_iter()
+            .any(|parameter| flag(parameter) == name)
+}
+
 /// One field of the body, as a flag.
 ///
 /// A field no flag can express -- a nested object, a list of them -- gets
 /// none, and `--body` is how it is sent. Pretending a command line can
-/// carry a tree is how a client ends up with `--address.street`.
+/// carry a tree is how a client ends up with `--address.street`. A field
+/// whose flag would clash with another flag gets none either.
+///
+/// A required field is required only when `--body` is absent, and the two
+/// do not mix: the flags build the body, or `--body` is the body.
 #[cfg(feature = "runtime")]
-fn argument(field: &Field) -> Option<Arg> {
+fn argument(route: &Described, field: &Field) -> Option<Arg> {
+    if clashes(route, field) {
+        return None;
+    }
     let name = flag(field.name);
     let mut arg = Arg::new(name.clone())
         .long(name)
         .value_name(field.name.to_ascii_uppercase())
-        .required(field.required)
+        .conflicts_with("body")
         .help(help::sentence(field));
+    // A required boolean is a switch, so absent is an answer: see below.
+    if field.required && !matches!(field.node.bare(), Node::Bool) {
+        arg = arg.required_unless_present("body");
+    }
 
     match field.node.bare() {
         Node::Bool if field.required => {
@@ -209,7 +254,7 @@ fn argument(field: &Field) -> Option<Arg> {
             // what the schema can carry without losing anything. Making a
             // person write `--subscribed false` to mean the ordinary case
             // would be faithful and unusable.
-            arg = arg.required(false).action(ArgAction::SetTrue);
+            arg = arg.action(ArgAction::SetTrue);
         }
         Node::Bool => {
             // An `Option<bool>` has a third value, so it keeps one: given
@@ -227,9 +272,15 @@ fn argument(field: &Field) -> Option<Arg> {
         }
         Node::Real(_) => arg = arg.value_parser(clap::value_parser!(f64)),
         Node::List { item, .. } => {
-            if matches!(item.bare(), Node::Object(_)) {
-                return None;
-            }
+            // Each item is parsed as its own type, so `--ids 1 --ids 2`
+            // sends `[1,2]` and not `["1","2"]`.
+            arg = match item.bare() {
+                Node::Object(_) => return None,
+                Node::Int(_) => arg.value_parser(clap::value_parser!(i64)),
+                Node::Real(_) => arg.value_parser(clap::value_parser!(f64)),
+                Node::Bool => arg.value_parser(clap::value_parser!(bool)),
+                _ => arg,
+            };
             arg = arg.action(ArgAction::Append);
         }
         Node::Object(_) => return None,
@@ -245,7 +296,8 @@ fn flag(name: &str) -> String {
     name.replace('_', "-")
 }
 
-/// Build the command tree, parse these arguments, send the request.
+/// Build the command tree, parse these arguments, send the request, with
+/// [`DEFAULT_BASE`] as the default `--base`.
 ///
 /// # Errors
 ///
@@ -258,7 +310,23 @@ pub fn run<W: Wire>(
     wire: &W,
     argv: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<Answer, String> {
-    let matches = command(name, routes)
+    run_at(name, routes, wire, DEFAULT_BASE, argv)
+}
+
+/// [`run`], with `base` as the default `--base`.
+///
+/// # Errors
+///
+/// As [`run`].
+#[cfg(feature = "runtime")]
+pub fn run_at<W: Wire>(
+    name: &'static str,
+    routes: &[Described],
+    wire: &W,
+    base: &str,
+    argv: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Answer, String> {
+    let matches = command_at(name, routes, base)
         .try_get_matches_from(argv)
         .map_err(|e| e.to_string())?;
     let call = plan(routes, &matches)?;

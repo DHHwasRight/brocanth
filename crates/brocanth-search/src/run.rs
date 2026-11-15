@@ -7,7 +7,7 @@ use brocanth_db::{Db, DbError};
 use brocanth_pagination::Page;
 use brocanth_policy::{Condition, Entity, Value};
 
-use crate::index::Index;
+use crate::index::{Index, MAX_COUNT};
 use crate::SearchError;
 
 /// One page of results: the rows, best first, and where the page sits.
@@ -15,8 +15,12 @@ use crate::SearchError;
 pub struct Hits<R> {
     /// The rows, in rank order.
     pub items: Vec<R>,
-    /// The page, with the total of the same `WHERE`.
+    /// The page, with the total of the same `WHERE`, at most
+    /// [`MAX_COUNT`](crate::MAX_COUNT).
     pub page: Page,
+    /// More rows match than [`MAX_COUNT`](crate::MAX_COUNT): the total is
+    /// the cap, and a page should say "more than" it.
+    pub more: bool,
 }
 
 impl<E: Entity> Index<E> {
@@ -24,7 +28,8 @@ impl<E: Entity> Index<E> {
     ///
     /// Counts first, then reads the page from the clamped [`Page`], so a page
     /// past the end is the last page. An empty term finds nothing and reads
-    /// nothing.
+    /// nothing. The count stops at [`MAX_COUNT`](crate::MAX_COUNT), and
+    /// [`Hits::more`] says when it did.
     ///
     /// `R` reads the columns of `E` and `search_rank` (a `real`, `f32`).
     /// [`Hit`](crate::documents::Hit) does, for the site index.
@@ -48,6 +53,7 @@ impl<E: Entity> Index<E> {
             return Ok(Hits {
                 items: Vec::new(),
                 page: Page::new(1, per_page, 0),
+                more: false,
             });
         }
         let probe = self.query(condition, term, 0, per_page)?;
@@ -57,11 +63,14 @@ impl<E: Entity> Index<E> {
             count = bind_scalar(count, value);
         }
         let total = count.fetch_one(db.pool()).await.map_err(DbError::from)?;
-        let page = Page::new(number, per_page, u64::try_from(total).unwrap_or(0));
+        let total = u64::try_from(total).unwrap_or(0);
+        let more = total > MAX_COUNT;
+        let page = Page::new(number, per_page, total.min(MAX_COUNT));
         if page.is_empty() {
             return Ok(Hits {
                 items: Vec::new(),
                 page,
+                more,
             });
         }
         let statement = self
@@ -73,7 +82,7 @@ impl<E: Entity> Index<E> {
             select = bind_as(select, value);
         }
         let items = select.fetch_all(db.pool()).await.map_err(DbError::from)?;
-        Ok(Hits { items, page })
+        Ok(Hits { items, page, more })
     }
 }
 

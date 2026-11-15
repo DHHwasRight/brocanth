@@ -1337,7 +1337,7 @@ pub fn render_with(
 ) -> Result<Response, Error> {
     let mut body = out_of_band.concat();
     body.push_str(&content.render_to_string()?);
-    Ok(Response::ok(body))
+    Ok(page_response(body))
 }
 
 /// One skipped layout's replacement chrome, rendered on its own.
@@ -1376,7 +1376,7 @@ pub fn render(content: impl rsx::Template) -> Result<Response, Error> {
     // half way through its layout leaves nothing behind. There is no partial
     // body to take back, which is the property the rest of this file is
     // built on.
-    Ok(Response::ok(content.render_to_string()?))
+    Ok(page_response(content.render_to_string()?))
 }
 
 impl Ctx {
@@ -1387,6 +1387,12 @@ impl Ctx {
     pub fn partial_depth(&self) -> u32 {
         0
     }
+}
+
+/// A rendered page. Every load is the whole document, so it varies on
+/// nothing.
+fn page_response(body: String) -> Response {
+    Response::ok(body)
 }
 
 /// A path of this site in the locale of this page: `/about` is
@@ -1464,9 +1470,12 @@ impl Ctx {
         let page = self.state.get::<brocanth_meta::Meta>();
         #[allow(unused_mut)]
         let mut head = brocanth_meta::Head::new(site, page).path(&self.path);
-        if let Some(current) = self.state.get::<brocanth_i18n::Current>() {
-            head = head.lang(current.tag());
-        }
+        // The locale the `i18n` plugin chose. This compiles only while that
+        // plugin is in the project, so removing it is an error here and not
+        // a page with no `lang`.
+        head = head.lang(brocanth_i18n::Locales::tag(crate::plugins::i18n::locale(
+            self,
+        )));
         // One URL per locale: the canonical one keeps the segment, and each
         // other locale is an alternate.
         if let Some(locale) = self.state.get::<brocanth_i18n::PathLocale>() {
@@ -2958,6 +2967,9 @@ impl Default for Settings {
 /// Puts the site's metadata on the context, where `ctx.head()` reads it.
 pub struct Meta {
     site: Site,
+    /// Whether `[meta]` named the site's address itself.
+    #[allow(dead_code)]
+    has_base_url: bool,
 }
 
 impl Plugin for Meta {
@@ -2971,6 +2983,7 @@ impl Plugin for Meta {
         if let Some(template) = set(config.title_template) {
             site = site.title_template(template);
         }
+        let has_base_url = config.base_url.as_ref().is_some_and(|v| !v.is_empty());
         if let Some(url) = set(config.base_url) {
             site = site.base_url(url);
         }
@@ -2983,7 +2996,7 @@ impl Plugin for Meta {
         if let Some(handle) = set(config.twitter) {
             site = site.twitter(handle);
         }
-        Self { site }
+        Self { site, has_base_url }
     }
 
     /// A template with no `%s` or a base URL with no scheme stops the
