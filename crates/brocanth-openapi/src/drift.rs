@@ -129,7 +129,8 @@ pub enum Change {
 /// One difference, located by JSON pointer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Difference {
-    /// RFC 6901 pointer into the document.
+    /// RFC 6901 pointer into the document. For a YAML file, compared as
+    /// text, `line N` instead.
     pub pointer: String,
     /// What kind of difference it is.
     pub change: Change,
@@ -204,7 +205,10 @@ impl std::fmt::Display for Drift {
         if self.total > self.differences.len() {
             writeln!(f, "  ... and {} more", self.total - self.differences.len())?;
         }
-        write!(f, "Regenerate it and commit the result.")
+        write!(
+            f,
+            "help: regenerate the document with `brocanth_openapi::write` and commit the result"
+        )
     }
 }
 
@@ -222,14 +226,18 @@ pub enum DriftError {
     ///
     /// Treated as a failure rather than as a reason to write it: a check
     /// that silently creates what it was asked to verify checks nothing.
-    #[error("{path} does not exist; generate it and commit it")]
+    #[error(
+        "{path} does not exist\nhelp: generate it with `brocanth_openapi::write` and commit it"
+    )]
     Missing {
         /// Where it should have been.
         path: PathBuf,
     },
 
     /// The committed file could not be read.
-    #[error("{path} could not be read: {source}")]
+    #[error(
+        "{path} could not be read: {source}\nhelp: check that the file is readable by this user"
+    )]
     Unreadable {
         /// The file.
         path: PathBuf,
@@ -239,7 +247,10 @@ pub enum DriftError {
     },
 
     /// The committed file is not JSON.
-    #[error("{path} is not valid JSON: {source}")]
+    #[error(
+        "{path} is not valid JSON: {source}\nhelp: regenerate the file with `brocanth_openapi::write` \
+         instead of editing it by hand"
+    )]
     Unparseable {
         /// The file.
         path: PathBuf,
@@ -251,7 +262,8 @@ pub enum DriftError {
 
 /// Compares a committed document against the generated one.
 ///
-/// JSON is compared structurally; YAML is compared as text.
+/// JSON is compared structurally; YAML is compared as text, line endings
+/// aside, and a difference names the first line that differs.
 ///
 /// # Errors
 ///
@@ -313,15 +325,18 @@ fn check_located(
             .into())
         }
         Format::Yaml => {
+            // No YAML parser here, so YAML is compared as text. A CRLF
+            // checkout is not drift, and a real difference names its line.
+            let committed = committed.replace("\r\n", "\n");
             let generated = document.to_yaml_string();
-            if committed == generated {
+            let Some((line, left, right)) = first_different_line(&committed, &generated) else {
                 return Ok(());
-            }
+            };
             let differences = vec![Difference {
-                pointer: String::new(),
+                pointer: format!("line {line}"),
                 change: Change::Changed {
-                    committed: format!("{} bytes of YAML", committed.len()),
-                    generated: format!("{} bytes of YAML", generated.len()),
+                    committed: left.to_owned(),
+                    generated: right.to_owned(),
                 },
             }];
             Err(Drift {
@@ -330,6 +345,25 @@ fn check_located(
                 total: 1,
             }
             .into())
+        }
+    }
+}
+
+/// The first line, counted from 1, where two texts disagree, with each
+/// side's text there. A side that has ended reads as `<end of file>`.
+fn first_different_line<'a>(left: &'a str, right: &'a str) -> Option<(usize, &'a str, &'a str)> {
+    const END: &str = "<end of file>";
+    let mut a = left.lines();
+    let mut b = right.lines();
+    let mut line = 1;
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => {
+                // Same lines; only a final newline can still differ.
+                return (left != right).then_some((line, END, END));
+            }
+            (x, y) if x == y => line += 1,
+            (x, y) => return Some((line, x.unwrap_or(END), y.unwrap_or(END))),
         }
     }
 }
@@ -437,6 +471,28 @@ mod tests {
         };
         assert_eq!(drift.total, 1);
         assert_eq!(drift.differences[0].pointer, "/info/version");
+    }
+
+    #[test]
+    fn a_crlf_yaml_checkout_is_not_drift() {
+        let document = Document::new("Test", "1.0.0");
+        let committed = document.to_yaml_string().replace('\n', "\r\n");
+        check(&document, &committed, Format::Yaml).unwrap();
+    }
+
+    #[test]
+    fn a_yaml_difference_names_its_line() {
+        let document = Document::new("Test", "1.0.0");
+        let generated = document.to_yaml_string();
+        let committed = generated.replace("1.0.0", "0.9.0");
+        let error = check(&document, &committed, Format::Yaml).unwrap_err();
+        let DriftError::Drifted(drift) = error else {
+            panic!("expected drift");
+        };
+        let line = generated.lines().position(|l| l.contains("1.0.0")).unwrap() + 1;
+        assert_eq!(drift.differences[0].pointer, format!("line {line}"));
+        assert!(drift.to_string().contains("0.9.0"));
+        assert!(drift.to_string().contains("help: "));
     }
 
     #[test]

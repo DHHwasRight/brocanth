@@ -754,6 +754,24 @@ impl PathItem {
             .map(|(_, op)| op)
     }
 
+    /// The parameters that apply to `operation`: the path-level ones,
+    /// with each replaced by an operation entry of the same name and
+    /// location, then the operation's own.
+    #[must_use]
+    pub fn effective_parameters<'a>(&'a self, operation: &'a Operation) -> Vec<&'a Parameter> {
+        let overridden = |p: &Parameter| {
+            operation
+                .parameters
+                .iter()
+                .any(|o| o.name == p.name && o.location == p.location)
+        };
+        self.parameters
+            .iter()
+            .filter(|p| !overridden(p))
+            .chain(operation.parameters.iter())
+            .collect()
+    }
+
     fn to_json(&self) -> Json {
         let mut obj = Json::object();
         obj.maybe("summary", self.summary.as_ref());
@@ -797,7 +815,8 @@ pub enum ComponentError {
     /// wrong field in a generated client three weeks later.
     #[error(
         "the component schema `{name}` is already registered with a different definition; \
-         two types cannot share one name"
+         two types cannot share one name\nhelp: rename one of the two types, or register the \
+         same definition"
     )]
     SchemaConflict {
         /// The contested name.
@@ -805,7 +824,10 @@ pub enum ComponentError {
     },
 
     /// Two different schemes want the same security scheme name.
-    #[error("the security scheme `{name}` is already registered with a different definition")]
+    #[error(
+        "the security scheme `{name}` is already registered with a different definition\nhelp: \
+         give the second scheme another name"
+    )]
     SecurityConflict {
         /// The contested name.
         name: String,
@@ -814,7 +836,7 @@ pub enum ComponentError {
     /// A component name is not usable in a `$ref`.
     #[error(
         "`{name}` is not a usable component name; it must match `[A-Za-z0-9._-]+`, because the \
-         name goes into a JSON pointer"
+         name goes into a JSON pointer\nhelp: use only letters, digits, `.`, `_` and `-`"
     )]
     BadName {
         /// The rejected name.
@@ -1242,23 +1264,26 @@ impl Document {
         problems: &mut Vec<String>,
         references: &mut Vec<(String, String)>,
     ) {
-        let parameters: Vec<&Parameter> = item
-            .parameters
-            .iter()
-            .chain(operation.parameters.iter())
-            .collect();
-
-        let mut seen: Vec<(&str, ParamIn)> = Vec::new();
-        for parameter in &parameters {
-            let key = (parameter.name.as_str(), parameter.location);
-            if seen.contains(&key) {
-                problems.push(format!(
-                    "{at}: the parameter `{}` in `{}` is declared twice",
-                    parameter.name,
-                    parameter.location.as_str()
-                ));
+        // A repeat inside one list is an error. An operation entry with the
+        // name and location of a path-level entry overrides it (OpenAPI
+        // 3.1, Path Item Object), so the two lists are checked apart.
+        for list in [&item.parameters, &operation.parameters] {
+            let mut seen: Vec<(&str, ParamIn)> = Vec::new();
+            for parameter in list {
+                let key = (parameter.name.as_str(), parameter.location);
+                if seen.contains(&key) {
+                    problems.push(format!(
+                        "{at}: the parameter `{}` in `{}` is declared twice",
+                        parameter.name,
+                        parameter.location.as_str()
+                    ));
+                }
+                seen.push(key);
             }
-            seen.push(key);
+        }
+
+        let parameters = item.effective_parameters(operation);
+        for parameter in &parameters {
             if parameter.location == ParamIn::Path {
                 if !parameter.required {
                     problems.push(format!(
@@ -1432,7 +1457,10 @@ impl std::fmt::Display for Validation {
         for problem in &self.problems {
             writeln!(f, "  - {problem}")?;
         }
-        Ok(())
+        write!(
+            f,
+            "help: fix each problem at the operation or component it names, then build again"
+        )
     }
 }
 
@@ -1495,6 +1523,44 @@ mod tests {
     }
 
     #[test]
+    fn an_operation_parameter_overrides_a_path_level_one() {
+        let mut doc = Document::new("Test", "1.0.0");
+        let mut item = PathItem::default();
+        item.parameters
+            .push(Parameter::path("id", Schema::string()));
+        let mut operation = Operation::new("get_user");
+        operation
+            .parameters
+            .push(Parameter::path("id", Schema::integer()));
+        item.operations.push((Verb::Get, operation));
+        doc.paths.push(("/users/{id}".to_owned(), item));
+        doc.validate().unwrap();
+
+        let item = &doc.paths[0].1;
+        let operation = item.operation(Verb::Get).unwrap();
+        let effective = item.effective_parameters(operation);
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].schema, Schema::integer());
+    }
+
+    #[test]
+    fn a_parameter_repeated_in_one_list_is_a_problem() {
+        let mut doc = Document::new("Test", "1.0.0");
+        let mut item = PathItem::default();
+        let mut operation = Operation::new("get_user");
+        operation
+            .parameters
+            .push(Parameter::path("id", Schema::string()));
+        operation
+            .parameters
+            .push(Parameter::path("id", Schema::string()));
+        item.operations.push((Verb::Get, operation));
+        doc.paths.push(("/users/{id}".to_owned(), item));
+        let error = doc.validate().unwrap_err();
+        assert!(error.problems.iter().any(|p| p.contains("declared twice")));
+    }
+
+    #[test]
     fn a_dangling_ref_is_a_problem() {
         let mut doc = minimal();
         let mut item = PathItem::default();
@@ -1520,6 +1586,23 @@ mod tests {
             ComponentError::SchemaConflict {
                 name: "Post".to_owned()
             }
+        );
+        assert!(error.to_string().contains("\nhelp: "), "{error}");
+    }
+
+    #[test]
+    fn a_validation_error_ends_with_a_help_line() {
+        let mut doc = Document::new("Test", "1.0.0");
+        doc.paths
+            .push(("/users/{id}".to_owned(), PathItem::default()));
+        let mut item = PathItem::default();
+        item.operations
+            .push((Verb::Get, Operation::new("get_user")));
+        doc.paths[0].1 = item;
+        let error = doc.validate().unwrap_err().to_string();
+        assert!(
+            error.lines().last().unwrap().starts_with("help: "),
+            "{error}"
         );
     }
 

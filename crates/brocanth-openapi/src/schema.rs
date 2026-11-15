@@ -559,12 +559,23 @@ impl Schema {
             || self.pattern.is_some()
     }
 
+    /// The `enum` list as emitted. A nullable schema with an `enum` lists
+    /// `null` too: `type: [T, "null"]` admits null, but `enum` still
+    /// refuses it, so a validator would reject the null the type allows.
+    fn enum_json(&self) -> Vec<Json> {
+        let mut values = self.enumeration.clone();
+        if self.nullable && !values.is_empty() && !values.contains(&Json::Null) {
+            values.push(Json::Null);
+        }
+        values
+    }
+
     fn write_annotations(&self, obj: &mut Obj) {
         obj.maybe("title", self.title.as_ref());
         obj.maybe("description", self.description.as_ref());
         obj.maybe("format", self.format.as_ref());
         obj.maybe("default", self.default.clone());
-        obj.list("enum", self.enumeration.clone());
+        obj.list("enum", self.enum_json());
         obj.maybe("minimum", self.minimum);
         obj.maybe("maximum", self.maximum);
         obj.maybe("exclusiveMinimum", self.exclusive_minimum);
@@ -800,6 +811,35 @@ mod tests {
             ]))
         );
         assert!(json.get("nullable").is_none());
+    }
+
+    #[test]
+    fn a_nullable_enum_admits_null() {
+        let json = Schema::string()
+            .string_enum(["a", "b"])
+            .nullable()
+            .to_json();
+        assert_eq!(
+            json.get("enum"),
+            Some(&Json::Array(vec![
+                Json::Str("a".into()),
+                Json::Str("b".into()),
+                Json::Null
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_nullable_literal_admits_null() {
+        let json = Schema::string().string_enum(["only"]).nullable().to_json();
+        let values = json.get("enum").unwrap().as_array().unwrap();
+        assert_eq!(values, &[Json::Str("only".into()), Json::Null]);
+    }
+
+    #[test]
+    fn a_plain_enum_does_not_gain_null() {
+        let json = Schema::string().string_enum(["a"]).to_json();
+        assert_eq!(json.get("enum").unwrap().as_array().unwrap().len(), 1);
     }
 
     #[test]
