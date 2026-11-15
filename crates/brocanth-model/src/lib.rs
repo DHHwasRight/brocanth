@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "runtime", doc = include_str!("../README.md"))]
 //!
 //! The brocanth model layer.
 //!
@@ -32,11 +32,14 @@
 //!    against the entities and written through their hooks (Django D27).
 //!
 //! Plus [`registry`], which enumerates the models in a binary, and
-//! [`schema_sync`], which is the single adapter standing between brocanth and
-//! SeaORM's semver-exempt `schema-sync`.
+//! [`migrating`], which applies migrations under a lock. `migrate make`
+//! (`brocanth-migrate`) writes the migrations from a diff of two snapshots
+//! of the models; SeaORM's semver-exempt `schema-sync` is not used.
 //!
 //! With the `db` feature, `Orm` is SeaORM over the pool a `brocanth_db::Db`
 //! opened, so the ORM and sea-query statements share one pool (`orm`).
+//! With the `policy` feature, `policy::condition` turns a `brocanth-policy`
+//! condition into a SeaORM `WHERE`, so a list filters before it paginates.
 //!
 //! Nothing here is global. A probe, a registry and a harness are values an
 //! application holds, so two applications in one process cannot collide.
@@ -87,44 +90,71 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(not(feature = "postgres"))]
+#[cfg(all(feature = "runtime", not(feature = "postgres")))]
 compile_error!(
     "brocanth-model needs the Postgres driver. Enable the `postgres` feature \
      (the default). The driver is a feature on `sea-orm` itself, so this crate \
      cannot pick it for you after the fact."
 );
 
+#[cfg(feature = "runtime")]
 pub mod bulk;
+#[cfg(feature = "runtime")]
 pub mod changes;
+#[cfg(feature = "runtime")]
 pub mod deferred;
+#[cfg(feature = "runtime")]
 pub mod eager;
+#[cfg(feature = "runtime")]
 pub mod errors;
+#[cfg(feature = "runtime")]
 pub mod fixtures;
+#[cfg(feature = "runtime")]
+pub mod migrating;
 #[cfg(feature = "db")]
 pub mod orm;
 #[cfg(feature = "plugin")]
 pub mod plugin;
+#[cfg(feature = "policy")]
+pub mod policy;
+#[cfg(feature = "runtime")]
 pub mod prelude;
+#[cfg(feature = "runtime")]
 pub mod probe;
+#[cfg(feature = "runtime")]
 pub mod registry;
-pub mod schema_sync;
+#[cfg(feature = "scaffold")]
+pub mod scaffold;
+#[cfg(feature = "runtime")]
 pub mod testing;
+#[cfg(feature = "runtime")]
 pub mod validation;
+#[cfg(feature = "runtime")]
 pub mod validators;
 
+#[cfg(feature = "runtime")]
 mod dirty;
 
+#[cfg(feature = "runtime")]
 pub use changes::{Pending, Publish, Writing};
+#[cfg(feature = "runtime")]
 pub use dirty::{Change, Tracked};
 
+#[cfg(feature = "runtime")]
 pub use deferred::{Deferred, NotLoaded};
+#[cfg(feature = "runtime")]
 pub use eager::{Eager, EagerExt, EagerStrategy, WithRelated};
+#[cfg(feature = "runtime")]
 pub use errors::{Entry, Error, Errors};
+#[cfg(feature = "runtime")]
 pub use fixtures::{FixtureError, Fixtures};
 #[cfg(feature = "db")]
 pub use orm::Orm;
+#[cfg(feature = "runtime")]
 pub use probe::{Probe, ProbeConfig, Report, Suspect, UnitOfWork};
+#[cfg(feature = "runtime")]
 pub use registry::{ModelInfo, ModelRegistry};
+#[cfg(feature = "runtime")]
 pub use validation::{enforce, Validate, Validated, Write};
 
 /// Declare validations for a model.
@@ -159,6 +189,7 @@ pub use validation::{enforce, Validate, Validated, Write};
 /// Add `no_hook` as the first argument to get the [`Validate`] impl without the
 /// `ActiveModelBehavior`, when the model needs a hook of its own. Call
 /// [`enforce`] from it, or validation stops being enforced.
+#[cfg(feature = "runtime")]
 pub use brocanth_model_derive::validates;
 
 /// Remove the stable ids from a model before SeaORM sees them.
@@ -184,17 +215,22 @@ pub use brocanth_model_derive::validates;
 ///
 /// `brocanth migrate ids` writes the ids and this attribute. Do not write an
 /// id by hand, and do not copy one: an id that occurs two times is refused.
+#[cfg(feature = "runtime")]
 pub use brocanth_model_derive::ids;
 
 #[doc(hidden)]
+#[cfg(feature = "runtime")]
 pub use async_trait::async_trait;
 
 /// Re-exported so an application can hold a sink, and name the one type the
 /// write path publishes, without a second dependency line.
+#[cfg(feature = "runtime")]
 pub use brocanth_events;
 
 /// Re-exported so a model file needs one dependency, and so the version this
 /// crate was built against is the version a model compiles against.
+#[cfg(feature = "runtime")]
 pub use sea_orm;
 /// Re-exported for the same reason as [`sea_orm`].
+#[cfg(feature = "runtime")]
 pub use sea_orm_migration;

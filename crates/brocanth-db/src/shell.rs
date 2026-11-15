@@ -105,54 +105,91 @@ pub fn command_line(client: &Client, rest: &[OsString]) -> String {
     line
 }
 
-/// `psql` for a Postgres URL.
+/// `psql` for a Postgres URL, as the pool reads it: an upper-case scheme
+/// and a SQLAlchemy `+driver` suffix work too.
 pub fn client_for(url: &str) -> Result<Client, ShellError> {
-    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-        let (target, password) = without_password(url);
-        return Ok(Client {
-            program: "psql",
-            target,
-            password,
-        });
-    }
-
-    let scheme = url.split(':').next().unwrap_or(url);
-    Err(ShellError::new(
-        "dbshell/scheme",
-        format!("dbshell has no client for a `{scheme}` URL"),
-    )
-    .help("set `[db] url` to a postgres:// URL"))
+    let url = crate::config::normalize_url(url).map_err(|_| {
+        let scheme = url.split(':').next().unwrap_or(url);
+        ShellError::new(
+            "dbshell/scheme",
+            format!("dbshell has no client for a `{scheme}` URL"),
+        )
+        .help("set `[db] url` to a postgres:// URL")
+    })?;
+    let (target, password) = without_password(&url);
+    Ok(Client {
+        program: "psql",
+        target,
+        password,
+    })
 }
 
-/// The URL with `user:password@` turned into `user@`, and the password.
+/// The URL with no password, and the password. `user:password@` becomes
+/// `user@`, and a `password=` query parameter goes away: psql reads both,
+/// and `ps` shows both to every user of the machine.
 fn without_password(url: &str) -> (String, Option<String>) {
     let Some((scheme, rest)) = url.split_once("://") else {
         return (url.to_owned(), None);
     };
     let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
-    let Some((userinfo, host)) = authority.rsplit_once('@') else {
-        return (url.to_owned(), None);
+    let (authority, mut password) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => match userinfo.split_once(':') {
+            Some((user, password)) => (format!("{user}@{host}"), Some(percent_decode(password))),
+            None => (authority.to_owned(), None),
+        },
+        None => (authority.to_owned(), None),
     };
-    match userinfo.split_once(':') {
-        Some((user, password)) => (
-            format!("{scheme}://{user}@{host}{tail}"),
-            Some(percent_decode(password)),
-        ),
-        None => (url.to_owned(), None),
-    }
+    let tail = match tail.split_once('?') {
+        Some((path, query)) => {
+            let (query, fragment) = match query.split_once('#') {
+                Some((query, fragment)) => (query, Some(fragment)),
+                None => (query, None),
+            };
+            let mut kept = Vec::new();
+            for pair in query.split('&') {
+                match pair.split_once('=') {
+                    Some(("password", value)) => {
+                        password = Some(percent_decode(value));
+                    }
+                    _ => kept.push(pair),
+                }
+            }
+            let mut out = path.to_owned();
+            if !kept.is_empty() {
+                out.push('?');
+                out.push_str(&kept.join("&"));
+            }
+            if let Some(fragment) = fragment {
+                out.push('#');
+                out.push_str(fragment);
+            }
+            out
+        }
+        None => tail.to_owned(),
+    };
+    (format!("{scheme}://{authority}{tail}"), password)
 }
 
 /// `%40` back to `@`: a URL password with a reserved character is encoded,
-/// and `PGPASSWORD` wants the password itself.
+/// and `PGPASSWORD` wants the password itself. A `%` not followed by two
+/// hex digits stays as it is.
 fn percent_decode(raw: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
         if bytes[at] == b'%' && at + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&raw[at + 1..at + 3], 16) {
-                out.push(byte);
+            if let (Some(hi), Some(lo)) = (hex(bytes[at + 1]), hex(bytes[at + 2])) {
+                out.push(hi << 4 | lo);
                 at += 3;
                 continue;
             }
@@ -162,7 +199,6 @@ fn percent_decode(raw: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-
 /// Single quotes around anything a shell would split or expand.
 fn shell_quote(text: &str) -> String {
     if !text.is_empty()
@@ -255,6 +291,34 @@ mod tests {
         let e = client_for("mysql://localhost/x").unwrap_err();
         assert_eq!(e.id, "dbshell/scheme");
         assert!(e.to_string().contains("help:"));
+    }
+
+    #[test]
+    fn a_password_query_parameter_leaves_the_target() {
+        let c = client_for("postgres://app@db/blog?sslmode=require&password=s%40cret").unwrap();
+        assert_eq!(c.target, "postgres://app@db/blog?sslmode=require");
+        assert_eq!(c.password.as_deref(), Some("s@cret"));
+        let c = client_for("postgres://db/blog?password=x").unwrap();
+        assert_eq!(c.target, "postgres://db/blog");
+        assert_eq!(c.password.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn the_schemes_the_pool_takes_work_here_too() {
+        let c = client_for("POSTGRES://localhost/dev").unwrap();
+        assert_eq!(c.target, "postgres://localhost/dev");
+        let c = client_for("postgresql+psycopg2://u:p@h/d").unwrap();
+        assert_eq!(c.target, "postgresql://u@h/d");
+        assert_eq!(c.password.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn a_bad_escape_stays_as_written() {
+        assert_eq!(percent_decode("%aé"), "%aé");
+        assert_eq!(percent_decode("%+1"), "%+1");
+        assert_eq!(percent_decode("a%4"), "a%4");
+        assert_eq!(percent_decode("%41%4a"), "AJ");
+        assert_eq!(percent_decode("é%"), "é%");
     }
 
     #[test]

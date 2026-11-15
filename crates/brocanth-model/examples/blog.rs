@@ -20,7 +20,6 @@ use blog::{migration::Migrator, post, user};
 use brocanth_model::bulk::{self, HooksBypassed};
 use brocanth_model::prelude::*;
 use brocanth_model::registry::{self, ModelRegistry};
-use brocanth_model::schema_sync::{PlanOnly, SchemaPlanner};
 use brocanth_model::testing::Harness;
 use brocanth_model::{Probe, ProbeConfig, Tracked};
 use sea_orm::sea_query::IntoCondition;
@@ -303,21 +302,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n   linked but not declared: {:?}",
         declared.unregistered()
     );
-
-    // -----------------------------------------------------------------------
-    heading(10, "The schema-sync seam");
-    let plan = PlanOnly::new(DbBackend::Postgres)
-        .with(user::Entity)
-        .with(post::Entity)
-        .plan();
-    println!(
-        "   additive: {}  destructive: {}",
-        plan.additive.len(),
-        plan.destructive.len()
-    );
-    for warning in &plan.warnings {
-        println!("   warning: {warning}");
-    }
 
     // -----------------------------------------------------------------------
     drop(db);

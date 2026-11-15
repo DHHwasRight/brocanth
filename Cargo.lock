@@ -924,6 +924,7 @@ dependencies = [
  "brocanth-mail",
  "brocanth-meta",
  "brocanth-middleware",
+ "brocanth-model",
  "brocanth-oauth-client",
  "brocanth-observe",
  "brocanth-openapi",
@@ -1192,6 +1193,7 @@ dependencies = [
 name = "brocanth-migrate"
 version = "0.1.0"
 dependencies = [
+ "brocanth-db",
  "brocanth-model",
  "proc-macro2",
  "quote",
@@ -1209,9 +1211,12 @@ dependencies = [
  "brocanth",
  "brocanth-db",
  "brocanth-events",
+ "brocanth-migrate",
  "brocanth-model",
  "brocanth-model-derive",
+ "brocanth-policy",
  "brocanth-realtime",
+ "brocanth-scaffold",
  "inventory",
  "regex",
  "sea-orm",

@@ -119,6 +119,10 @@ impl Module for Auth {
             "cache",
             "accounts live in the cache's Postgres, not in memory",
         )
+        .adapts_to(
+            "db",
+            "with jobs or cache, accounts use the pool the db plugin opens, and [auth] has no url",
+        )
         .asked_in("doors", "Accounts and passwords. No OAuth provider")
         .krate(Dep::brocanth("brocanth-auth"))
         // Only for the order of the `[auth]` section and the builder line:
@@ -127,6 +131,9 @@ impl Module for Auth {
         // it. Not a requirement -- without the config plugin `main` builds
         // the settings from a literal and the compiler checks it.
         .after("config")
+        // With `db`, `before_start` reads the pool the db plugin published,
+        // so that plugin registers first.
+        .after("db")
         .absent(
             "brocanth-auth",
             "no accounts; nothing hashes a password and nothing signs a session cookie",
@@ -195,8 +202,68 @@ fn postgres_plugin_rs(project: &Project) -> String {
         assert!(text.contains(from), "the auth scaffold lost `{from}`");
         text = text.replacen(from, to, 1);
     }
+    if project.has("db") {
+        text = on_the_db_pool(&text);
+    }
     text
 }
+
+/// The `PgStore` file on the pool the `db` plugin opened: no `[auth] url`,
+/// no second pool, and one set of connections that `[db] max_connections`
+/// sizes, as `jobs` and `cache` do with `db`.
+fn on_the_db_pool(text: &str) -> String {
+    let mut text = text.to_string();
+    for (from, to) in DB_EDITS {
+        assert!(text.contains(from), "the auth scaffold lost `{from}`");
+        text = text.replacen(from, to, 1);
+    }
+    // `configure` checked only the URL, so with no URL it goes.
+    let configure = "    fn configure(&mut self, _lc: &mut Lifecycle<'_>)";
+    let start = text
+        .find(configure)
+        .expect("the auth scaffold lost its `configure`");
+    let end = start
+        + text[start..]
+            .find("    fn before_start(")
+            .expect("the auth scaffold lost its `before_start`");
+    text.replace_range(start..end, "");
+    // The pool: the `db` plugin's, not a new one.
+    let open = "        // The hooks are synchronous and opening a pool is not";
+    let start = text.find(open).expect("the auth scaffold lost its pool");
+    let close = "        };\n";
+    let end = start
+        + text[start..]
+            .find(close)
+            .expect("the auth scaffold lost its pool")
+        + close.len();
+    text.replace_range(
+        start..end,
+        "        // The pool the `db` plugin opened, which registers before this one:\n\
+         \x20       // one set of connections for the pages and the accounts.\n\
+         \x20       let db = lc.require_service::<brocanth_db::Db>()?;\n\
+         \x20       let store = PgStore::from_pool(db.pool().clone());\n",
+    );
+    text
+}
+
+const DB_EDITS: &[(&str, &str)] = &[
+    (
+        "`brocanth_auth_*` tables of `[auth] url`, so they survive a restart and",
+        "`brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and",
+    ),
+    (
+        "/// Postgres, at `[auth] url`. See the file header.",
+        "/// Postgres, on the pool the `db` plugin opened. See the file header.",
+    ),
+    (
+        "    /// The Postgres database the accounts and sessions live in.\n    pub url: String,\n",
+        "",
+    ),
+    (
+        "            url: \"postgres://localhost/development\".to_string(),\n",
+        "",
+    ),
+];
 
 const POSTGRES_EDITS: &[(&str, &str)] = &[
     (
@@ -388,7 +455,8 @@ pub type Store = PgStore;",
 fn settings(project: &Project) -> Vec<Setting> {
     let var = env_var(project);
     let mut out = Vec::new();
-    if uses_postgres(project) {
+    // With `db`, the accounts use its pool and `[auth]` has no URL.
+    if uses_postgres(project) && !project.has("db") {
         out.push(
             Setting::text(
                 "url",

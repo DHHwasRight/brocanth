@@ -85,8 +85,10 @@
 //! SeaORM, on `sqlx`, on a driver, or on `brocanth` itself — PLAN.md §8 says
 //! the arrow points from plugin to core, always, and the core has three
 //! dependencies and a test that fails the build when a fourth kind arrives.
-//! The adapter that turns a [`Condition`] into a `sea_orm::Condition` is a
-//! later, separate crate. [`sql`] carries the argument and the dialect table.
+//! The adapter that turns a [`Condition`] into a `sea_orm::Condition` is
+//! `brocanth_model::policy`, behind that crate's `policy` feature: the
+//! model layer depends on this crate, never the reverse. [`sql`] carries the
+//! argument and the dialect table.
 //!
 //! # Realtime
 //!

@@ -6,7 +6,7 @@
 use brocanth_admin::data::{DataError, Scope, Search};
 use brocanth_admin::model::Row;
 use brocanth_admin::query::{Direction, Sort};
-use brocanth_admin::row_policy::{Dialect, Value as PolicyValue};
+use brocanth_admin::row_policy::Dialect;
 use brocanth_model::sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, IntoCondition};
 use brocanth_model::sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, Order, PaginatorTrait,
@@ -16,11 +16,9 @@ use std::str::FromStr;
 
 /// `WHERE` for the admin's row policy.
 ///
-/// The condition is `brocanth-policy`'s SQL text and bind list, spliced in
-/// with `Expr::cust_with_values`. sea-query reads the `$n` placeholders
-/// and numbers them into the statement it builds, so the condition's own
-/// numbering survives whatever binds come before it. Every value stays a
-/// bind: nothing from the condition's values reaches the text.
+/// The condition is `brocanth-policy`'s SQL text and bind list, turned into
+/// a SeaORM condition by `brocanth_model::policy::condition`: the adapter
+/// any `model` application uses for `Entity::find()`.
 ///
 /// A condition that does not match the connection's backend is refused
 /// rather than run. `Dialect` has one variant, `Postgres`, but `DbBackend`
@@ -41,25 +39,7 @@ pub fn scope_of(scope: Scope<'_>, backend: DbBackend) -> Result<Condition, DataE
             condition.dialect()
         )));
     }
-    let binds: Vec<brocanth_model::sea_orm::Value> =
-        condition.binds().iter().map(bind_of).collect();
-    Ok(Condition::all().add(Expr::cust_with_values(condition.sql().to_owned(), binds)))
-}
-
-/// One policy value as a SeaORM bind.
-///
-/// A null binds as a text null. It is rare here: `brocanth-policy` compiles
-/// an absent subject value to `FALSE` or `TRUE` through `Bound::or_deny` and
-/// `or_allow`, not to a `NULL` bind.
-fn bind_of(value: &PolicyValue) -> brocanth_model::sea_orm::Value {
-    match value {
-        PolicyValue::Null => Option::<String>::None.into(),
-        PolicyValue::Bool(b) => (*b).into(),
-        PolicyValue::Int(n) => (*n).into(),
-        PolicyValue::Float(f) => (*f).into(),
-        PolicyValue::Text(s) => s.clone().into(),
-        PolicyValue::Bytes(b) => b.clone().into(),
-    }
+    Ok(brocanth_model::policy::condition(condition))
 }
 
 /// A column of `E` by name, or a refusal.

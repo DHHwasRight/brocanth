@@ -2567,7 +2567,8 @@ acquire_timeout = 30
 # Seconds before an idle connection closes. 0 keeps it open.
 idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
-statement_timeout = 0
+# `migrate` ignores it: a migration runs with no statement limit.
+statement_timeout = 30
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -2575,7 +2576,9 @@ read_only = false
 # The name pg_stat_activity shows. Empty sends none.
 application_name = "my-blog"
 # A PEM bundle to trust, with verify-full. Empty means none.
-# Unset, the pool trusts the system's roots.
+# Unset, the URL's sslmode applies. The default, prefer, verifies no
+# certificate and can fall back to plain text: for a remote server, set
+# this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
 ===== migrations/mod.rs =====
 //! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
@@ -2915,7 +2918,8 @@ use brocanth_db::{Db, DbConfig, DbError};
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    /// `postgres://user:password@host:5432/database`.
+    /// `postgres://user:password@host:5432/database`. Empty by default: each
+    /// environment names its database, and `configure` refuses an empty one.
     pub url: String,
     /// The most connections the pool opens.
     pub max_connections: u32,
@@ -2934,8 +2938,9 @@ pub struct Settings {
     pub read_only: bool,
     /// The name `pg_stat_activity` shows. Empty sends none.
     pub application_name: String,
-    /// A PEM bundle to trust, with `verify-full`. `None` uses the system's
-    /// roots.
+    /// A PEM bundle to trust, with `verify-full`. `None` keeps the URL's
+    /// `sslmode`: the default, `prefer`, verifies no certificate and can
+    /// fall back to plain text.
     pub ca_file: Option<String>,
 }
 
@@ -2961,12 +2966,12 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            url: "postgres://localhost/development".to_string(),
+            url: "".to_string(),
             max_connections: 10,
             min_connections: 0,
             acquire_timeout: 30,
             idle_timeout: 600,
-            statement_timeout: 0,
+            statement_timeout: 30,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),

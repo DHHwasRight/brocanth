@@ -10,6 +10,7 @@
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
 //! - [`migrate`]: plain SQL migrations, for a project with no ORM.
+//! - [`stamp`]: the UTC stamp of a migration's name. It needs no feature.
 //! - [`DbIdentity`]: who a transaction runs as, for row-level security.
 //!   [`Db::transact_as`] and [`Tx::assume`] set it.
 //!
@@ -32,6 +33,7 @@ pub mod principal;
 pub mod scaffold;
 #[cfg(feature = "runtime")]
 pub mod shell;
+pub mod stamp;
 
 #[cfg(feature = "runtime")]
 pub use config::DbConfig;

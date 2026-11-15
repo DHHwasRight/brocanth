@@ -13,8 +13,8 @@ description = "A typed predicate over an entity's columns, with two interpretati
 # * no `sea-orm` — PLAN.md §8 says the arrow points plugin -> core and a plugin
 #   that needs another depends on it in the open. A policy is an algebra over
 #   column names and bind values; it has no reason to know what an ORM is. The
-#   adapter that turns a `Query` into a `sea_orm::Condition` is a later crate
-#   that depends on both, and it is the only thing in the tree that has to.
+#   adapter that turns a `Condition` into a `sea_orm::Condition` is
+#   `brocanth-model`'s `policy` feature, which depends on both.
 # * no `sqlx`, no driver, no pool — this crate emits SQL text and an ordered
 #   bind list. It never opens a connection, so it cannot have an opinion about
 #   runtimes, TLS or feature unification.

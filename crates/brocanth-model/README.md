@@ -26,8 +26,8 @@ Features:
 
 A build without `postgres` fails with a `compile_error!`.
 
-This crate has no `scaffold` feature. The `model` module lives in the CLI
-(`crates/brocanth-cli/src/modules/model.rs`). It needs the `db` module:
+The `model` module of `brocanth create` lives in this crate
+(`crates/brocanth-model/src/scaffold.rs`, behind the `scaffold` feature). It needs the `db` module:
 
 ```sh
 brocanth create my-app --with db,model,commands   # a new project

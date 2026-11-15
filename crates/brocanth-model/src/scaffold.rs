@@ -1,4 +1,11 @@
-//! `model` -- SeaORM, validations and migrations, over the `db` pool.
+//! `model` -- what `brocanth create` writes when somebody asks for the ORM.
+//!
+//! The module is here and not in the CLI because what it writes is a
+//! statement about this crate: `Orm::from_db`, `Orm::migrate_locked`, the
+//! plugin seam and the registry. Those move when this crate moves.
+//!
+//! Compiled only under the `scaffold` feature, which is off. The CLI takes
+//! it with no default features, so it links none of the ORM.
 
 use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
@@ -62,7 +69,7 @@ impl Module for Model {
         // The list the `migrate` tool keeps, and the tool. The tool is a
         // second binary so the server never links a Rust parser: it reads
         // `src/models/` as text, writes source, and is for development.
-        s.file(crate::owned::MIGRATOR, migrator_file());
+        s.file(MIGRATOR, migrator_file());
         s.file("src/bin/migrate.rs", MIGRATE_BIN);
         s.binary("migrate", "src/bin/migrate.rs");
         // The command that applies the list, and runs the tool for `ids`,
@@ -116,7 +123,7 @@ impl Ctx {
 }
 "#;
 
-pub(crate) fn plugin_rs(project: &Project) -> String {
+fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "model");
     // An empty struct has nothing to default by hand, so `Default` joins the
     // derive: one attribute, as rustfmt would merge two.
@@ -199,17 +206,24 @@ impl Plugin for Model {{
     )
 }
 
+/// Where the list of migrations goes, from the project root.
+pub const MIGRATOR: &str = "migrations/mod.rs";
+
 /// `migrations/mod.rs` as `create` writes it: stamped, and listing nothing.
 ///
 /// The `migrate` tool (`brocanth_migrate::migrator`) writes every later
 /// list, and must write these same bytes for an empty one, or it would read
-/// this file as edited. `crates/brocanth-migrate/tests/golden/migrator-empty.rs`
-/// pins them, and a test on each side compares with it.
-pub(crate) fn migrator_file() -> String {
-    crate::owned::stamp(crate::owned::MIGRATOR, EMPTY_MIGRATOR)
+/// this file as edited. A test here compares the two directly: this crate
+/// has `brocanth-migrate` as a dev-dependency, and the CLI links neither.
+pub fn migrator_file() -> String {
+    EMPTY_MIGRATOR.to_string()
 }
 
-const EMPTY_MIGRATOR: &str = "//! The migrations in this directory, oldest first.
+const EMPTY_MIGRATOR: &str =
+    "//! Written by `brocanth`. Do not edit -- the `migrate` tool rewrites this file.
+//! A migration is a file beside this one; `migrate make` and `migrate sync` list it here.
+//!
+//! The migrations in this directory, oldest first.
 //!
 //! A file name starts with its UTC time, so the order of the names is the
 //! order the migrations were written. `src/commands/migrate.rs` applies this
@@ -226,6 +240,8 @@ impl MigratorTrait for Migrator {
         vec![]
     }
 }
+
+// brocanth-digest: ce7abb4673e08591
 ";
 
 /// `src/bin/migrate.rs`: the `migrate` tool, a development binary.
@@ -295,8 +311,8 @@ const MIGRATE_RS: &str = r#"//! `migrate` -- apply the migrations in `migrations
 
 use std::collections::BTreeSet;
 
+use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
-use brocanth_db::migrate::Lock;
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
 use brocanth_model::Orm;
@@ -315,7 +331,7 @@ pub struct Migrate {
 enum Action {
     /// Apply each pending migration, oldest first
     Up,
-    /// Roll back the newest N applied migrations
+    /// Roll back the last N applied migrations, the last applied first
     Down {
         /// How many migrations to roll back
         #[arg(value_name = "N", default_value_t = 1)]
@@ -364,6 +380,7 @@ impl Command for Migrate {
 }
 
 /// What `up`, `down` and `status` do to the database.
+#[derive(Clone, Copy)]
 enum Apply {
     Up,
     Down(u32),
@@ -373,72 +390,82 @@ enum Apply {
 fn apply(what: Apply) -> anyhow::Result<()> {
     unlisted()?;
     let mut config = database()?;
-    // `[db]` is tuned for requests. A migration may run longer than a
-    // request may, and it writes: no statement timeout, no read-only.
+    // The server's limits are not a migration's: a long `ALTER TABLE` must
+    // not hit the statement timeout, and a read-only pool cannot migrate.
     config.statement_timeout = None;
     config.read_only = false;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
         let pool = Db::connect(&config).await?;
-        // SeaORM takes no lock. This is the advisory lock brocanth-db's
-        // own migrator takes, so two release jobs take turns rather than
-        // apply one pending list twice. Held until the end, and the status
-        // below is read under it.
-        let lock = Lock::acquire(&pool).await?;
-        let result = locked(&pool, what).await;
-        lock.release().await;
-        result
+        let orm = Orm::from_db(&pool);
+        // One transaction under the migration lock, so two runs at one
+        // moment do not apply one migration twice. A failure rolls it all
+        // back.
+        let verb = match what {
+            Apply::Up => "migrate up",
+            Apply::Down(_) => "migrate down",
+            Apply::Status => "migrate status",
+        };
+        let before = orm
+            .migrate_locked(async |txn| {
+                let before = Migrator::get_migration_with_status(txn).await?;
+                match what {
+                    Apply::Up => Migrator::up(txn, None).await?,
+                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                    Apply::Status => {}
+                }
+                Ok(before)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "{verb} failed, and nothing of it was kept\n\
+                     help: read the database error below, fix the migration it names, then \
+                     run `{verb}` again; `migrate status` lists what is applied"
+                )
+            })?;
+        let named = |status: MigrationStatus| -> Vec<String> {
+            before
+                .iter()
+                .filter(|m| m.status() == status)
+                .map(|m| m.name().to_string())
+                .collect()
+        };
+        match what {
+            Apply::Up => {
+                let pending = named(MigrationStatus::Pending);
+                if pending.is_empty() {
+                    println!("Nothing to apply: each migration is applied.");
+                }
+                for name in pending {
+                    println!("applied      {name}");
+                }
+            }
+            Apply::Down(n) => {
+                let applied = named(MigrationStatus::Applied);
+                if applied.is_empty() {
+                    println!("Nothing to roll back: no migration is applied.");
+                }
+                for name in applied.iter().rev().take(n as usize) {
+                    println!("rolled back  {name}");
+                }
+            }
+            Apply::Status => {
+                if before.is_empty() {
+                    println!("No migration in migrations/.");
+                }
+                for m in &before {
+                    let status = match m.status() {
+                        MigrationStatus::Applied => "applied",
+                        MigrationStatus::Pending => "pending",
+                    };
+                    println!("{status:<12} {}", m.name());
+                }
+            }
+        }
+        Ok(())
     })
-}
-
-/// `apply`, under the lock.
-async fn locked(pool: &Db, what: Apply) -> anyhow::Result<()> {
-    let orm = Orm::from_db(pool);
-    let db = orm.connection();
-    let before = Migrator::get_migration_with_status(db).await?;
-    let named = |status: MigrationStatus| -> Vec<String> {
-        before
-            .iter()
-            .filter(|m| m.status() == status)
-            .map(|m| m.name().to_string())
-            .collect()
-    };
-    match what {
-        Apply::Up => {
-            let pending = named(MigrationStatus::Pending);
-            Migrator::up(db, None).await?;
-            if pending.is_empty() {
-                println!("Nothing to apply: each migration is applied.");
-            }
-            for name in pending {
-                println!("applied      {name}");
-            }
-        }
-        Apply::Down(n) => {
-            let applied = named(MigrationStatus::Applied);
-            Migrator::down(db, Some(n)).await?;
-            if applied.is_empty() {
-                println!("Nothing to roll back: no migration is applied.");
-            }
-            for name in applied.iter().rev().take(n as usize) {
-                println!("rolled back  {name}");
-            }
-        }
-        Apply::Status => {
-            if before.is_empty() {
-                println!("No migration in migrations/.");
-            }
-            for m in &before {
-                let status = match m.status() {
-                    MigrationStatus::Applied => "applied",
-                    MigrationStatus::Pending => "pending",
-                };
-                println!("{status:<12} {}", m.name());
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Runs the `migrate` tool with these arguments, from the project root.
@@ -523,22 +550,8 @@ mod tests {
     fn the_empty_list_is_the_one_the_migrate_tool_writes() {
         assert_eq!(
             super::migrator_file(),
-            include_str!("../../../brocanth-migrate/tests/golden/migrator-empty.rs")
+            brocanth_migrate::migrator::migrator_file(&[])
         );
-    }
-
-    #[test]
-    fn migrate_takes_the_advisory_lock_and_drops_the_request_limits() {
-        let known = crate::modules::keys();
-        let project = super::Project::new("blog", "Blog", &["model", "config"], &known);
-        let out = super::migrate_rs(&project);
-        // The lock brocanth-db's migrator holds, around SeaORM's `up` and
-        // `down`, so two release jobs take turns.
-        let lock = out.find("Lock::acquire(&pool)").expect("the lock");
-        let run = out.find("locked(&pool, what)").expect("the run");
-        let release = out.find("lock.release()").expect("the release");
-        assert!(lock < run && run < release, "{out}");
-        assert!(out.contains("config.statement_timeout = None;"), "{out}");
-        assert!(out.contains("config.read_only = false;"), "{out}");
+        assert_eq!(super::MIGRATOR, brocanth_migrate::migrator::MIGRATOR);
     }
 }

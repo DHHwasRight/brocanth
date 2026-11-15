@@ -187,6 +187,11 @@ impl FromStr for Time {
     type Err = DateError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Every slice below is by byte index, so a multibyte character
+        // would split; a time is ASCII.
+        if !s.is_ascii() {
+            return Err(DateError::Shape);
+        }
         let bytes = s.as_bytes();
         if bytes.len() < 5 || bytes[2] != b':' {
             return Err(DateError::Shape);
@@ -302,6 +307,10 @@ impl FromStr for DateTime {
 }
 
 fn split_offset(rest: &str) -> Result<(&str, Option<i16>), DateError> {
+    // The offset is sliced by byte index; an offset is ASCII.
+    if !rest.is_ascii() {
+        return Err(DateError::Shape);
+    }
     if let Some(stripped) = rest.strip_suffix('Z').or_else(|| rest.strip_suffix('z')) {
         return Ok((stripped, Some(0)));
     }
@@ -479,6 +488,22 @@ temporal_schema!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multibyte_character_is_a_shape_error_and_no_panic() {
+        for time in ["12:3é", "1é:00", "12:00:0é", "12:00:00.é", "é2:00"] {
+            assert_eq!(time.parse::<Time>(), Err(DateError::Shape), "{time}");
+        }
+        for at in [
+            "2026-01-01T12:00:00+1é0",
+            "2026-01-01T12:00:00+é",
+            "2026-01-01T12:00:00-0é:00",
+            "2026-01-01T12:0é",
+        ] {
+            assert_eq!(at.parse::<DateTime>(), Err(DateError::Shape), "{at}");
+        }
+        assert_eq!("é26-01-01".parse::<Date>(), Err(DateError::Shape));
+    }
 
     #[test]
     fn a_day_that_does_not_exist_is_rejected() {

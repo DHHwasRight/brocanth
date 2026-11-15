@@ -2168,14 +2168,11 @@ report = "json"
 //!
 //! # The middleware this does not mount
 //!
-//! `ValidationPlugin` offers a middleware called `validation.report`, and
-//! this plugin does not pass the offer on. The offer is a name; the crate
-//! ships no function behind it, because turning an unhandled report into a
-//! 422 means knowing what this application's `Response` is. Mounting a name
-//! with no layer behind it stops the application at startup, so the offer is
-//! withheld until there is something to mount. Write the layer in this file,
-//! add `"validation.report" => Some(validation::layer),` to
-//! `src/plugins/mod.rs`, and forward `configure_router` to `self.inner`.
+//! None. Turning an unhandled report into a 422 means knowing what this
+//! application's `Response` is, so `brocanth-schema` ships no layer and
+//! offers none. To add one: write the layer in this file, offer it as
+//! `validation.report` from a `configure_router` here, and add
+//! `"validation.report" => Some(validation::layer),` to `src/plugins/mod.rs`.
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ProvidesContext};

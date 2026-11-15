@@ -44,7 +44,10 @@
 //! [`Writing`] is the shape that makes the mistake unwritable, the same way
 //! [`crate::testing::TestTransaction`] does: it holds the transaction and the
 //! held changes together, its `commit` is the only thing that publishes, and
-//! dropping it publishes nothing.
+//! dropping it publishes nothing. It opens only on a connection outside any
+//! transaction ([`Outermost`]): inside one, its commit would be a savepoint
+//! release. A guard inside a guard is [`Writing::within`], which hands its
+//! changes to the outer one.
 //!
 //! ```ignore
 //! let writing = Writing::begin(db, &broker).await?;
@@ -94,7 +97,7 @@ pub fn row_id<E: EntityTrait>(model: &E::Model) -> RowId<'static> {
         [only] => id_of(model.get(*only)),
         many => RowId::Text(Cow::Owned(
             many.iter()
-                .map(|column| model.get(*column).to_string())
+                .map(|column| key_text(model.get(*column)))
                 .collect::<Vec<String>>()
                 .join(","),
         )),
@@ -119,8 +122,8 @@ fn active_row_id<A: ActiveModelTrait>(active: &A) -> Option<RowId<'static>> {
         1 => Some(id_of(parts.remove(0))),
         _ => Some(RowId::Text(Cow::Owned(
             parts
-                .iter()
-                .map(Value::to_string)
+                .into_iter()
+                .map(key_text)
                 .collect::<Vec<String>>()
                 .join(","),
         ))),
@@ -143,14 +146,50 @@ fn id_of(value: Value) -> RowId<'static> {
             Ok(n) => RowId::I64(n),
             Err(_) => RowId::U128(n.into()),
         },
-        Value::String(Some(s)) => RowId::Text(Cow::Owned(s)),
-        Value::Char(Some(c)) => RowId::Text(Cow::Owned(c.to_string())),
-        // Everything else as the value prints itself: a UUID, a key type a
-        // driver feature added, or a `NULL` the database has not filled in.
+        // Everything else as text: a string, a UUID, a key type a driver
+        // feature added, or a `NULL` the database has not filled in.
         // `RowId::U128` stays for a layer that knows the bits are a UUID --
         // this crate does not turn on sea-orm's `with-uuid`, so it cannot name
         // that variant, and a hyphenated string is the honest reading.
-        other => RowId::Text(Cow::Owned(other.to_string())),
+        other => RowId::Text(Cow::Owned(key_text(other))),
+    }
+}
+
+/// One key column as text, with no SQL quoting.
+///
+/// `Value`'s `Display` is sea-query's SQL literal: a string or a UUID
+/// prints as `'…'`, with a quote inside doubled. A change names a row to a
+/// subscriber, not to a parser, so the quotes go.
+fn key_text(value: Value) -> String {
+    match value {
+        Value::String(Some(s)) => s,
+        Value::Char(Some(c)) => c.to_string(),
+        Value::TinyInt(Some(n)) => n.to_string(),
+        Value::SmallInt(Some(n)) => n.to_string(),
+        Value::Int(Some(n)) => n.to_string(),
+        Value::BigInt(Some(n)) => n.to_string(),
+        Value::TinyUnsigned(Some(n)) => n.to_string(),
+        Value::SmallUnsigned(Some(n)) => n.to_string(),
+        Value::Unsigned(Some(n)) => n.to_string(),
+        Value::BigUnsigned(Some(n)) => n.to_string(),
+        other => unquote(&other.to_string()),
+    }
+}
+
+/// `'a''b'` to `a'b`, and `E'a\'b'` to `a'b`. Anything else as it is.
+fn unquote(literal: &str) -> String {
+    if let Some(inner) = literal
+        .strip_prefix("E'")
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return inner.replace("\\'", "'").replace("\\\\", "\\");
+    }
+    match literal
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        Some(inner) => inner.replace("''", "'"),
+        None => literal.to_string(),
     }
 }
 
@@ -405,11 +444,28 @@ impl<S> fmt::Debug for Pending<S> {
     }
 }
 
+/// A connection that is not inside a transaction: its `begin` is a real
+/// `BEGIN`, and its `commit` a real `COMMIT`.
+///
+/// [`Writing::begin`] takes only this. On a transaction, `begin` is a
+/// `SAVEPOINT` and `commit` only releases it, so a guard opened there would
+/// publish before the outer `COMMIT`, and an outer rollback would leave
+/// changes published for rows that never existed. Sealed: a new
+/// implementation would have to be a promise this crate checks.
+pub trait Outermost: TransactionTrait + sealed::Sealed {}
+
+impl Outermost for sea_orm::DatabaseConnection {}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for sea_orm::DatabaseConnection {}
+}
+
 /// A transaction and the changes its writes made, together.
 ///
 /// The shape that makes "I published a row the transaction then rolled back"
 /// unwritable: the only thing that publishes is [`Writing::commit`], and it
-/// publishes after the commit returned. Dropping the guard rolls the
+/// publishes after the `COMMIT` returned. Dropping the guard rolls the
 /// transaction back and publishes nothing, which is the same bargain
 /// [`crate::testing::TestTransaction`] makes.
 ///
@@ -417,8 +473,17 @@ impl<S> fmt::Debug for Pending<S> {
 /// and `&writing` as its sink.
 ///
 /// `T` is the connection's own transaction type, which SeaORM 2.0 makes an
-/// associated type rather than one struct. A nested `begin` is a `SAVEPOINT`,
-/// so a guard opened inside a test's transaction behaves the same way.
+/// associated type rather than one struct.
+///
+/// # Inside another transaction
+///
+/// [`Writing::begin`] takes an [`Outermost`] connection only. Inside a
+/// `Writing`, open the inner one with [`Writing::within`]: its commit hands
+/// its changes to the outer guard, and they publish at the outer commit.
+/// Inside a transaction that is not a `Writing`, such as a test's,
+/// [`Writing::begin_inside`] publishes at the savepoint release, before the
+/// outer transaction ends: use it only where that outer transaction never
+/// commits.
 pub struct Writing<T, S> {
     txn: T,
     pending: Pending<S>,
@@ -432,10 +497,26 @@ where
     /// Open a transaction whose changes go to `sink` if it commits.
     pub async fn begin<C>(db: &C, sink: S) -> Result<Writing<T, S>, Error>
     where
+        C: Outermost<Transaction = T>,
+    {
+        Self::begin_inside(db, sink).await
+    }
+
+    /// Open a savepoint in `txn`, a transaction that is not a `Writing`,
+    /// whose changes go to `sink` when the savepoint is released.
+    ///
+    /// The release is not the commit: a rollback of `txn` after it leaves
+    /// the changes published for rows that are gone. So this is for an
+    /// outer transaction that never commits, such as
+    /// [`crate::testing::TestTransaction`], where a test reads what a commit
+    /// would publish. Anywhere else, use [`Writing::begin`] or
+    /// [`Writing::within`].
+    pub async fn begin_inside<C>(txn: &C, sink: S) -> Result<Writing<T, S>, Error>
+    where
         C: TransactionTrait<Transaction = T>,
     {
         Ok(Writing {
-            txn: db.begin().await?,
+            txn: txn.begin().await?,
             pending: Pending::new(sink),
         })
     }
@@ -464,6 +545,22 @@ where
     /// How many changes are waiting on the commit.
     pub fn held(&self) -> usize {
         self.pending.len()
+    }
+}
+
+impl<T, S> Writing<T, S>
+where
+    T: ConnectionTrait + TransactionSession + TransactionTrait<Transaction = T> + Send + Sync,
+    S: ChangeSink,
+{
+    /// Open a savepoint inside this guard. Its commit releases the
+    /// savepoint and hands its changes to this guard, so they publish when
+    /// this guard commits, and not at all when it rolls back.
+    pub async fn within(&self) -> Result<Writing<T, &Writing<T, S>>, Error> {
+        Ok(Writing {
+            txn: self.txn.begin().await?,
+            pending: Pending::new(self),
+        })
     }
 }
 
@@ -513,6 +610,22 @@ mod tests {
             self.asked.fetch_add(1, Ordering::SeqCst);
             true
         }
+    }
+
+    #[test]
+    fn a_key_is_named_without_sql_quotes() {
+        assert_eq!(key_text(Value::from("it's")), "it's");
+        assert_eq!(key_text(Value::from(7_i32)), "7");
+        // A UUID prints as a SQL literal, as a date does: quoted.
+        let date = sea_orm::prelude::Date::from_ymd_opt(2026, 11, 12).unwrap();
+        assert_eq!(Value::from(date).to_string(), "'2026-11-12'");
+        assert_eq!(key_text(Value::from(date)), "2026-11-12");
+        assert_eq!(unquote("'a''b'"), "a'b");
+        assert_eq!(unquote("E'a\\'b'"), "a'b");
+        assert_eq!(
+            id_of(Value::from(date)),
+            RowId::Text(Cow::Borrowed("2026-11-12"))
+        );
     }
 
     fn created() -> RowChange<'static> {

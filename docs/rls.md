@@ -294,7 +294,9 @@ SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
 - **Savepoints.** `assume` on a nested `Tx` ends with the outer
   transaction, but a rolled-back savepoint reverts it.
 - **A second `assume` replaces the first.** It does not merge: a key the
-  first set and the second does not is set to `''` (read as `NULL`), and
+  first set and the second does not is set to `''` (the policies of
+  `brocanth-rls` read it as `NULL` through `nullif(.., '')`; a policy
+  written by hand must do the same), and
   with no role the transaction returns to the login role
   (`SET LOCAL ROLE NONE`). The `Tx` and its savepoints share the record of
   what was set.

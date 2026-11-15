@@ -58,7 +58,10 @@ pub enum DbError {
     NotFound,
 
     /// A row from [`Exec::json`](crate::Exec::json) was not valid JSON.
-    #[error("a row did not decode as JSON: {0}")]
+    #[error(
+        "a row did not decode as JSON: {0}\n\
+         help: select one json or jsonb column, or use `all` with a `FromRow` type"
+    )]
     Json(#[source] serde_json::Error),
 }
 

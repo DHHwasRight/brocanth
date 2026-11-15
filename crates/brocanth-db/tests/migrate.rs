@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use brocanth_db::migrate::{read_dir, Lock, MigrateError, Migrator, State};
+use brocanth_db::migrate::{read_dir, MigrateError, Migrator, State};
 use brocanth_db::{Db, DbConfig};
 
 fn url() -> Option<String> {
@@ -206,6 +206,63 @@ async fn down_refuses_before_any_change_when_one_step_cannot_be_undone() {
 }
 
 #[tokio::test]
+async fn down_undoes_the_last_applied_and_not_the_last_name() {
+    let Some(sb) = Sandbox::new().await else {
+        return;
+    };
+    sb.write("20261105_110000_add_tags", TAGS);
+    sb.migrator().up().await.unwrap();
+    // A file merged in late: older by name, applied last.
+    sb.write("20261105_100000_add_posts", POSTS);
+    let late = brocanth_db::migrate::out_of_order(&sb.migrator().status().await.unwrap());
+    assert_eq!(late, ["20261105_100000_add_posts"]);
+    sb.migrator().up().await.unwrap();
+
+    assert_eq!(
+        sb.migrator().down(1).await.unwrap(),
+        ["20261105_100000_add_posts"]
+    );
+    assert_eq!(sb.tables().await, ["brocanth_migrations", "tags"]);
+    sb.drop().await;
+}
+
+#[tokio::test]
+async fn a_run_ignores_the_pool_limits_and_leaves_no_lock_behind() {
+    let Some(url) = url() else {
+        skipped();
+        return;
+    };
+    let Some(sb) = Sandbox::new().await else {
+        return;
+    };
+    sb.write("20261105_100000_add_posts", POSTS);
+    // A pool that is read-only: a run must still write.
+    let mut cfg = DbConfig::new(&url);
+    cfg.max_connections = 1;
+    cfg.search_path = vec![sb.schema.clone()];
+    cfg.read_only = true;
+    cfg.statement_timeout = Some(std::time::Duration::from_secs(1));
+    let db = Db::connect(&cfg).await.expect("connect");
+    let files = read_dir(&sb.dir).unwrap();
+    assert_eq!(
+        Migrator::new(&db, files.clone()).up().await.unwrap().len(),
+        1
+    );
+    // The run closed its connection, so the pool's one connection is free
+    // and holds no advisory lock.
+    let held: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(held, 0);
+    assert_eq!(Migrator::new(&db, files).down(1).await.unwrap().len(), 1);
+    db.close().await;
+    sb.drop().await;
+}
+
+#[tokio::test]
 async fn a_new_file_is_pending_and_applies_as_written() {
     let Some(sb) = Sandbox::new().await else {
         return;
@@ -234,30 +291,5 @@ async fn a_new_file_is_pending_and_applies_as_written() {
     assert_eq!(sb.tables().await, ["brocanth_migrations", "notes"]);
     assert_eq!(sb.migrator().down(5).await.unwrap(), [name]);
     assert_eq!(sb.tables().await, ["brocanth_migrations"]);
-    sb.drop().await;
-}
-
-#[tokio::test]
-async fn a_held_lock_makes_up_wait_until_it_is_released() {
-    let Some(sb) = Sandbox::new().await else {
-        return;
-    };
-    sb.write(
-        "20260101000000_a",
-        "CREATE TABLE a (id int);\n-- down\nDROP TABLE a;\n",
-    );
-    // What the `model` module's migrate holds around SeaORM's `up`.
-    let lock = Lock::acquire(&sb.db).await.expect("the lock");
-    let db = sb.db.clone();
-    let files = read_dir(&sb.dir).expect("read the files");
-    let up = tokio::spawn(async move { Migrator::new(&db, files).up().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(
-        !up.is_finished(),
-        "`up` ran while another run held the lock"
-    );
-    lock.release().await;
-    let applied = up.await.expect("the task").expect("up after the release");
-    assert_eq!(applied, ["20260101000000_a"]);
     sb.drop().await;
 }

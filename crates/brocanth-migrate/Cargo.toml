@@ -10,6 +10,10 @@ readme = "README.md"
 # snapshots and writes Rust source for a migration. The CLI links it, and the
 # CLI must not link an ORM and a SQL driver to write a file.
 [dependencies]
+# Only `brocanth_db::stamp`, the UTC stamp every kind of migration uses, so
+# the files of all three tools sort the same way. No default features: no
+# driver, no TLS stack, no query builder.
+brocanth-db = { path = "../brocanth-db", version = "0.1.0", default-features = false }
 # `span-locations`, so a missing id is reported as `file:line:col` and so the
 # id stamper knows which line to write above.
 proc-macro2 = { version = "1", features = ["span-locations"] }

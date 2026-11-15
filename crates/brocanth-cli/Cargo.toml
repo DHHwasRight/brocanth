@@ -32,6 +32,9 @@ brocanth-cache-redis = { path = "../brocanth-cache-redis", version = "0.1.0", de
 # The database pool, for its scaffold module alone, on the same terms.
 brocanth-db = { path = "../brocanth-db", version = "0.1.0", default-features = false, features = ["scaffold"] }
 
+# The ORM, for its `model` module alone, on the same terms: no SeaORM.
+brocanth-model = { path = "../brocanth-model", version = "0.1.0", default-features = false, features = ["scaffold"] }
+
 # First-party page-view counts, for its scaffold module alone, on the same
 # terms.
 brocanth-analytics = { workspace = true, default-features = false, features = [

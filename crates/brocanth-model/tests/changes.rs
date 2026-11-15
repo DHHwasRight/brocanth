@@ -218,7 +218,7 @@ async fn a_rollback_publishes_nothing_and_a_commit_publishes_everything() {
     let sink = Recorder::default();
 
     // Rolled back. The rows are gone, so the changes must be too.
-    let writing = Writing::begin(&*db, &sink).await.expect("begin");
+    let writing = Writing::begin_inside(&*db, &sink).await.expect("begin");
     let author = an_author()
         .insert_published(&*writing, &writing)
         .await
@@ -233,7 +233,7 @@ async fn a_rollback_publishes_nothing_and_a_commit_publishes_everything() {
     assert!(sink.changes().is_empty(), "a rollback publishes nothing");
 
     // Committed. Now the same two writes go out, in the order they happened.
-    let writing = Writing::begin(&*db, &sink).await.expect("begin");
+    let writing = Writing::begin_inside(&*db, &sink).await.expect("begin");
     let author = an_author()
         .insert_published(&*writing, &writing)
         .await
@@ -257,7 +257,7 @@ async fn a_guard_that_is_dropped_publishes_nothing() {
     let sink = Recorder::default();
 
     {
-        let writing = Writing::begin(&*db, &sink).await.expect("begin");
+        let writing = Writing::begin_inside(&*db, &sink).await.expect("begin");
         an_author()
             .insert_published(&*writing, &writing)
             .await
@@ -268,6 +268,38 @@ async fn a_guard_that_is_dropped_publishes_nothing() {
     }
 
     assert!(sink.changes().is_empty());
+}
+
+#[tokio::test]
+async fn an_inner_commit_publishes_nothing_when_the_outer_guard_rolls_back() {
+    let harness = or_skip!(Harness::isolated_migrated::<Migrator>());
+    let sink = Recorder::default();
+
+    // A real transaction on the connection, and a savepoint inside it.
+    let outer = Writing::begin(harness.conn(), &sink).await.expect("begin");
+    let inner = outer.within().await.expect("savepoint");
+    an_author()
+        .insert_published(&*inner, &inner)
+        .await
+        .expect("insert");
+    // The release hands the change to the outer guard, and publishes none.
+    assert_eq!(inner.commit().await.expect("release"), 1);
+    assert_eq!(outer.held(), 1);
+    assert!(sink.changes().is_empty(), "nothing before the outer commit");
+
+    outer.rollback().await.expect("rollback");
+    assert!(sink.changes().is_empty(), "the row never existed");
+
+    // The same, committed: now the change goes out, once.
+    let outer = Writing::begin(harness.conn(), &sink).await.expect("begin");
+    let inner = outer.within().await.expect("savepoint");
+    an_author()
+        .insert_published(&*inner, &inner)
+        .await
+        .expect("insert");
+    inner.commit().await.expect("release");
+    assert_eq!(outer.commit().await.expect("commit"), 1);
+    assert_eq!(sink.only().collection, "user");
 }
 
 // ---------------------------------------------------------------------------

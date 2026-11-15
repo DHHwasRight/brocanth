@@ -171,10 +171,10 @@ The file marks each step that needs a check with `// Check:`. Examples: a
   `#[validates]`.
 - `crates/brocanth-migrate/src/tool.rs`: the `migrate` tool (`ids`, `make`,
   `sync`). `src/migrator.rs`: the `migrations/mod.rs` list and its digest.
-- `crates/brocanth-cli/src/modules/model.rs`: the project's
+- `crates/brocanth-model/src/scaffold.rs`: the project's
   `src/commands/migrate.rs`, `src/bin/migrate.rs` and the first, empty
-  list. `crates/brocanth-migrate/tests/golden/migrator-empty.rs` holds the
-  CLI and the tool to the same bytes.
+  list. A test there compares that list with what the tool writes, so the
+  generator and the tool hold the same bytes.
 
 ## 7. SQL migrations, for `db` without `model`
 

@@ -217,9 +217,9 @@ the real cliff: five six-table joins took a Diesel crate from 1.05 s to
 43 release candidates, and its MSRV jumped to 1.94. `schema-sync` is
 self-described as "experimental and exempt from semver". The risk is schedule,
 not ceiling — Diesel's missing pieces are design positions, not unshipped
-features. Mitigation: pin the version, wrap `schema-sync` behind our own
-interface so a breaking change costs one adapter, and keep migrations
-hand-written until it stabilises.
+features. Mitigation: pin the version, and do not use `schema-sync` at all:
+`migrate make` writes each migration from a diff of two snapshots of the
+models (§11), and the developer reads and commits it.
 
 ### Four traps to design around from day one
 
@@ -487,6 +487,12 @@ Our editor is a text editor, so the identity has to live in the text:
 `#[brocanth(id = "01J…")]`, written once by the scaffolder and never edited by
 hand. Then `migrate make` diffs by id and can emit a rename. Same idea,
 adapted to the fact that a human is doing the editing.
+
+This is how migrations are written now (2026-11-12): `migrate make` reads
+`src/models/`, compares it with `migrations/schema.json`, and writes a
+SeaORM migration with its `down`. Nothing is hand-written but the edits a
+developer makes to that proposal. The `schema_sync` adapter that waited for
+SeaORM's `schema-sync` is gone: the generator replaced it.
 
 ## 12. What we decline from PocketBase, and the price of §8
 

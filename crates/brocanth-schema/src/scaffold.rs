@@ -13,26 +13,19 @@
 //!
 //! # Why the generated plugin is not `ValidationPlugin`
 //!
-//! Because `ValidationConfig` does not deserialise. Its own documentation
-//! says "the application writes it in `main`, or `brocanth-config` reads it
-//! out of a TOML section", and the second half is not true today: the struct
-//! carries no `Deserialize`, and this crate's `serde` feature covers
-//! `SchemaNode`, `Issue` and `Issues` and not the config. So the generated
+//! Because `ValidationConfig` does not deserialise: the struct carries no
+//! `Deserialize`, and this crate's `serde` feature covers `SchemaNode`,
+//! `Issue` and `Issues` and not the config. So the generated
 //! plugin owns a `Settings` that does deserialise -- one string -- turns it
 //! into a `ReportStyle` at `configure`, where a typo can still be answered,
 //! and hands the result to a `ValidationPlugin` it holds. The same split as
 //! the cache, for the same reason.
 //!
-//! # What it deliberately does not mount
+//! # What it does not mount
 //!
-//! `ValidationPlugin::configure_router` offers a middleware called
-//! `validation.report`, and this module does not pass that offer on. The
-//! offer is a name and a sentence; the crate ships no function behind it,
-//! because turning an unhandled report into a 422 means knowing what the
-//! application's `Response` is. A generated project would therefore mount a
-//! name it has no layer for, which stops the application at startup. The
-//! generated file says this out loud, next to the two lines that would
-//! change it.
+//! No middleware. Turning an unhandled report into a 422 means knowing what
+//! the application's `Response` is, so the crate ships no layer and offers
+//! none. The generated file says where such a layer would go.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -157,14 +150,11 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # The middleware this does not mount
 //!
-//! `ValidationPlugin` offers a middleware called `validation.report`, and
-//! this plugin does not pass the offer on. The offer is a name; the crate
-//! ships no function behind it, because turning an unhandled report into a
-//! 422 means knowing what this application's `Response` is. Mounting a name
-//! with no layer behind it stops the application at startup, so the offer is
-//! withheld until there is something to mount. Write the layer in this file,
-//! add `"validation.report" => Some(validation::layer),` to
-//! `src/plugins/mod.rs`, and forward `configure_router` to `self.inner`.
+//! None. Turning an unhandled report into a 422 means knowing what this
+//! application's `Response` is, so `brocanth-schema` ships no layer and
+//! offers none. To add one: write the layer in this file, offer it as
+//! `validation.report` from a `configure_router` here, and add
+//! `"validation.report" => Some(validation::layer),` to `src/plugins/mod.rs`.
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
 use brocanth::plugin_context::{{ContextBuilder, ProvidesContext}};

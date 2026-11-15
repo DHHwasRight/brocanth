@@ -109,7 +109,9 @@ pub struct DbConfig {
 
     /// A PEM bundle of the CAs to trust. When set, the connection uses
     /// `sslmode=verify-full` against it, whatever the URL says. When unset,
-    /// the URL's `sslmode` applies (sqlx's default is `prefer`).
+    /// the URL's `sslmode` applies. sqlx's default is `prefer`: it tries TLS,
+    /// verifies no certificate, and falls back to plain text. Set this, or
+    /// `sslmode=verify-full` in the URL, for a server on another host.
     #[cfg_attr(feature = "serde", serde(default))]
     pub ca_file: Option<PathBuf>,
 }
@@ -293,20 +295,47 @@ fn search_path_value(schemas: &[String]) -> Result<String, DbError> {
     Ok(parts.join(","))
 }
 
-/// Replaces the password of `scheme://user:password@host/…` with `***`.
+/// Replaces the password of `scheme://user:password@host/…` with `***`,
+/// and the value of a `password` query parameter too: sqlx reads a
+/// password from either place.
 fn redact(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return "***".to_owned();
     };
     let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
-    match authority.rsplit_once('@') {
+    let authority = match authority.rsplit_once('@') {
         Some((userinfo, host)) => match userinfo.split_once(':') {
-            Some((user, _password)) => format!("{scheme}://{user}:***@{host}{tail}"),
-            None => format!("{scheme}://{userinfo}@{host}{tail}"),
+            Some((user, _password)) => format!("{user}:***@{host}"),
+            None => format!("{userinfo}@{host}"),
         },
-        None => url.to_owned(),
+        None => authority.to_owned(),
+    };
+    format!("{scheme}://{authority}{}", redact_query(tail))
+}
+
+/// `/path?a=1&password=x#f` with the `password` value replaced by `***`.
+fn redact_query(tail: &str) -> String {
+    let Some((path, query)) = tail.split_once('?') else {
+        return tail.to_owned();
+    };
+    let (query, fragment) = match query.split_once('#') {
+        Some((query, fragment)) => (query, Some(fragment)),
+        None => (query, None),
+    };
+    let pairs: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if key.eq_ignore_ascii_case("password") => format!("{key}=***"),
+            _ => pair.to_owned(),
+        })
+        .collect();
+    let mut out = format!("{path}?{}", pairs.join("&"));
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
     }
+    out
 }
 
 #[cfg(feature = "serde")]
@@ -424,6 +453,22 @@ mod tests {
         assert_eq!(redact("postgres://h/d"), "postgres://h/d");
         assert_eq!(redact("postgres://u@h/d"), "postgres://u@h/d");
         assert_eq!(redact("postgres://u:p:q@h"), "postgres://u:***@h");
+    }
+
+    #[test]
+    fn a_password_query_parameter_is_redacted() {
+        assert_eq!(
+            redact("postgres://u@h/d?sslmode=require&password=hunter2"),
+            "postgres://u@h/d?sslmode=require&password=***"
+        );
+        assert_eq!(
+            redact("postgres://u:p@h/d?password=hunter2&x=1"),
+            "postgres://u:***@h/d?password=***&x=1"
+        );
+        assert_eq!(
+            redact("postgres://h?password=a"),
+            "postgres://h?password=***"
+        );
     }
 
     #[test]

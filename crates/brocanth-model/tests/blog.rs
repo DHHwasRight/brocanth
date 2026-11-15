@@ -190,6 +190,23 @@ async fn uniqueness_queries_and_does_not_collide_a_record_with_itself() {
     again.email = Set("ada@example.com".to_owned());
     let saved = again.update_checked(&*db).await.expect("update");
     assert_eq!(saved.name, "Ada Lovelace");
+
+    // The race the lookup cannot close: a second writer that passed the
+    // check. Here the hooks are bypassed, so only the unique index refuses
+    // it, and the refusal still reads as the same field error.
+    let raced = bulk::unchecked::insert_many::<user::Entity, _, _>(
+        HooksBypassed::because("test: a writer that passed the uniqueness check"),
+        [user::ActiveModel {
+            name: Set("Ada twice".to_owned()),
+            email: Set("ada@example.com".to_owned()),
+            ..Default::default()
+        }],
+    )
+    .exec(&*db)
+    .await
+    .expect_err("the unique index refuses it");
+    let raced = brocanth_model::Error::from(raced);
+    assert!(raced.errors().expect("errors").has_code("email", "taken"));
 }
 
 #[tokio::test]
@@ -543,23 +560,4 @@ fn the_registry_describes_columns_for_a_generator() {
         registry.unregistered(),
         ["sea_orm_migration::seaql_migrations"]
     );
-}
-
-// ---------------------------------------------------------------------------
-// 8. The schema-sync seam
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_schema_planner_proposes_and_never_applies() {
-    use brocanth_model::schema_sync::{PlanOnly, SchemaPlanner};
-
-    let plan = PlanOnly::new(DbBackend::Postgres)
-        .with(user::Entity)
-        .with(post::Entity)
-        .plan();
-
-    assert_eq!(plan.additive.len(), 2);
-    assert!(plan.additive[0].sql.contains("CREATE TABLE"));
-    assert!(!plan.is_destructive());
-    assert!(!plan.warnings.is_empty(), "it says it is a proposal");
 }
