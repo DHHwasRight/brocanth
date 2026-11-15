@@ -416,6 +416,9 @@ pub struct Value {
     kind: ValueKind,
     from: Provenance,
     shadowed: Vec<Value>,
+    /// The text an inferred scalar was read from: an environment variable
+    /// or a flag. A `String` field reads it, so `007` stays `007`.
+    raw: Option<std::sync::Arc<str>>,
 }
 
 impl PartialEq for Value {
@@ -435,7 +438,27 @@ impl Value {
             kind,
             from,
             shadowed: Vec::new(),
+            raw: None,
         }
+    }
+
+    /// A value whose kind was inferred from `raw`: an environment variable
+    /// or a flag. A `String` field takes `raw` as it was written.
+    pub(crate) fn inferred(raw: &str, from: Provenance) -> Self {
+        let kind = crate::env::infer(raw);
+        let keep = matches!(
+            kind,
+            ValueKind::Integer(_) | ValueKind::Float(_) | ValueKind::Boolean(_)
+        );
+        Self {
+            raw: keep.then(|| raw.into()),
+            ..Self::new(kind, from)
+        }
+    }
+
+    /// The text an inferred number or boolean was read from.
+    pub(crate) fn raw(&self) -> Option<&str> {
+        self.raw.as_deref()
     }
 
     /// Where this value came from.
@@ -676,6 +699,7 @@ pub fn merge(base: &mut Value, over: Value) {
                 kind: std::mem::replace(&mut base.kind, kind),
                 from: std::mem::replace(&mut base.from, over.from),
                 shadowed: Vec::new(),
+                raw: std::mem::replace(&mut base.raw, over.raw),
             });
             history.append(&mut base.shadowed);
             base.shadowed = history;

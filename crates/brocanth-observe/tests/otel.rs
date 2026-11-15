@@ -22,6 +22,7 @@ fn observer() -> (Observer, InMemorySpanExporter, SdkTracerProvider) {
     let mut config = ObserveConfig::new("shop");
     config.install_subscriber = false;
     config.log_format = LogFormat::Json;
+    config.tracing.trust_traceparent = true;
     (
         Observer::with_tracer_provider(config, provider.clone()),
         exporter,
@@ -42,6 +43,29 @@ fn run<T>(observer: &Observer, f: impl std::future::Future<Output = T>) -> (T, V
 async fn page(_: Request) -> Response {
     let _child = tracing::info_span!("render").entered();
     Response::text(200, "ok")
+}
+
+#[test]
+fn an_untrusted_traceparent_starts_a_new_trace() {
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let mut config = ObserveConfig::new("shop");
+    config.install_subscriber = false;
+    let observer = Observer::with_tracer_provider(config, provider.clone());
+    let handler = observer.wrap(page);
+    let request = Request::new(Verb::Get, "/")
+        .with_header("traceparent", &format!("00-{TRACE_ID}-{PARENT_ID}-01"));
+    let (response, _) = run(&observer, handler(request));
+    provider.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let server = spans
+        .iter()
+        .find(|s| s.span_kind == SpanKind::Server)
+        .expect("the request span");
+    assert_ne!(server.span_context.trace_id().to_string(), TRACE_ID);
+    assert!(!response.header("traceparent").unwrap().contains(TRACE_ID));
 }
 
 #[test]

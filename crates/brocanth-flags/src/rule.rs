@@ -26,9 +26,24 @@ impl Flag {
     /// A flag stored under `key`, with a sentence for the admin panel.
     ///
     /// The key is lower case: letters, digits, `_`, `-` and `.`, at most 64
-    /// characters. [`valid_key`] checks it; [`crate::Flags::set`] refuses a
-    /// key that fails.
+    /// characters, as [`valid_key`] says.
+    ///
+    /// # Panics
+    ///
+    /// The key is not valid. In a `const`, that is a compile error, so a
+    /// flag that [`crate::Flags::set`] would refuse never builds:
+    ///
+    /// ```compile_fail
+    /// use brocanth_flags::Flag;
+    ///
+    /// const NEW_CHECKOUT: Flag = Flag::new("NewCheckout", "The redesign.");
+    /// ```
     pub const fn new(key: &'static str, description: &'static str) -> Flag {
+        assert!(
+            valid_key(key),
+            "a flag key is 1 to 64 characters of a-z, 0-9, `_`, `-` and `.`\n\
+             help: write the key in lower case, with `_` between words: `new_checkout`"
+        );
         Flag { key, description }
     }
 
@@ -48,12 +63,19 @@ impl Flag {
 ///
 /// The rule keeps a key safe in a URL path and in a log line without
 /// escaping.
-pub fn valid_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 64
-        && key
-            .bytes()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
+pub const fn valid_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if !matches!(bytes[i], b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Who asks: an id and the groups they are in.

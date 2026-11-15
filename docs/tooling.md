@@ -205,7 +205,7 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 | `check/recommended` | warning | a module in the project recommends one it lacks (the CLI's half) |
 | `check/module-version` | warning | the installed CLI writes a module at another version than `brocanth.toml` records, or no version is recorded (the CLI's half) |
 | `deploy/development-only` | error | `--deploy` for production, and the project has a module for tests and development only, such as `cache-memory` or `jobs-memory` (the CLI's half) |
-| `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` (every environment) |
+| `check/db-url` | error | `[db] url` is not a `postgres://` or `postgresql://` URL (every environment) |
 | `deploy/env` | warning | `--deploy` reads `development` or `test` |
 | `deploy/no-config` | warning | no file and no variable configures the environment |
 | `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |
@@ -214,7 +214,9 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 | `deploy/default-secret` | error | `[storage] secret` is the scaffold's development string, or shorter than 32 characters |
 | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file (the value is never printed) |
 | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
-| `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
+| `deploy/migrate` | warning | a module's `migrate` is true, or unset where it defaults to true |
+| `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
+| `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
 | `deploy/csrf-off` | error | the project has `sessions` or `auth`, and no `Csrf` hook is registered |
 | `deploy/hooks-not-run` | error | a hook is registered, and nothing in `src/` serves through `brocanth_server::serve` or `Bridge` |
 | `deploy/hsts` | warning | nothing in `src/` sets `Strict-Transport-Security` |

@@ -35,6 +35,12 @@ fn a_project_without_config_reads_the_settings_from_flags() {
     shape("flags-no-config", &["db", "flags"]);
 }
 
+/// With `auth`: a flag sees the signed-in account, and `enabled` is async.
+#[test]
+fn a_project_with_auth_reads_the_signed_in_account() {
+    shape("flags-auth", &["config", "db", "auth", "flags"]);
+}
+
 /// The module needs `db`, and says why.
 #[test]
 fn flags_without_a_database_is_refused_with_the_reason() {

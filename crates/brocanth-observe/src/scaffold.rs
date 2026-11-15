@@ -37,6 +37,9 @@ fn krate() -> Dep {
     Dep::brocanth("brocanth-observe")
         .no_default_features()
         .feature("runtime")
+        // The queue's events and depth. `jobs` names the Postgres driver,
+        // which `brocanth-jobs` links by default in every project anyway.
+        .feature_with("jobs", "jobs")
 }
 
 /// The parent: an `Observer` around every request.
@@ -239,6 +242,11 @@ fn settings(project: &Project) -> Vec<Setting> {
             1.0,
             "The share of new traces kept, from 0.0 to 1.0.",
         ));
+        out.push(Setting::bool(
+            "trust_traceparent",
+            false,
+            "Follow an inbound traceparent. Off at the edge: no caller forces sampling.",
+        ));
     }
     out
 }
@@ -283,7 +291,7 @@ fn plugin_rs(project: &Project) -> String {
             "            format: String::new(),\n            level: \"info\".to_string(),\n",
         );
         build.push_str(
-            "    config.log_format = LogFormat::resolve(Some(&settings.format), &environment())?;\n    config.log_level = settings.level;\n",
+            "    let env = brocanth_observe::environment(crate::app::APP);\n    config.log_format = LogFormat::resolve(Some(&settings.format), &env)?;\n    config.log_level = settings.level;\n",
         );
     }
     if health {
@@ -312,13 +320,13 @@ fn plugin_rs(project: &Project) -> String {
     }
     if tracing {
         fields.push_str(
-            "    /// The OTLP/HTTP collector. Empty: `OTEL_EXPORTER_OTLP_ENDPOINT`.\n    pub otlp_endpoint: String,\n    /// The share of new traces kept, from 0.0 to 1.0.\n    pub sample_ratio: f64,\n",
+            "    /// The OTLP/HTTP collector. Empty: `OTEL_EXPORTER_OTLP_ENDPOINT`.\n    pub otlp_endpoint: String,\n    /// The share of new traces kept, from 0.0 to 1.0.\n    pub sample_ratio: f64,\n    /// Continue an inbound `traceparent`. Off at the edge: a caller could\n    /// send a sampled one and force every request it makes to be kept.\n    pub trust_traceparent: bool,\n",
         );
         defaults.push_str(
-            "            otlp_endpoint: String::new(),\n            sample_ratio: 1.0,\n",
+            "            otlp_endpoint: String::new(),\n            sample_ratio: 1.0,\n            trust_traceparent: false,\n",
         );
         build.push_str(
-            "    config.tracing.enabled = true;\n    config.tracing.endpoint = path(settings.otlp_endpoint);\n    config.tracing.sample_ratio = settings.sample_ratio;\n",
+            "    config.tracing.enabled = true;\n    config.tracing.endpoint = path(settings.otlp_endpoint);\n    config.tracing.sample_ratio = settings.sample_ratio;\n    config.tracing.trust_traceparent = settings.trust_traceparent;\n",
         );
     }
     let uses_duration = if health {
@@ -328,12 +336,7 @@ fn plugin_rs(project: &Project) -> String {
     };
     let needs_path = health || metrics || tracing;
     let path_fn = if needs_path {
-        "fn path(value: String) -> Option<String> {\n    (!value.trim().is_empty()).then_some(value)\n}\n\n"
-    } else {
-        ""
-    };
-    let env_fn = if logs {
-        "/// `MY_APP_ENV`, the variable the config plugin reads too.\nfn environment() -> String {\n    let var = format!(\"{}_ENV\", crate::app::APP.to_uppercase().replace('-', \"_\"));\n    std::env::var(var).unwrap_or_else(|_| \"development\".to_string())\n}\n\n"
+        "/// The value, trimmed; `None` when nothing is left.\nfn path(value: String) -> Option<String> {\n    let value = value.trim();\n    (!value.is_empty()).then(|| value.to_string())\n}\n\n"
     } else {
         ""
     };
@@ -368,7 +371,7 @@ use brocanth_observe::{{{imports}}};
 pub mod serving;
 
 {settings_struct}
-{env_fn}{path_fn}{observer_sig}{build}    Observer::new(config)
+{path_fn}{observer_sig}{build}    Observer::new(config)
 }}
 
 pub struct Observe {{

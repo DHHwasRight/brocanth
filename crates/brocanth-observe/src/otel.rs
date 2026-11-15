@@ -5,8 +5,9 @@
 //! becomes a child of the request's span with nothing written for it.
 //!
 //! W3C trace context in and out: an incoming `traceparent` becomes the
-//! request span's parent, and the response carries the request span's own
-//! `traceparent`, so a caller can find the trace it started.
+//! request span's parent when [`TracingConfig::trust_traceparent`] says
+//! so, and the response carries the request span's own `traceparent`, so a
+//! caller can find the trace it started.
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
@@ -44,8 +45,9 @@ impl Otel {
         }
         let exporter = exporter.build().map_err(|e| {
             format!(
-                "cannot build the OTLP exporter: {e}\nhelp: set `tracing.endpoint` or \
-                 OTEL_EXPORTER_OTLP_ENDPOINT to a collector URL such as http://localhost:4318"
+                "cannot build the OTLP exporter: {e}\nhelp: set `otlp_endpoint` under \
+                 `[observability]` (`TracingConfig::endpoint` in Rust), or \
+                 OTEL_EXPORTER_OTLP_ENDPOINT, to a collector URL such as http://localhost:4318"
             )
         })?;
 
@@ -80,18 +82,22 @@ impl Otel {
         tracing_opentelemetry::layer().with_tracer(self.provider.tracer("brocanth"))
     }
 
-    /// Makes `span` a child of the request's `traceparent`, if it has one,
-    /// and returns its trace and span ids as hex.
+    /// Makes `span` a child of the request's `traceparent`, if it has one
+    /// and `trust` says to follow it, and returns its trace and span ids as
+    /// hex. Untrusted, the request starts a new trace, sampled by ratio.
     pub(crate) fn adopt(
         &self,
         span: &tracing::Span,
         request: &Request,
+        trust: bool,
     ) -> Option<(String, String)> {
-        let parent = self.propagator.extract(&Headers(request));
-        if parent.span().span_context().is_valid() {
-            // Fails only when the span has no OpenTelemetry layer under it,
-            // and then there is nothing to parent.
-            let _ = span.set_parent(parent);
+        if trust {
+            let parent = self.propagator.extract(&Headers(request));
+            if parent.span().span_context().is_valid() {
+                // Fails only when the span has no OpenTelemetry layer under
+                // it, and then there is nothing to parent.
+                let _ = span.set_parent(parent);
+            }
         }
         let context = span.context();
         let span_context = context.span().span_context().clone();

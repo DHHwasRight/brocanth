@@ -14,7 +14,7 @@
 //!
 //! | Id | Severity | When |
 //! |---|---|---|
-//! | `check/dialect` | error | `[policy] dialect` is not the database of `[db] url` |
+//! | `check/db-url` | error | `[db] url` is not a `postgres://` or `postgresql://` URL |
 //! | `deploy/env` | warning | `--deploy` on `development` or `test` |
 //! | `deploy/no-config` | warning | no file and no variable configures this environment |
 //! | `deploy/cookie-insecure` | error | `[sessions] secure` or `[auth] secure` is `false` |
@@ -23,7 +23,9 @@
 //! | `deploy/default-secret` | error | `[storage] secret` is the scaffold's development string, or short |
 //! | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file |
 //! | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
-//! | `deploy/jobs-migrate` | warning | `[jobs] migrate = true` |
+//! | `deploy/migrate` | warning | a module's `migrate` is true, or unset where it defaults to true |
+//! | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
+//! | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
 //! | `deploy/storage-local` | warning | the project has `storage` and no `db`, so its files are on one machine's disk |
 //! | `deploy/csrf-off` | error | the project has cookies and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
@@ -44,6 +46,83 @@ use crate::{AppName, Config, ConfigError, Loader, Provenance, Redaction, Table, 
 
 /// The scaffold's own placeholder for `[storage] secret`.
 const SCAFFOLD_SECRET: &str = "development only";
+
+/// A module that creates its tables at startup when its `migrate` is true.
+struct Migrates {
+    /// The module, as `brocanth.toml` names it.
+    module: &'static str,
+    /// Its config section.
+    section: &'static str,
+    /// The setting exists only when every one of these is in the project.
+    needs: &'static [&'static str],
+    /// The setting does not exist when one of these is in the project: the
+    /// module keeps its data somewhere else.
+    unless: &'static [&'static str],
+    /// The statements to put in a migration instead.
+    schema: &'static str,
+}
+
+/// Every module whose generated `[section] migrate` defaults to true. A
+/// module that adds one lists it here; a section that is not listed is
+/// still reported when its file sets `migrate = true`.
+const MIGRATES: &[Migrates] = &[
+    Migrates {
+        module: "jobs",
+        section: "jobs",
+        needs: &[],
+        unless: &["jobs-memory"],
+        schema: "`Queue::schema_sql`",
+    },
+    Migrates {
+        module: "cache",
+        section: "cache",
+        needs: &[],
+        unless: &["cache-memory", "cache-redis"],
+        schema: "`brocanth_cache::PgCache::schema_sql`",
+    },
+    Migrates {
+        module: "flags",
+        section: "flags",
+        needs: &[],
+        unless: &[],
+        schema: "`brocanth_flags::PgStore::SCHEMA`",
+    },
+    Migrates {
+        module: "audit",
+        section: "audit",
+        needs: &[],
+        unless: &[],
+        schema: "`brocanth_audit::PgStore::SCHEMA`",
+    },
+    Migrates {
+        module: "analytics",
+        section: "analytics",
+        needs: &[],
+        unless: &[],
+        schema: "`brocanth_analytics::PgStore::SCHEMA`",
+    },
+    Migrates {
+        module: "oauth-client",
+        section: "oauth_client",
+        needs: &[],
+        unless: &["oauth-client-memory"],
+        schema: "`brocanth_oauth_client::PgTokenStore::SCHEMA`",
+    },
+    Migrates {
+        module: "webhooks-in",
+        section: "webhooks_in",
+        needs: &["db"],
+        unless: &[],
+        schema: "`brocanth_webhooks::PgSeen::SCHEMA`",
+    },
+    Migrates {
+        module: "webhooks-out",
+        section: "webhooks_out",
+        needs: &[],
+        unless: &[],
+        schema: "`brocanth_webhooks::Outgoing::SCHEMA`",
+    },
+];
 
 /// What a run is asked to do: the command line of `check`.
 #[derive(Debug, Clone, Default)]
@@ -265,6 +344,17 @@ impl Project {
         self.modules.iter().any(|m| m == module)
     }
 
+    /// Whether a file under `deploy/` names the variable `var`: the
+    /// generated Kubernetes manifest sets some of them.
+    fn deploy_sets(&self, var: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.root.join("deploy")) else {
+            return false;
+        };
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(var)))
+    }
+
     fn config_file(&self, env: &str) -> String {
         format!("config/{env}.toml")
     }
@@ -370,36 +460,29 @@ fn get<'a>(config: &'a Config, path: &str) -> Option<&'a Value> {
 /// The checks that hold in every environment.
 fn always(project: &Project, config: &Config) -> Vec<Finding> {
     let mut out = Vec::new();
-    if let (Some(url), Some(dialect)) = (get(config, "db.url"), get(config, "policy.dialect")) {
-        let backend = url.as_str().and_then(backend_of);
-        let said = dialect.as_str().unwrap_or_default();
-        if let Some(backend) = backend {
-            if !said.eq_ignore_ascii_case(backend) {
-                out.push(
-                    Finding::error(
-                        "check/dialect",
-                        format!(
-                            "`[policy] dialect` is `{said}`, and `[db] url` is a {backend} database"
-                        ),
-                    )
-                    .at(place(project, dialect))
-                    .note(format!("`[db] url` is set at {}", place(project, url)))
-                    .help(format!(
-                        "set `dialect = \"{backend}\"`: a condition compiled for another dialect is SQL the database refuses"
-                    )),
-                );
-            }
+    // Postgres only (PLAN.md ADR 5): any other URL is a database brocanth
+    // does not speak to.
+    if let Some(url) = get(config, "db.url") {
+        if let Some(text) = url.as_str().filter(|u| !u.is_empty() && !is_postgres(u)) {
+            let scheme = text.split_once("://").map_or(text, |(s, _)| s);
+            out.push(
+                Finding::error(
+                    "check/db-url",
+                    format!("`[db] url` is a `{scheme}` URL, and brocanth runs on Postgres only"),
+                )
+                .at(place(project, url))
+                .help(format!(
+                    "set `url` under `[db]` to a `postgres://` URL, or ${}",
+                    project.variable("db", "url")
+                )),
+            );
         }
     }
     out
 }
 
-fn backend_of(url: &str) -> Option<&'static str> {
-    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-        Some("postgres")
-    } else {
-        None
-    }
+fn is_postgres(url: &str) -> bool {
+    url.starts_with("postgres://") || url.starts_with("postgresql://")
 }
 
 /// The production checks.
@@ -551,18 +634,8 @@ fn deploy(
             );
         }
     }
-    if let Some(v) = get(config, "jobs.migrate") {
-        if v.as_bool() == Some(true) {
-            out.push(
-                Finding::warning(
-                    "deploy/jobs-migrate",
-                    "`[jobs] migrate` is true, so the application creates tables at startup",
-                )
-                .at(place(project, v))
-                .help("set `migrate = false` and put `Queue::schema_sql` in a migration"),
-            );
-        }
-    }
+    out.extend(migrate(project, config, &file));
+    out.extend(observability(project, config, &file));
     if project.has("storage") && !project.has("db") {
         let mut d = Finding::warning(
             "deploy/storage-local",
@@ -635,6 +708,118 @@ fn deploy(
             .note("`unscoped_rows_unsafe_for_development()` turns off the row policy for those models")
             .help("remove the call and register a `Resource` with a row policy for each model the admin shows"),
         );
+    }
+    out
+}
+
+/// `deploy/migrate`: a module that creates its tables at startup.
+///
+/// Set in a file, or unset where the module's setting defaults to true.
+fn migrate(project: &Project, config: &Config, file: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for m in MIGRATES {
+        let on_by_default = project.has(m.module)
+            && m.needs.iter().all(|n| project.has(n))
+            && !m.unless.iter().any(|u| project.has(u));
+        let value = get(config, &format!("{}.migrate", m.section));
+        let on = match value {
+            Some(v) => v.as_bool() == Some(true),
+            None => on_by_default,
+        };
+        seen.push(m.section);
+        if on {
+            out.push(migrate_finding(project, m.section, m.schema, value, file));
+        }
+    }
+    // A section nobody listed, whose file still says `migrate = true`.
+    for (path, value) in config.root().leaves() {
+        let Some(section) = path.strip_suffix(".migrate") else {
+            continue;
+        };
+        if section.contains('.') || seen.contains(&section) || value.as_bool() != Some(true) {
+            continue;
+        }
+        out.push(migrate_finding(
+            project,
+            section,
+            "the module's schema statements",
+            Some(value),
+            file,
+        ));
+    }
+    out
+}
+
+fn migrate_finding(
+    project: &Project,
+    section: &str,
+    schema: &str,
+    value: Option<&Value>,
+    file: &str,
+) -> Finding {
+    let said = if value.is_some() { "is" } else { "defaults to" };
+    let d = Finding::warning(
+        "deploy/migrate",
+        format!("`[{section}] migrate` {said} true, so the application creates tables at startup"),
+    )
+    .help(format!(
+        "set `migrate = false` under `[{section}]` in {file} (or ${}=false) and put {schema} in a migration",
+        project.variable(section, "migrate")
+    ));
+    match value {
+        Some(v) => d.at(place(project, v)),
+        None => d,
+    }
+}
+
+/// `deploy/metrics-public` and `deploy/drain-delay`: the `[observability]`
+/// settings that are fine on a laptop and wrong behind a load balancer.
+fn observability(project: &Project, config: &Config, file: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let text = |key: &str, default: &str| {
+        get(config, &format!("observability.{key}")).map_or_else(
+            || default.to_owned(),
+            |v| v.as_str().unwrap_or_default().trim().to_owned(),
+        )
+    };
+    if project.has("observability-metrics") || get(config, "observability.metrics_path").is_some() {
+        let path = text("metrics_path", "/metrics");
+        if !path.is_empty()
+            && text("metrics_token", "").is_empty()
+            && text("metrics_bind", "").is_empty()
+        {
+            out.push(
+                Finding::warning(
+                    "deploy/metrics-public",
+                    format!("`{path}` is served on the main listener to anybody who asks"),
+                )
+                .note("each scrape runs every refresher, and the series name routes and queues")
+                .help(format!(
+                    "set ${} to a long random string, or `metrics_bind` under `[observability]` in {file} to a port the load balancer does not expose",
+                    project.variable("observability", "metrics_token")
+                )),
+            );
+        }
+    }
+    if project.has("observability-health") || get(config, "observability.ready_path").is_some() {
+        let ready = text("ready_path", "/readyz");
+        let variable = project.variable("observability", "drain_delay_secs");
+        let delay = get(config, "observability.drain_delay_secs");
+        let zero = delay.is_none_or(|v| v.as_integer() == Some(0));
+        if !ready.is_empty() && zero && !project.deploy_sets(&variable) {
+            let mut d = Finding::warning(
+                "deploy/drain-delay",
+                "`[observability] drain_delay_secs` is 0, so a stopping pod closes its listener while the load balancer still sends to it",
+            )
+            .help(format!(
+                "set ${variable}=5, or `drain_delay_secs = 5` under `[observability]` in {file}"
+            ));
+            if let Some(v) = delay {
+                d = d.at(place(project, v));
+            }
+            out.push(d);
+        }
     }
     out
 }
@@ -750,9 +935,6 @@ signing_key_env = "SHOP_SESSION_KEY"
 cookie_name = "session"
 secure = false
 
-[policy]
-dialect = "mysql"
-
 [storage]
 secret = "development only: replace before anything is uploaded in anger"
 "#;
@@ -776,13 +958,12 @@ secret = "development only: replace before anything is uploaded in anger"
         found.extend(deploy(&p, &config, &src, &|_| None));
         let ids = ids(&found);
         for id in [
-            "check/dialect",
             "deploy/cookie-insecure",
             "deploy/cookie-prefix",
             "deploy/signing-key",
             "deploy/default-secret",
             "deploy/debug-logging",
-            "deploy/jobs-migrate",
+            "deploy/migrate",
             "deploy/csrf-off",
             "deploy/hsts",
         ] {
@@ -820,9 +1001,20 @@ cookie_name = "__Host-session"
 secure = true
 [policy]
 dialect = "postgres"
+[flags]
+migrate = false
+[observability]
+metrics_bind = "127.0.0.1:9100"
+drain_delay_secs = 5
 "#;
         let config = Config::from_toml("shop", "production", text).unwrap();
-        let p = project(&["sessions", "auth"]);
+        let p = project(&[
+            "sessions",
+            "auth",
+            "flags",
+            "observability-metrics",
+            "observability-health",
+        ]);
         let src = sources(&[
             ("src/plugins/mod.rs", "let builder = builder.plugin_hooking(\n <brocanth_middleware::Csrf as Plugin>::new(c));"),
             ("src/app.rs", "brocanth_server::serve(addr, app, router)"),
@@ -935,22 +1127,82 @@ dialect = "postgres"
     }
 
     #[test]
-    fn a_dialect_that_is_not_the_database_is_an_error() {
+    fn a_database_url_that_is_not_postgres_is_an_error() {
         let config = Config::from_toml(
             "shop",
             "development",
-            "[db]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"mysql\"\n",
+            "[db]\nurl = \"mysql://localhost/shop\"\n",
         )
         .unwrap();
-        let found = always(&project(&["db", "policy"]), &config);
-        assert_eq!(ids(&found), ["check/dialect"]);
-        let config = Config::from_toml(
-            "shop",
-            "development",
-            "[db]\nurl = \"postgres://localhost/shop\"\n\n[policy]\ndialect = \"postgres\"\n",
+        let found = always(&project(&["db"]), &config);
+        assert_eq!(ids(&found), ["check/db-url"]);
+        assert!(found[0].to_string().contains("help: set `url`"));
+        for url in ["postgres://localhost/shop", "postgresql://db/shop"] {
+            let text = format!("[db]\nurl = \"{url}\"\n");
+            let config = Config::from_toml("shop", "development", &text).unwrap();
+            assert!(always(&project(&["db"]), &config).is_empty(), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_module_that_migrates_by_default_is_a_warning_with_its_schema() {
+        let deploy_ids = |modules: &[&str], text: &str| {
+            let config = Config::from_toml("shop", "production", text).unwrap();
+            deploy(&project(modules), &config, &sources(&[]), &|_| None)
+                .into_iter()
+                .filter(|d| d.id == "deploy/migrate")
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+        };
+        // No file: the flags plugin's default is true.
+        let found = deploy_ids(&["flags"], "");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("`[flags] migrate` defaults to true"),
+            "{}",
+            found[0]
+        );
+        assert!(
+            found[0].contains("brocanth_flags::PgStore::SCHEMA"),
+            "{}",
+            found[0]
+        );
+        assert!(
+            found[0].contains("$SHOP_FLAGS__MIGRATE=false"),
+            "{}",
+            found[0]
+        );
+        // Turned off.
+        assert!(deploy_ids(&["flags"], "[flags]\nmigrate = false\n").is_empty());
+        // Jobs in memory has no tables.
+        assert!(deploy_ids(&["jobs", "jobs-memory"], "").is_empty());
+        // A section nobody listed, set in the file.
+        let found = deploy_ids(&[], "[ledger]\nmigrate = true\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("`[ledger] migrate` is true"),
+            "{}",
+            found[0]
+        );
+    }
+
+    #[test]
+    fn public_metrics_and_no_drain_delay_are_warnings() {
+        let found = |text: &str| {
+            let config = Config::from_toml("shop", "production", text).unwrap();
+            let p = project(&["observability-metrics", "observability-health"]);
+            ids(&deploy(&p, &config, &sources(&[]), &|_| None))
+                .into_iter()
+                .filter(|i| i.starts_with("deploy/metrics") || i.starts_with("deploy/drain"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(""), ["deploy/metrics-public", "deploy/drain-delay"]);
+        assert!(found(
+            "[observability]\nmetrics_bind = \"127.0.0.1:9100\"\ndrain_delay_secs = 5\n"
         )
-        .unwrap();
-        assert!(always(&project(&["db", "policy"]), &config).is_empty());
+        .is_empty());
+        assert!(found("[observability]\nmetrics_path = \"\"\nready_path = \"\"\n").is_empty());
     }
 
     #[test]

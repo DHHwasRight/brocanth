@@ -229,3 +229,38 @@ fn a_failed_read_of_the_table_is_shown_above_the_last_rules() {
     page.assert_text("The last read of the table failed: connection <refused>")
         .assert_text("On for everyone");
 }
+
+#[test]
+fn a_failed_removal_shows_the_rule_that_is_still_stored() {
+    struct Stuck(MemoryStore);
+    #[async_trait::async_trait]
+    impl brocanth_flags::FlagStore for Stuck {
+        async fn load(
+            &self,
+        ) -> Result<std::collections::BTreeMap<String, Rule>, brocanth_flags::StoreError> {
+            self.0.load().await
+        }
+        async fn save(&self, key: &str, rule: &Rule) -> Result<(), brocanth_flags::StoreError> {
+            self.0.save(key, rule).await
+        }
+        async fn remove(&self, _: &str) -> Result<(), brocanth_flags::StoreError> {
+            Err(brocanth_flags::StoreError::new("read only"))
+        }
+    }
+    let flags = Flags::with_store(Arc::new(Stuck(MemoryStore::new())));
+    let rule = Rule {
+        percent: 30,
+        ..Rule::default()
+    };
+    block_on(flags.set("new_checkout", rule.clone())).unwrap();
+    let answer = send(
+        &admin(&flags),
+        "POST",
+        "/admin/flags/new_checkout",
+        "remove=1",
+    );
+    let form = html(&answer);
+    form.assert_text("read only");
+    assert_eq!(form.field("percent").unwrap().attr("value"), Some("30"));
+    assert_eq!(flags.rule("new_checkout"), Some(rule));
+}

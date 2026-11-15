@@ -213,6 +213,9 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
+/// The keys a JSON line writes itself.
+const RESERVED: [&str; 4] = ["ts", "level", "msg", "target"];
+
 fn json_line(level: Level, message: &str, target: &str, fields: &Fields) -> String {
     let mut out = String::with_capacity(256);
     out.push_str("{\"ts\":\"");
@@ -225,7 +228,13 @@ fn json_line(level: Level, message: &str, target: &str, fields: &Fields) -> Stri
     json_string(&mut out, target);
     for (name, value) in &fields.0 {
         out.push(',');
-        json_string(&mut out, name);
+        // A field named like a key of the line itself would be a second key
+        // of that name, and many parsers keep only the last one.
+        if RESERVED.contains(name) {
+            json_string(&mut out, &format!("field.{name}"));
+        } else {
+            json_string(&mut out, name);
+        }
         out.push(':');
         match value {
             Value::Str(s) => json_string(&mut out, s),
@@ -246,16 +255,38 @@ fn json_line(level: Level, message: &str, target: &str, fields: &Fields) -> Stri
 fn text_line(level: Level, message: &str, fields: &Fields) -> String {
     let mut out = String::with_capacity(160);
     out.push_str(&rfc3339_now());
-    let _ = write!(out, " {:>5} {message}", level.as_str());
+    let _ = write!(out, " {:>5} {}", level.as_str(), escape_controls(message));
     for (name, value) in &fields.0 {
         let rendered = render_plain(value);
-        if rendered.is_empty() || rendered.contains([' ', '"', '=']) {
+        // Quoted, and so escaped, when the value holds a control character:
+        // a raw newline would split the event or forge a line.
+        if rendered.is_empty()
+            || rendered.contains([' ', '"', '='])
+            || rendered.chars().any(char::is_control)
+        {
             let _ = write!(out, " {name}={rendered:?}");
         } else {
             let _ = write!(out, " {name}={rendered}");
         }
     }
     out
+}
+
+/// `message` on one line: each control character as its Rust escape, so a
+/// newline is `\n` and not the start of another line.
+fn escape_controls(message: &str) -> std::borrow::Cow<'_, str> {
+    if !message.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let mut out = String::with_capacity(message.len() + 8);
+    for c in message.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn render_plain(value: &Value) -> String {
@@ -327,6 +358,34 @@ mod tests {
         let line = &lines[0];
         assert!(
             line.ends_with(r#"  WARN not found path="/a b" status=404"#),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_text_line_stays_one_line_whatever_the_message_and_values_hold() {
+        let lines = capture(LogFormat::Text, || {
+            tracing::warn!(user = "a\nb", "line one\n2025-01-01T00:00:00Z  INFO forged");
+        });
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.ends_with(r#"WARN line one\n2025-01-01T00:00:00Z  INFO forged user="a\nb""#),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_json_field_named_like_a_line_key_is_prefixed() {
+        let lines = capture(LogFormat::Json, || {
+            tracing::info!(level = "custom", target = "db", "done");
+        });
+        let line = &lines[0];
+        assert_eq!(line.matches("\"level\":").count(), 1, "{line}");
+        assert_eq!(line.matches("\"target\":").count(), 1, "{line}");
+        assert!(
+            line.ends_with(r#""field.level":"custom","field.target":"db"}"#),
             "{line}"
         );
     }

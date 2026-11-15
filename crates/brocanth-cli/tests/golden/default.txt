@@ -3274,19 +3274,16 @@ impl Default for Settings {
     }
 }
 
-/// `MY_APP_ENV`, the variable the config plugin reads too.
-fn environment() -> String {
-    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
-    std::env::var(var).unwrap_or_else(|_| "development".to_string())
-}
-
+/// The value, trimmed; `None` when nothing is left.
 fn path(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn observer(settings: Settings) -> Result<Observer, String> {
     let mut config = ObserveConfig::new(crate::app::APP);
-    config.log_format = LogFormat::resolve(Some(&settings.format), &environment())?;
+    let env = brocanth_observe::environment(crate::app::APP);
+    config.log_format = LogFormat::resolve(Some(&settings.format), &env)?;
     config.log_level = settings.level;
     config.live_path = path(settings.live_path);
     config.ready_path = path(settings.ready_path);

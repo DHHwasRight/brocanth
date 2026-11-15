@@ -2,6 +2,7 @@
 //! makes.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::rule::{valid_key, Actor, Flag, Rule};
@@ -24,6 +25,10 @@ pub struct Flags {
 
 struct Inner {
     rules: RwLock<BTreeMap<String, Rule>>,
+    /// Counts the changes [`Flags::set`] and [`Flags::remove`] made to
+    /// `rules`, under its write lock. A refresh whose read started before
+    /// a change drops what it read, so it never puts an older rule back.
+    changes: AtomicU64,
     store: OnceLock<Arc<dyn FlagStore>>,
     last_error: Mutex<Option<String>>,
 }
@@ -50,6 +55,7 @@ impl Flags {
         Flags {
             inner: Arc::new(Inner {
                 rules: RwLock::new(BTreeMap::new()),
+                changes: AtomicU64::new(0),
                 store: OnceLock::new(),
                 last_error: Mutex::new(None),
             }),
@@ -107,13 +113,22 @@ impl Flags {
     /// The store failed. The copy is left as it was, so a database that
     /// goes away keeps the last rules it gave rather than turning every
     /// flag off. The message is kept for [`Flags::last_error`].
+    ///
+    /// A [`Flags::set`] or [`Flags::remove`] that lands while the read runs
+    /// wins: the read may predate it, so the copy is kept and the next
+    /// refresh reads again.
     pub async fn refresh(&self) -> Result<(), StoreError> {
         let Some(store) = self.inner.store.get() else {
             return Ok(());
         };
+        let before = self.inner.changes.load(Ordering::SeqCst);
         match store.load().await {
             Ok(rules) => {
-                *self.write() = rules;
+                let mut copy = self.write();
+                if self.inner.changes.load(Ordering::SeqCst) == before {
+                    *copy = rules;
+                }
+                drop(copy);
                 self.note(None);
                 Ok(())
             }
@@ -143,7 +158,9 @@ impl Flags {
             ..rule
         };
         self.store()?.save(key, &rule).await?;
-        self.write().insert(key.to_string(), rule);
+        let mut copy = self.write();
+        self.inner.changes.fetch_add(1, Ordering::SeqCst);
+        copy.insert(key.to_string(), rule);
         Ok(())
     }
 
@@ -155,7 +172,9 @@ impl Flags {
     /// No store is attached, or the store failed.
     pub async fn remove(&self, key: &str) -> Result<(), StoreError> {
         self.store()?.remove(key).await?;
-        self.write().remove(key);
+        let mut copy = self.write();
+        self.inner.changes.fetch_add(1, Ordering::SeqCst);
+        copy.remove(key);
         Ok(())
     }
 
@@ -303,6 +322,55 @@ mod tests {
         assert!(flags.set("beta", Rule::everyone()).await.is_err());
         assert!(!flags.enabled(BETA, &Actor::anonymous()));
         assert!(flags.remove("beta").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_slow_refresh_does_not_undo_a_set_made_while_it_read() {
+        use tokio::sync::Notify;
+        struct Slow {
+            rules: MemoryStore,
+            reading: Notify,
+            go: Notify,
+        }
+        #[async_trait::async_trait]
+        impl FlagStore for Slow {
+            async fn load(&self) -> Result<BTreeMap<String, Rule>, StoreError> {
+                let snapshot = self.rules.load().await;
+                self.reading.notify_one();
+                self.go.notified().await;
+                snapshot
+            }
+            async fn save(&self, key: &str, rule: &Rule) -> Result<(), StoreError> {
+                self.rules.save(key, rule).await
+            }
+            async fn remove(&self, key: &str) -> Result<(), StoreError> {
+                self.rules.remove(key).await
+            }
+        }
+        let store = Arc::new(Slow {
+            rules: MemoryStore::new(),
+            reading: Notify::new(),
+            go: Notify::new(),
+        });
+        let flags = Flags::with_store(store.clone());
+        let refreshing = tokio::spawn({
+            let flags = flags.clone();
+            async move { flags.refresh().await }
+        });
+        store.reading.notified().await;
+        flags.set("beta", Rule::everyone()).await.unwrap();
+        store.go.notify_one();
+        refreshing.await.unwrap().unwrap();
+        assert!(flags.enabled(BETA, &Actor::anonymous()), "the set won");
+        // The next refresh reads the store, which has it.
+        let again = tokio::spawn({
+            let flags = flags.clone();
+            async move { flags.refresh().await }
+        });
+        store.reading.notified().await;
+        store.go.notify_one();
+        again.await.unwrap().unwrap();
+        assert!(flags.enabled(BETA, &Actor::anonymous()));
     }
 
     #[tokio::test]

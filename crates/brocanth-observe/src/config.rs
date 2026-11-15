@@ -91,6 +91,12 @@ pub struct ObserveConfig {
     pub ready_path: Option<String>,
     /// How long one readiness check (or one metrics refresh) may take.
     pub check_timeout: Duration,
+    /// How long one run of the readiness checks answers `/readyz`. Probes
+    /// that arrive together share one run, and a probe inside this window
+    /// gets the last answer: a caller who hits `/readyz` in a loop cannot
+    /// make every check run on every hit. Zero runs them on every probe
+    /// that does not overlap another.
+    pub ready_cache: Duration,
     /// After a stop signal: how long to answer "not ready" while still
     /// serving, before the listener stops accepting. Kubernetes needs a few
     /// seconds to remove the pod from its endpoints.
@@ -126,6 +132,7 @@ impl ObserveConfig {
             live_path: Some("/up".to_string()),
             ready_path: Some("/readyz".to_string()),
             check_timeout: Duration::from_secs(2),
+            ready_cache: Duration::from_secs(1),
             drain_delay: Duration::ZERO,
             #[cfg(feature = "metrics")]
             metrics_path: Some("/metrics".to_string()),
@@ -162,9 +169,14 @@ pub struct TracingConfig {
     /// [`None`]: the environment, then `http://localhost:4318/v1/traces`.
     pub endpoint: Option<String>,
     /// The fraction of new traces to keep, `0.0..=1.0`. A request that
-    /// arrives with a sampled `traceparent` is always kept, so one trace is
-    /// never half-exported.
+    /// continues a trusted `traceparent` follows that trace's decision, so
+    /// one trace is never half-exported.
     pub sample_ratio: f64,
+    /// Continue the trace of an inbound `traceparent`. Off at the edge: any
+    /// client can send `traceparent: 00-..-01` and so force every request
+    /// it makes to be kept, past `sample_ratio`. Turn it on behind a proxy
+    /// or for a service that only other services call.
+    pub trust_traceparent: bool,
 }
 
 #[cfg(feature = "otel")]
@@ -174,6 +186,7 @@ impl Default for TracingConfig {
             enabled: false,
             endpoint: None,
             sample_ratio: 1.0,
+            trust_traceparent: false,
         }
     }
 }

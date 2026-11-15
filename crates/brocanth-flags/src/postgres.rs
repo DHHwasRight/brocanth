@@ -36,16 +36,26 @@ CREATE TABLE IF NOT EXISTS brocanth_flags (
         PgStore { db }
     }
 
-    /// Runs [`PgStore::SCHEMA`].
+    /// Runs [`PgStore::SCHEMA`], under a transaction-scoped advisory lock.
+    ///
+    /// Two sessions that run `CREATE TABLE IF NOT EXISTS` at the same time
+    /// can both pass the check, and the second then fails on the catalog's
+    /// unique index. Replicas that boot together do exactly that, so they
+    /// take turns here.
     ///
     /// # Errors
     /// The database refused the statement.
     pub async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::query(AssertSqlSafe(Self::SCHEMA.to_string()))
-            .execute(self.db.pool())
+        let mut tx = self.db.pool().begin().await.map_err(failed)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('brocanth_flags'))")
+            .execute(&mut *tx)
             .await
-            .map(drop)
-            .map_err(failed)
+            .map_err(failed)?;
+        sqlx::query(AssertSqlSafe(Self::SCHEMA.to_string()))
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?;
+        tx.commit().await.map_err(failed)
     }
 }
 

@@ -39,8 +39,8 @@ the application's *type*, so asking for a plugin nobody registered does not
 compile.
 
 These are genuinely separate. A module may use one, the other, or both.
-`logging` uses both: it writes a `plugins/logging.rs` at build time, and
-that file registers a plugin at run time.
+`logging` uses both: it writes `src/plugins/logging/mod.rs` at build time,
+and that file registers a plugin with one request hook at run time.
 
 ```text
 brocanth create            cargo build             a request
@@ -122,7 +122,7 @@ asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
 | `brocanth-jobs` | lifetime | `ConfigSections`, `CommandsMod` | `Plugin`, both shutdown phases |
 | `brocanth-realtime` | lifetime | `ConfigSections`; `realtime-sse`: `PluginsMod`, `PagesRoutes`, `AgentsSections`, a page file | `Plugin`; the SSE transport is generated into the project (`realtime-sse`) |
 | `brocanth-middleware` | edge | `PluginsMod`, `PluginsLayers`, `AppSetup` | `MiddlewareCatalog`, `HookSource` |
-| `logging` (in-CLI) | edge | `PluginsMod`, `PluginsLayers`, `AppContext` | `MiddlewareCatalog`, `ProvidesContext` |
+| `logging` (in-CLI) | edge | `PluginsMod`, `ConfigSections`, a hooking registration (`configurable_hooking`) | `Plugin` (`Provides = NoContext`), `HookSource`: one request hook (`after_dispatch`), no layer |
 | `sessions` (in-CLI) | edge | `PluginsMod`, `AppContext` | `ProvidesContext` |
 | `brocanth-auth` | edge + bundle | `ConfigSections`, `AppContext` | `Plugin`, `ProvidesContext` |
 | `brocanth-policy` | edge | a file, `src/plugins/policy/mod.rs`; `PluginsMod`, `AppPlugins`, `PluginsInstalled`, `AppUses`, `AppContext` | `Plugin`, `ProvidesContext<Rules>` |
@@ -142,7 +142,8 @@ asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
 | `brocanth-test` | tooling | dev-dependency only | — |
-| `brocanth-observe` | edge + service | `observability` and its children `observability-logs`, `-health`, `-metrics`, `-tracing`: `ConfigSections`, `PluginsMod`, `AppPlugins`; each child is a cargo feature or a pair of paths, and the generated `serve` wraps its handler with the `Observer` | `Plugin`, `Services`, reads `Readiness` |
+| `brocanth-observe` | edge + service | `observability` and its children `observability-logs`, `-health`, `-metrics`, `-tracing`: `ConfigSections`, `PluginsMod`, `AppPlugins`, `ServerWrap` (`src/plugins/observability/serving.rs` wraps the handler with the `Observer`); each child is a cargo feature or a pair of paths | `Plugin`, `Services`, reads `Readiness`; with `jobs`, the queue's events and depth |
+| `brocanth-flags` | service | `flags`: `ConfigSections`, `PluginsMod`, `AppPlugins`, `AgentsSections`; with `admin`, `AdminPanels` | `Plugin`, `ProvidesContext<Flags>`, readiness (the table read) |
 | `jt` | renderer | `PagesRenderers`, `PagesRoutes`, two files | — |
 
 Three rows say "written by hand". `rsx::Rsx::contribute()`, `Tailwind::contribute()`

@@ -98,7 +98,11 @@ impl Panel for FlagsPanel {
         if r.submission.has("remove") {
             return Ok(Some(match flags.remove(key).await {
                 Ok(()) => PanelPage::redirect(r.url("")),
-                Err(e) => self.form(&r, key, &Rule::default(), Some(e.to_string())),
+                // Still stored: show the rule that is still there.
+                Err(e) => {
+                    let rule = flags.rule(key).unwrap_or_default();
+                    self.form(&r, key, &rule, Some(e.to_string()))
+                }
             }));
         }
         let rule = match read(&r) {

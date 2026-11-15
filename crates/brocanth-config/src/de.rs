@@ -114,6 +114,24 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer {
         result.map_err(|e| e.at(&from))
     }
 
+    /// A `String` field takes an inferred scalar as it was written: a
+    /// variable `MY_APP_X__CODE=007` is the string `007`, not a type error.
+    fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        match self.value.raw() {
+            Some(raw) => {
+                let from = self.value.provenance().clone();
+                visitor
+                    .visit_string(raw.to_string())
+                    .map_err(|e: DeError| e.at(&from))
+            }
+            None => self.deserialize_any(visitor),
+        }
+    }
+
+    fn deserialize_str<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        self.deserialize_string(visitor)
+    }
+
     fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
         if self.value.is_unset() || matches!(self.value.kind(), ValueKind::Empty) {
             visitor.visit_none()
@@ -160,7 +178,7 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer {
     }
 
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char
         bytes byte_buf unit unit_struct seq tuple tuple_struct map struct
         identifier
     }

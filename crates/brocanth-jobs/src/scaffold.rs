@@ -90,6 +90,14 @@ impl Module for Jobs {
             "jobs-memory",
             "the queue lives in the process, and [jobs] has no url and no migrate",
         )
+        .adapts_to(
+            "observability",
+            "each job run gets a span, a log line and a counter from the `Observer`",
+        )
+        .adapts_to(
+            "observability-metrics",
+            "/metrics shows the queue's depth and the age of its oldest job",
+        )
         .integration(
             "admin",
             "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",
@@ -237,6 +245,7 @@ fn settings(store: Store) -> Vec<Setting> {
 fn plugin_rs(project: &Project, store: Store) -> String {
     let (derive, note) = settings_derive(project, "jobs");
     let (fields, defaults, check_url, open, ready, store_doc) = store_parts(store);
+    let observed = observed(project);
     format!(
         r##"//! Background jobs, as this application registers them.
 //!
@@ -398,7 +407,7 @@ impl Plugin for Jobs {{
     }}
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-{open}
+{open}{observed}
 {ready}
         // So the admin's jobs tab, which mounts before this runs, finds it.
         queue.install();
@@ -481,6 +490,33 @@ impl Plugin for Jobs {{
     }}
 }}
 "##
+    )
+}
+
+/// With `observability`: the queue reports each job run to the `Observer`
+/// the observability plugin published in `register`, and with
+/// `observability-metrics` its depth is on `/metrics`.
+fn observed(project: &Project) -> String {
+    if !project.has("observability") {
+        return String::new();
+    }
+    let watch = if project.has("observability-metrics") {
+        "                // The queue's depth on `/metrics`, read when Prometheus scrapes.\n                \
+         observer.watch_queue(queue.clone());\n"
+    } else {
+        ""
+    };
+    format!(
+        "\n        // Observed: a span, a log line and a counter per job run. The\n        \
+         // observability plugin published its `Observer` in `register`.\n        \
+         let queue = match lc.services().get::<brocanth_observe::Observer>() {{\n            \
+         Some(observer) => {{\n                \
+         let queue = queue.with_events(observer.job_events());\n\
+         {watch}                \
+         queue\n            \
+         }}\n            \
+         None => queue,\n        \
+         }};\n"
     )
 }
 
