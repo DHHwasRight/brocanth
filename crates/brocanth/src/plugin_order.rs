@@ -594,7 +594,12 @@ mod tests {
         assert_eq!(got, vec!["a.h"]);
         let err = sort(vec![item("a", "h", Order::new().after("nobody"))]).unwrap_err();
         assert!(matches!(err, OrderError::Unknown { .. }), "{err}");
-        let got = sort(vec![item("a", "h", Order::new().after_if_present("nobody"))]).unwrap();
+        let got = sort(vec![item(
+            "a",
+            "h",
+            Order::new().after_if_present("nobody"),
+        )])
+        .unwrap();
         assert_eq!(got, vec!["a.h"]);
     }
 

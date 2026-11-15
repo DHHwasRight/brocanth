@@ -927,8 +927,17 @@ fn a_hook_after_the_one_that_stopped_the_chain_still_gets_after_dispatch() {
 
     let seen = rec.take();
     // The hook after the stopper never ran `before_dispatch`...
-    assert!(!seen.iter().any(|s| s.starts_with("second:before")), "{seen:?}");
+    assert!(
+        !seen.iter().any(|s| s.starts_with("second:before")),
+        "{seen:?}"
+    );
     // ...and still sees the response, as a request log must.
-    assert!(seen.iter().any(|s| s.starts_with("second:after")), "{seen:?}");
-    assert!(seen.iter().any(|s| s.starts_with("first:after")), "{seen:?}");
+    assert!(
+        seen.iter().any(|s| s.starts_with("second:after")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|s| s.starts_with("first:after")),
+        "{seen:?}"
+    );
 }

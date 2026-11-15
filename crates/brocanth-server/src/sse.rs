@@ -327,7 +327,10 @@ mod tests {
     #[test]
     fn an_event_is_its_fields_then_a_blank_line() {
         let event = Event::new("hello").with_event("greeting").with_id("7");
-        assert_eq!(text(event.encode()), "id: 7\nevent: greeting\ndata: hello\n\n");
+        assert_eq!(
+            text(event.encode()),
+            "id: 7\nevent: greeting\ndata: hello\n\n"
+        );
         assert_eq!(text(Event::new("").encode()), "data: \n\n");
     }
 

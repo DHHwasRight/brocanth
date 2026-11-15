@@ -1833,7 +1833,10 @@ fn unsafe_path(path: &str) -> Option<&'static str> {
     if path.split('/').any(|segment| segment == "..") {
         return Some("has a `..` segment and can land outside the project");
     }
-    if path.split('/').any(|segment| segment.is_empty() || segment == ".") {
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == ".")
+    {
         return Some("has an empty or `.` segment, so it names a file two ways");
     }
     None
@@ -1974,7 +1977,10 @@ mod tests {
         s.check_slots("pages-thing", &[Category::Routes]);
         assert_eq!(s.problems().len(), 1, "{:?}", s.problems());
         let problem = &s.problems()[0];
-        assert!(problem.contains("PagesRenderers") || problem.contains("renderer"), "{problem}");
+        assert!(
+            problem.contains("PagesRenderers") || problem.contains("renderer"),
+            "{problem}"
+        );
         assert!(problem.contains("\nhelp: "), "{problem}");
         let mut s = Scaffold::new();
         s.now_writing("r");

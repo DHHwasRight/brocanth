@@ -11,9 +11,9 @@
 //! a `%XX` escape in it is the one exception: the router decodes it once, so
 //! a handler reads `a/b` where the path said `a%2Fb`.
 
-use std::borrow::Cow;
 use core::fmt;
 use core::str::FromStr;
+use std::borrow::Cow;
 
 /// The parameters captured by a route match.
 ///
@@ -78,7 +78,9 @@ impl<'a> Params<'a> {
     /// empty string in its place.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&'a str> {
-        self.pairs().find(|(key, _)| *key == name).map(|(_, value)| value)
+        self.pairs()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
     }
 
     /// Every pair, borrowed for `'a`.
@@ -182,7 +184,10 @@ pub fn percent_decode(value: &str) -> Cow<'_, str> {
     while i < bytes.len() {
         if bytes[i] == b'%' {
             let hex = |b: u8| (b as char).to_digit(16);
-            match (bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            match (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            ) {
                 (Some(hi), Some(lo)) => {
                     // Two hex digits make at most 0xFF.
                     out.push(u8::try_from(hi * 16 + lo).unwrap_or(u8::MAX));

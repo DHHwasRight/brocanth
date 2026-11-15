@@ -827,8 +827,8 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
                 .map(move |option| (key, option.key))
         })
         .collect();
-    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
-        .with_mounts(&mounts);
+    let project =
+        brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known).with_mounts(&mounts);
     let order = brocanth_scaffold::order(&a.picks, |key| about(key).after).map_err(|stuck| {
         vec![Diagnostic::error(
             "cycle",
@@ -1085,14 +1085,18 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
                 "module",
                 "a module writes AGENTS.md, which the scaffold writes from `Slot::AgentsSections`",
             )
-            .help("write the module's section into `Slot::AgentsSections` instead of the file")]);
+            .help(
+                "write the module's section into `Slot::AgentsSections` instead of the file",
+            )]);
         }
         if let Some((taken, _)) = files.iter().find(|(p, _)| p == path) {
             return Err(vec![Diagnostic::error(
                 "module",
                 format!("a module writes {taken}, which the scaffold already writes"),
             )
-            .help("give the module's file a path under the module's own directory")]);
+            .help(
+                "give the module's file a path under the module's own directory",
+            )]);
         }
         files.push((path.to_string(), contents.to_string()));
     }

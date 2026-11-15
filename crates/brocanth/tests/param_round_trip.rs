@@ -5,8 +5,12 @@ use brocanth::routing::{encode_catch_all, encode_segment, percent_decode, Router
 
 fn table() -> Router<&'static str> {
     let mut builder = Router::builder();
-    builder.route("/files/{name}", Verb::Get, "one").expect("path");
-    builder.route("/tree/{*rest}", Verb::Get, "rest").expect("path");
+    builder
+        .route("/files/{name}", Verb::Get, "one")
+        .expect("path");
+    builder
+        .route("/tree/{*rest}", Verb::Get, "rest")
+        .expect("path");
     builder.build().expect("table")
 }
 
