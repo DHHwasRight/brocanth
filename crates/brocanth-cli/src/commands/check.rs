@@ -91,12 +91,11 @@ impl CheckArgs {
 pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
     let project = Project::find(dir)?;
 
-    let mut findings = modules(&project);
-    findings.extend(module_files(&project));
-    if args.for_production() {
-        findings.extend(development_only(&project));
-    }
-    findings.retain(|d| !d.code.as_ref().is_some_and(|c| args.allow.contains(c)));
+    // An empty list is a marker from before the list: try the project.
+    let has = |key: &str| project.modules.is_empty() || project.has(key);
+    let runs_project_checks = has("config") && has("commands");
+
+    let findings = findings(&project, &args, runs_project_checks);
     for d in &findings {
         ui.diagnostic(d);
     }
@@ -107,7 +106,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
         .iter()
         .filter(|d| d.severity == crate::ui::Severity::Error)
         .count();
-    let mut failed = errors > 0 || (args.strict && !findings.is_empty());
+    let mut failed = fails(&findings, args.strict);
     if findings.is_empty() {
         ui.done("module checks pass");
     } else {
@@ -120,13 +119,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
         ));
     }
 
-    // An empty list is a marker from before the list: try the project.
-    let has = |key: &str| project.modules.is_empty() || project.has(key);
-    if has("config") && has("commands") {
+    if runs_project_checks {
         let passed = delegate::run_and_wait(&project.root, &args.forwarded())?;
         failed |= !passed;
-    } else {
-        ui.diagnostic(&skipped(&project));
     }
 
     Ok(if failed {
@@ -134,6 +129,32 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CheckArgs) -> Outcome {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// The CLI's own findings, after `--allow`.
+///
+/// The warning that the project checks cannot run is one of them, so
+/// `--strict` fails on it and `--allow check/no-project-checks` silences it.
+fn findings(project: &Project, args: &CheckArgs, runs_project_checks: bool) -> Vec<Diagnostic> {
+    let mut found = modules(project);
+    found.extend(module_files(project));
+    if args.for_production() {
+        found.extend(development_only(project));
+    }
+    if !runs_project_checks {
+        found.push(skipped(project));
+    }
+    found.retain(|d| !d.code.as_ref().is_some_and(|c| args.allow.contains(c)));
+    found
+}
+
+/// Whether `findings` fail the run: an error does, and with `--strict` a
+/// warning does too.
+fn fails(findings: &[Diagnostic], strict: bool) -> bool {
+    findings
+        .iter()
+        .any(|d| d.severity == crate::ui::Severity::Error)
+        || (strict && !findings.is_empty())
 }
 
 /// What the modules recommend and the project lacks, then every module
@@ -291,6 +312,26 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn strict_fails_when_the_project_checks_cannot_run_and_allow_silences_it() {
+        let args = |allow: &[&str]| CheckArgs {
+            deploy: false,
+            env: None,
+            allow: allow.iter().map(|a| (*a).to_owned()).collect(),
+            strict: true,
+        };
+        let p = project(&[]);
+        let id = |d: &Diagnostic| d.code.as_deref() == Some("check/no-project-checks");
+        let found = findings(&p, &args(&[]), false);
+        let skipped: Vec<Diagnostic> = found.into_iter().filter(id).collect();
+        assert_eq!(skipped.len(), 1);
+        assert!(fails(&skipped, true), "--strict ignored the skipped checks");
+        assert!(!fails(&skipped, false));
+        let allowed = findings(&p, &args(&["check/no-project-checks"]), false);
+        assert!(!allowed.iter().any(id));
+        assert!(!findings(&p, &args(&[]), true).iter().any(id));
     }
 
     #[test]
