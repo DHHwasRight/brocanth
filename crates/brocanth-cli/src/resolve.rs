@@ -195,6 +195,22 @@ pub fn bindings(picks: &[&'static str]) -> Vec<(&'static str, &'static str)> {
     out
 }
 
+/// The module that collects each Kind of cardinality many in a project of
+/// `picks`, as `(Kind name, module key)`: the first chosen collector in
+/// registry order. `admin` collects `AdminPanel`. A contributor asks
+/// `Project::collector`, so it never names the collector's key.
+pub fn collectors(picks: &[&'static str]) -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+    for pick in picks {
+        for (kind, _) in about(pick).collects {
+            if !out.iter().any(|(k, _)| *k == kind.name) {
+                out.push((kind.name, pick));
+            }
+        }
+    }
+    out
+}
+
 /// Why `kind` is bound in a project of `picks`: the first chosen module
 /// that requires it, or `chosen` when none does.
 ///

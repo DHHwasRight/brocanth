@@ -161,9 +161,6 @@ impl Inner {
 // Queue
 // ---------------------------------------------------------------------------
 
-/// The queue [`Queue::install`] recorded last.
-static INSTALLED: std::sync::RwLock<Option<Queue>> = std::sync::RwLock::new(None);
-
 /// The queue.
 ///
 /// ```no_run
@@ -459,26 +456,6 @@ impl Queue {
             #[cfg(feature = "memory")]
             Store::Memory => Vec::new(),
         }
-    }
-
-    /// Makes this queue the one [`Queue::installed`] answers. The last
-    /// call wins.
-    ///
-    /// For a generated admin, which mounts its panels before any plugin has
-    /// opened a queue: `JobsPanel::installed()` asks here when it renders.
-    /// The last call wins, and not the first: a test binary that builds one
-    /// application after another then reads the queue of the application
-    /// that started last, not the pool of one whose runtime has ended. Two
-    /// applications that run at the same time in one process still share
-    /// this one record; hand each panel its queue with `JobsPanel::new`.
-    pub fn install(&self) {
-        let mut slot = INSTALLED.write().unwrap_or_else(|e| e.into_inner());
-        *slot = Some(self.clone());
-    }
-
-    /// The queue [`Queue::install`] recorded last, if one did.
-    pub fn installed() -> Option<Queue> {
-        INSTALLED.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The engine's backend, for a worker or for a test that drives the

@@ -73,7 +73,10 @@ use std::sync::{Mutex, PoisonError};
 /// is declared with `adapts_to`, `needs` or `parent`, and that each
 /// `adapts_to` is asked. The same two-way rule holds for Kinds: each
 /// `project.provider::<K>()` asked is declared with `uses` or `requires`,
-/// and each `uses` is asked. In the first run every Kind the module names
+/// and each `uses` is asked; each `project.collector::<K>()` asked is
+/// declared with `contributes`, and each contribution is asked. A module
+/// that adds a tab to the admin declares it, with a valid RBAC resource,
+/// and a declared tab is written when the admin collects tabs. In the first run every Kind the module names
 /// is bound; in the second only what it requires. Each returned line is one
 /// broken rule; empty means none.
 ///
@@ -127,7 +130,15 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
 
     let mut asked: Vec<String> = Vec::new();
     let mut asked_kinds: Vec<&str> = Vec::new();
-    for (on, bound) in [(&everything, &all_bound), (&alone, &required)] {
+    let tabs = m
+        .contributions
+        .iter()
+        .filter(|(k, _, _)| k.name == <crate::AdminPanel as crate::kind::Kind>::NAME)
+        .count();
+    for (pass, (on, bound)) in [(&everything, &all_bound), (&alone, &required)]
+        .into_iter()
+        .enumerate()
+    {
         let project =
             crate::Project::new("my-blog", "My Blog", on, &everything).with_bindings(bound);
         let mut s = crate::Scaffold::new();
@@ -137,6 +148,24 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         wrong.extend(s.problems().iter().cloned());
         asked.extend(project.asked_keys());
         asked_kinds.extend(project.asked_kinds());
+        // A tab is declared, with its RBAC resource, by the module that
+        // writes it; and a declared tab is written when the admin is there.
+        let panels: String = s.slot(crate::Slot::AdminPanels).collect();
+        if panels.contains(".panel(") && tabs == 0 {
+            wrong.push(format!(
+                "`{}` adds a tab to the admin and declares none: add \
+                 `.contributes::<AdminPanel>(Tab::new(\"<resource>\", \"<what>\"), true)` \
+                 to its manifest",
+                m.key
+            ));
+        }
+        if pass == 0 && tabs > 0 && panels.is_empty() {
+            wrong.push(format!(
+                "`{}` declares a tab and writes nothing into `Slot::AdminPanels` \
+                 when the admin collects tabs",
+                m.key
+            ));
+        }
     }
     asked_kinds.sort_unstable();
     asked_kinds.dedup();
@@ -146,6 +175,14 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
             wrong.push(format!(
                 "`{}` asks `project.provider::<{kind}>()` and does not declare it: \
                  add `.uses::<{kind}>(\"<what changes>\")` to its manifest",
+                m.key
+            ));
+        }
+    }
+    for (kind, _, _) in &m.contributions {
+        if !asked_kinds.contains(&kind.name) {
+            wrong.push(format!(
+                "`{}` contributes to {kind} and never asks `project.collector::<{kind}>()`",
                 m.key
             ));
         }
@@ -208,6 +245,35 @@ fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
             ));
         }
         named.push((how, kind));
+    }
+    let mut resources: Vec<&str> = Vec::new();
+    for (kind, item, _) in &m.contributions {
+        if kind.cardinality != crate::kind::Cardinality::Many {
+            wrong.push(format!(
+                "`{}` contributes to {kind}, which takes one provider: use `provides::<{kind}>`",
+                m.key
+            ));
+        }
+        if item.what.is_empty() {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind} and does not say what it is",
+                m.key, item.name
+            ));
+        }
+        if !crate::Contribution::valid_name(item.name) {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind}: a name (a tab's RBAC resource) is lower \
+                 case letters, digits, `-` and `_`, so `<resource>.<level>` reads one way",
+                m.key, item.name
+            ));
+        }
+        if resources.contains(&item.name) {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind} twice: each tab is one RBAC resource",
+                m.key, item.name
+            ));
+        }
+        resources.push(item.name);
     }
     for r in &m.requires {
         for key in r.unless {

@@ -2666,7 +2666,14 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     // "Delete selected" on every model that allows a delete, after a
     // confirmation page. A model leaves it off with
     // `m.without_action("delete_selected")` in src/plugins/admin/mod.rs.
@@ -2674,33 +2681,44 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     // The cache, as a tab: Purge expired, and Clear for each namespace you
     // name with `.namespace(..)`.
     if crate::modules::cache::MODULE.integrate.admin {
-        config = config.panel(brocanth_cache::admin::CachePanel::installed());
+        let cache = late.cell(|ctx| ctx.provided::<brocanth_cache::CacheHandle, _>().cloned());
+        config = config.panel(brocanth_cache::admin::CachePanel::late(cache));
     }
     // The queue the jobs plugin runs, as a tab.
     if crate::modules::jobs::MODULE.integrate.admin {
-        config = config.panel(brocanth_jobs::admin::JobsPanel::installed());
+        let queue = late.cell(|ctx| ctx.provided::<brocanth_jobs::Queue, _>().cloned());
+        config = config.panel(brocanth_jobs::admin::JobsPanel::late(queue));
     }
     // The OpenAPI document, as a read-only tab.
     if crate::modules::openapi::MODULE.integrate.admin {
-        config = config.panel(brocanth_openapi::admin::ApiPanel::installed());
+        let document = late.cell(|ctx| {
+            let rendered = ctx.provided::<crate::plugins::openapi::Rendered, _>()?;
+            Some(std::sync::Arc::clone(rendered.document()))
+        });
+        config = config.panel(brocanth_openapi::admin::ApiPanel::late(document));
     }
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
-        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+        let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));
     }
     // The feature flags, as a tab that turns each one on or off.
     if crate::modules::flags::MODULE.integrate.admin {
-        config = config.panel(brocanth_flags::admin::FlagsPanel::installed(
+        let flags = late.cell(|ctx| ctx.provided::<brocanth_flags::Flags, _>().cloned());
+        config = config.panel(brocanth_flags::admin::FlagsPanel::late(
+            flags,
             crate::plugins::flags::ALL,
         ));
     }
     // The outgoing deliveries, with a Send again button, as a tab.
     if crate::modules::webhooks_out::MODULE.integrate.admin {
-        config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::installed());
+        let outgoing = late.cell(|ctx| ctx.provided::<brocanth_webhooks::Outgoing, _>().cloned());
+        config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::late(outgoing));
     }
     // The change history: a tab, a link on every record, every admin write.
     if crate::modules::audit::MODULE.integrate.admin {
-        config = brocanth_audit::admin::install(config);
+        let trail = late.cell(|ctx| ctx.provided::<brocanth_audit::Trail, _>().cloned());
+        config = brocanth_audit::admin::install(config, trail);
     }
     // Superusers pass every check; a role holder passes what its roles grant.
     if crate::modules::superuser::MODULE.integrate.admin {
@@ -2708,12 +2726,20 @@ pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::
     }
     // Every connection, without its tokens, with a Revoke button, as a tab.
     if crate::modules::oauth_client::MODULE.integrate.admin {
-        config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::installed());
+        let client = late.cell(|ctx| {
+            ctx.provided::<brocanth_oauth_client::OauthClient, _>()
+                .cloned()
+        });
+        config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::late(client));
     }
-    // Roles: a superuser defines them and gives them to accounts.
+    // Roles: a superuser defines them and gives them to accounts; the owner
+    // of a tab gives `read` or `edit` on it.
     if crate::modules::roles::MODULE.integrate.admin {
-        let roles = brocanth_auth::admin::RolesPanel::late(crate::plugins::superuser::store());
-        config = config.panel(roles);
+        let store = late.cell(|ctx| {
+            let auth = ctx.provided::<crate::plugins::auth::Services, _>()?;
+            Some(std::sync::Arc::clone(auth.store()))
+        });
+        config = config.panel(brocanth_auth::admin::RolesPanel::late(store));
     }
     config
 }
@@ -5201,7 +5227,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ca2f117b32365425
+// brocanth-digest: 29400f279f581531
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6164,7 +6190,7 @@ pub mod roles {
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
         /// With `admin`: a Roles tab where a superuser defines roles and gives them
-        /// to accounts.
+        /// to accounts, and the owner of a tab gives read or edit on it.
         pub admin: bool,
     }
 
@@ -6759,8 +6785,7 @@ pub mod openapi {
     /// The code `openapi` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: an `API` tab in the admin, with every operation; the admin
-        /// routes stay out of the document.
+        /// With `admin`: an `API` tab in the admin, with every operation.
         pub admin: bool,
     }
 
@@ -7271,27 +7296,15 @@ pub mod robots {
         }
     }
 
-    /// The code `robots` writes into another module. A field exists whether
-    /// that module is in the project or not, and does nothing without it.
-    pub struct Integrate {
-        /// With `admin`: the admin is disallowed in robots.txt, at the path
-        /// src/modules/admin.rs mounts it.
-        pub admin: bool,
-    }
-
-    impl Integrate {
-        /// The value of each field the file does not name.
-        pub const DEFAULT: Self = Self { admin: true };
-    }
-
     /// What src/modules/robots.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
-        /// The code written into another module.
-        pub integrate: Integrate,
+        /// Disallow every Backoffice mount, such as the admin. The rule also tells
+        /// every reader of robots.txt where the backoffice is.
+        pub disallow_backoffice: bool,
     }
 
     impl Module {
@@ -7299,7 +7312,7 @@ pub mod robots {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
-            integrate: Integrate::DEFAULT,
+            disallow_backoffice: true,
         };
     }
 }
@@ -7610,7 +7623,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 3e25ffa6e017cd68
+// brocanth-digest: 07aa9d12a175a67a
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -8432,7 +8445,8 @@ use crate::plugins::shape::roles::{Integrate, Module};
 pub const MODULE: Module = Module {
     integrate: Integrate {
         // A Roles tab where a superuser defines roles and gives them to
-        // accounts. Without the `admin` module this does nothing.
+        // accounts, and the owner of a tab gives read or edit on it. Without the
+        // `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -8883,8 +8897,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // An `API` tab in the admin, with every operation; the admin routes stay
-        // out of the document. Without the `admin` module this does nothing.
+        // An `API` tab in the admin, with every operation. Without the `admin`
+        // module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -9306,7 +9320,7 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 
 // `Flag` and `Key` are for `rename`: unused until it names a setting.
 #[allow(unused_imports)]
-use crate::plugins::shape::robots::{Flag, Flags, Integrate, Key, Module};
+use crate::plugins::shape::robots::{Flag, Flags, Key, Module};
 
 // Every field is written out so you can read the choices. The last line
 // gives a default to a field that a later version of the module adds.
@@ -9322,13 +9336,9 @@ pub const MODULE: Module = Module {
     //   (Key::Index, Flag::Hidden),
     rename: &[],
 
-    integrate: Integrate {
-        // The admin is disallowed in robots.txt, at the path
-        // src/modules/admin.rs mounts it. Without the `admin` module this does
-        // nothing.
-        admin: true,
-        ..Integrate::DEFAULT
-    },
+    // Disallow every Backoffice mount, such as the admin. The rule also tells
+    // every reader of robots.txt where the backoffice is.
+    disallow_backoffice: true,
 
     ..Module::DEFAULT
 };
@@ -13028,7 +13038,7 @@ mod tests {
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{'), "{xml}");
         assert!(!xml.contains("sitemap.xml"), "{xml}");
-        // The admin, wherever src/modules/admin.rs mounts it.
+        // The backoffice, wherever its module file mounts it.
         let admin = format!("{}</loc>", crate::modules::admin::MODULE.mount_at);
         assert!(!xml.contains(&admin), "{xml}");
     }
@@ -13152,7 +13162,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -13246,14 +13256,19 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         })
     });
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     // Built by the first request, over the ORM: see `OverOrm`.
     let admin = Arc::new(OverOrm::new(config));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -13321,11 +13336,15 @@ impl OverOrm {
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<OverOrm>) -> Handler {
+fn screen(admin: Arc<OverOrm>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             let admin = admin.for_request(ctx)?;
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
@@ -14623,11 +14642,7 @@ impl Plugin for Cache {
             CacheReadiness::new(Arc::clone(&cache))
                 .help("check `[cache] url`, and that the Redis server runs"),
         );
-        let handle = CacheHandle::new(cache);
-        // The first cache this process opens is the one the admin's cache
-        // tab reads: the admin is built before any plugin starts.
-        handle.install();
-        self.handle = Some(handle);
+        self.handle = Some(CacheHandle::new(cache));
         Ok(())
     }
 
@@ -15579,9 +15594,6 @@ impl Plugin for Jobs {
 
         // Ready while the queue answers, which in memory is always.
         lc.ready_when(queue.readiness_check(false));
-
-        // So the admin's jobs tab, which mounts before this runs, finds it.
-        queue.install();
 
         // In the services too, for a plugin that runs a worker of its own on
         // this queue: the mail plugin sends `deliver_later` mail that way.
@@ -16672,7 +16684,6 @@ impl Plugin for OauthClientPlugin {
         let client = builder
             .build()
             .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
-        client.install();
         let secure = base.starts_with("https://");
         let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
         self.client = Some(client);
@@ -17118,6 +17129,7 @@ pub const YAML_ROUTE: &str = "/openapi.yaml";
 pub struct Rendered {
     json: Arc<str>,
     yaml: Arc<str>,
+    document: brocanth_openapi::SharedDocument,
 }
 
 impl Rendered {
@@ -17129,6 +17141,12 @@ impl Rendered {
     /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
     pub fn yaml(&self) -> &str {
         &self.yaml
+    }
+
+    /// The document itself, for the admin's `API` tab.
+    #[allow(dead_code)] // read by the admin, with `admin`
+    pub fn document(&self) -> &brocanth_openapi::SharedDocument {
+        &self.document
     }
 }
 
@@ -17238,9 +17256,8 @@ impl Plugin for OpenApi {
         self.rendered = Some(Rendered {
             json: served.body(Format::Json).into(),
             yaml: served.body(Format::Yaml).into(),
+            document: served.shared(),
         });
-        // The admin's `API` tab reads it from here.
-        served.install();
         self.served = Some(served);
         Ok(())
     }
@@ -18674,9 +18691,9 @@ impl Robots {
     /// `localized` gives the other URLs a rule path covers.
     fn open(&self, localized: &dyn Fn(&str) -> Vec<String>) -> Result<Text, PluginError> {
         let mut text = Text::new();
-        // The admin, where src/modules/admin.rs mounts it. Turn it off with
-        // `integrate.admin` in src/modules/robots.rs.
-        if crate::modules::robots::MODULE.integrate.admin {
+        // The backoffice, such as the admin, where its module file mounts
+        // it. Turn it off with `disallow_backoffice` in src/modules/robots.rs.
+        if crate::modules::robots::MODULE.disallow_backoffice {
             text = text.disallow(crate::modules::admin::MODULE.mount_at);
         }
         for path in &self.settings.disallow {
@@ -18835,15 +18852,18 @@ mod tests {
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
-//! A permission is a string. The admin asks for `<model>.view`, `.add`,
-//! `.change` and `.delete` for a model, and `<panel>.view` and `.act` for a
-//! tab. A page of yours may ask for any other. A superuser holds every
-//! permission. Only a superuser changes roles, in the admin's Roles tab.
+//! A permission is a string. The admin asks for a level on a resource:
+//! `<resource>.read` to see a tab or a model's screens, `<resource>.edit`
+//! for its buttons and writes. `<resource>.owner` holds both, and lets its
+//! holder give `read` or `edit` on that resource in the admin's Roles tab.
+//! A page of yours may ask for any other permission. A superuser holds
+//! every permission. Only a superuser defines roles, gives them to
+//! accounts, and gives `owner`.
 //!
 //! Who may see a page is a role question:
 //!
 //! ```ignore
-//! let staff = crate::plugins::roles::require(ctx, "report.view").await?;
+//! let staff = crate::plugins::roles::require(ctx, "report.read").await?;
 //! ```
 //!
 //! Which rows is a row question, and it goes into the query through
@@ -18853,7 +18873,7 @@ mod tests {
 //! ```ignore
 //! fn update(&self, who: &Visitor) -> EntityPred<Post> {
 //!     // Editors change every post; everybody else changes their own.
-//!     who.staff.gate("post.change").or(Pred::eq(PostColumn::AuthorId, who.id))
+//!     who.staff.gate("post.edit").or(Pred::eq(PostColumn::AuthorId, who.id))
 //! }
 //! ```
 
@@ -19115,7 +19135,7 @@ impl Plugin for Sitemap {
     const NAME: &'static str = "sitemap";
 
     fn new(mut config: Settings) -> Self {
-        // The admin, where src/modules/admin.rs mounts it: no page a
+        // The backoffice, where its module file mounts it: no page a
         // visitor reads.
         let admin = crate::modules::admin::MODULE.mount_at.to_string();
         if !config.exclude.contains(&admin) {
@@ -19814,14 +19834,12 @@ mod tests {
 //! };
 //! ```
 
-use std::sync::{Arc, LazyLock, OnceLock};
-
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_auth::{ensure_superuser, Staff, SuperuserOutcome};
 
 use crate::pages::{Ctx, Error};
-use crate::plugins::auth::{Services, Store};
+use crate::plugins::auth::Services;
 
 /// The superuser the server makes at start: `[superuser]` in the config
 /// file, or `$<APP>_SUPERUSER__<KEY>`.
@@ -19846,17 +19864,6 @@ impl Default for Settings {
             password_env: "MY_BLOG_SUPERUSER_PASSWORD".to_string(),
         }
     }
-}
-
-/// The accounts store, once the auth plugin has built it. The admin's
-/// roles tab reads it: the admin is built with the route table, before any
-/// plugin starts.
-static STORE: LazyLock<Arc<OnceLock<Arc<Store>>>> = LazyLock::new(Default::default);
-
-/// The cell [`STORE`] fills at startup.
-#[allow(dead_code)] // read by the roles tab, with `roles`
-pub fn store() -> Arc<OnceLock<Arc<Store>>> {
-    Arc::clone(&STORE)
 }
 
 /// The signed-in member of staff, or `None`: no session, a pre-login one,
@@ -19913,8 +19920,9 @@ impl Plugin for Superuser {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let services = lc.require_service::<Services>()?;
-        let _ = STORE.set(Arc::clone(services.store()));
+        // The auth plugin publishes its services first, or the start stops
+        // here with a `help:` line rather than at the first sign-in.
+        lc.require_service::<Services>()?;
         Ok(())
     }
 
@@ -21465,7 +21473,7 @@ kind = ["middleware"]
 files = ["src/modules/analytics.rs"]
 config = ["analytics"]
 crates = ["brocanth-analytics"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
 [modules.config]
 version = "0.1.0"
@@ -21513,7 +21521,7 @@ kind = ["enhancer"]
 files = ["src/modules/cache.rs"]
 config = []
 crates = ["brocanth-cache"]
-adapted_to = ["config", "cache-redis", "admin"]
+adapted_to = ["config", "cache-redis"]
 
 [modules.cache-redis]
 version = "0.1.0"
@@ -21529,7 +21537,7 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config", "jobs-memory", "observability", "observability-metrics", "admin"]
+adapted_to = ["config", "jobs-memory", "observability", "observability-metrics"]
 
 [modules.jobs-memory]
 version = "0.1.0"
@@ -21545,7 +21553,7 @@ kind = ["enhancer"]
 files = ["src/modules/flags.rs", "src/plugins/flags/"]
 config = ["flags"]
 crates = ["brocanth-flags"]
-adapted_to = ["config", "auth", "admin"]
+adapted_to = ["config", "auth"]
 
 [modules.audit]
 version = "0.1.0"
@@ -21553,7 +21561,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/audit.rs", "src/plugins/audit/"]
 config = ["audit"]
 crates = ["brocanth-audit"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
 [modules.mail]
 version = "0.1.0"
@@ -21609,7 +21617,7 @@ kind = ["enhancer"]
 files = ["src/modules/roles.rs", "src/plugins/roles/"]
 config = []
 crates = ["brocanth-auth"]
-adapted_to = ["admin"]
+adapted_to = []
 
 [modules.policy]
 version = "0.1.0"
@@ -21729,7 +21737,7 @@ kind = ["middleware"]
 files = ["src/modules/gtag.rs"]
 config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
-adapted_to = ["config", "admin", "i18n"]
+adapted_to = ["config", "i18n"]
 
 [modules.openapi]
 version = "0.1.0"
@@ -21737,7 +21745,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/openapi.rs", "src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
 crates = ["brocanth-openapi"]
-adapted_to = ["config", "input", "auth-oauth", "oauth-client", "admin"]
+adapted_to = ["config", "input", "auth-oauth", "oauth-client"]
 
 [modules.validation]
 version = "0.1.0"
@@ -21801,7 +21809,7 @@ kind = ["enhancer"]
 files = ["src/modules/webhooks_out.rs", "src/plugins/webhooks_out/"]
 config = ["webhooks_out"]
 crates = ["brocanth-webhooks", "serde_json"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
 [modules.oauth]
 version = "0.1.0"
@@ -21817,7 +21825,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/oauth_client.rs", "src/plugins/oauth_client/"]
 config = ["oauth_client"]
 crates = ["brocanth-oauth-client"]
-adapted_to = ["config", "middleware-csrf", "oauth-client-memory", "admin"]
+adapted_to = ["config", "middleware-csrf", "oauth-client-memory"]
 
 [modules.oauth-client-memory]
 version = "0.1.0"
@@ -21905,7 +21913,7 @@ kind = ["routes"]
 files = ["src/modules/robots.rs", "src/pages/robots.txt.rs", "src/plugins/robots/"]
 config = ["robots"]
 crates = ["brocanth-robots"]
-adapted_to = ["config", "admin", "sitemap", "i18n-routing"]
+adapted_to = ["config", "sitemap", "i18n-routing"]
 
 [modules.sitemap]
 version = "0.1.0"
@@ -21913,7 +21921,7 @@ kind = ["routes"]
 files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
-adapted_to = ["config", "admin", "jt", "realtime-sse", "i18n-routing", "meta"]
+adapted_to = ["config", "jt", "realtime-sse", "i18n-routing", "meta"]
 
 [modules.pagination]
 version = "0.1.0"
@@ -22003,4 +22011,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db"]
 
-# brocanth-digest: 81d3e72462f5768e
+# brocanth-digest: 11f228cbdfe406ee

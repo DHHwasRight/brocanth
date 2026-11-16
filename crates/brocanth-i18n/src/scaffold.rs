@@ -18,7 +18,9 @@
 //! export sends no `Accept-Language` and a file cannot vary by request.
 
 use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, Mount, MountRole, Project, Scaffold, Setting, Slot,
+};
 
 /// Translations checked at build time, and a locale per request.
 pub struct I18n;
@@ -50,6 +52,9 @@ impl Module for I18n {
         .adapts_to(
             "i18n-routing",
             "the hook reads the locale from the path's first segment and redirects a GET without one",
+        )
+        .uses::<Mount>(
+            "with `i18n-routing`, every mount that is not `Public` (the admin, an API, an OAuth callback) keeps no locale segment",
         )
         // The export runs every page through the hooks, so a static site
         // takes it: one language per export, the `default` setting's.
@@ -163,9 +168,10 @@ fn routing_adjust(project: &Project) -> String {
     // exactly as registered at its console, so the OAuth routes keep no
     // locale segment either.
     //
-    // Every mount option of every chosen module ([`Opt::mount`]), so a
-    // module that adds one is covered and this list names nobody.
-    for (key, field) in project.mounts() {
+    // Every mount of a chosen module that is not `Public`: the backoffice
+    // and the machine routes ([`MountRole`]). A module that adds one is
+    // covered, and this list names nobody.
+    for (key, field) in project.mounts_except(MountRole::Public) {
         chain.push_str(&format!(".keep_unprefixed({})", module_ref(key, field)));
     }
     // The consent banner reports a choice to a fixed path, from a script

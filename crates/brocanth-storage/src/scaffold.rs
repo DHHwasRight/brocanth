@@ -40,7 +40,7 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    Category, Dep, Hook, Manifest, Module, MountRole, Opt, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
@@ -568,11 +568,15 @@ impl Module for StorageRoutes {
             "copy an upload form's CSRF field into the header the CSRF check reads",
             Hook::on(),
         )
-        .option(Opt::mount(
-            "path",
-            "/files",
-            "Where the routes answer: uploads at {path}, files at {path}/{address}.",
-        ))
+        .option(
+            Opt::mount(
+                "path",
+                "/files",
+                "Where the routes answer: uploads at {path}, files at {path}/{address}.",
+            )
+            // Uploads and downloads, not pages.
+            .role(MountRole::Machine),
+        )
         .option(Opt::bool(
             "public",
             false,

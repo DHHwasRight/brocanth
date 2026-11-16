@@ -39,6 +39,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use brocanth::routing::Verb;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::view::render;
 
@@ -62,8 +63,9 @@ pub(crate) const STYLE: &str = include_str!("admin.css");
 /// [`Services`](brocanth::plugin_api::Services) instead reaches the same
 /// document through [`document_of`](crate::document_of).
 pub struct ApiPanel {
-    /// `None` for [`ApiPanel::installed`]: read when a request comes.
-    document: Option<Arc<Document>>,
+    /// Set at build, or by the admin from the first request that carries
+    /// it ([`ApiPanel::late`]).
+    document: Late<Arc<Document>>,
     key: String,
     label: String,
 }
@@ -72,29 +74,28 @@ impl ApiPanel {
     /// The panel, at `api`, labelled "API".
     pub fn new(document: Arc<Document>) -> Self {
         Self {
-            document: Some(document),
+            document: Late::ready(document),
             key: "api".to_string(),
             label: "API".to_string(),
         }
     }
 
-    /// The panel over the document [`OpenApiPlugin::install`] installed.
+    /// The panel over a document that arrives later, in `cell`.
     ///
     /// For a generated admin, which builds its tabs before the plugin
-    /// derives the document. Until a document is installed, the tab is
-    /// the admin's 404.
-    ///
-    /// [`OpenApiPlugin::install`]: crate::OpenApiPlugin::install
-    pub fn installed() -> Self {
+    /// derives the document. The admin fills the cell from the first
+    /// request that carries the document. Until then, the tab is the
+    /// admin's 404.
+    pub fn late(cell: Late<Arc<Document>>) -> Self {
         Self {
-            document: None,
+            document: cell,
             key: "api".to_string(),
             label: "API".to_string(),
         }
     }
 
     fn document(&self) -> Option<Arc<Document>> {
-        self.document.clone().or_else(crate::plugin::installed)
+        self.document.get().cloned()
     }
 
     /// A different key, for an application that already has an `api` model.

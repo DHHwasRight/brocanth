@@ -49,7 +49,7 @@
 
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
@@ -83,28 +83,7 @@ impl CacheHandle {
     pub fn inner(&self) -> &Arc<dyn Cache> {
         &self.0
     }
-
-    /// Makes this the process's cache for a reader built before any plugin
-    /// starts, and answers whether it was the first.
-    ///
-    /// The admin builds its tabs when the route table is built, and a
-    /// plugin opens its cache later, at `before_start`. So the cache tab
-    /// ([`CachePanel::installed`]) reads the cache here, when it renders.
-    /// The first install wins: a process has one cache.
-    ///
-    /// [`CachePanel::installed`]: crate::admin::CachePanel::installed
-    pub fn install(&self) -> bool {
-        INSTALLED.set(self.clone()).is_ok()
-    }
-
-    /// The cache [`CacheHandle::install`] made the process's, if any.
-    pub fn installed() -> Option<CacheHandle> {
-        INSTALLED.get().cloned()
-    }
 }
-
-/// The first cache installed in this process. See [`CacheHandle::install`].
-static INSTALLED: OnceLock<CacheHandle> = OnceLock::new();
 
 impl Deref for CacheHandle {
     type Target = dyn Cache;
@@ -313,7 +292,6 @@ impl Plugin for CachePlugin {
 
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let handle = CacheHandle::new(self.cache.clone());
-        handle.install();
         lc.services_mut().insert(handle);
         let mut ready = CacheReadiness::new(self.cache.clone()).migrating(self.migrate);
         if let Some(help) = &self.ready_help {

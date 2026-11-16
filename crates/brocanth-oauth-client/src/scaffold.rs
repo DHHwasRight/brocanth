@@ -19,7 +19,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, Category, Dep, Manifest, Module, MountRole, Opt, PgPool, Project, Scaffold,
+    Setting, Slot, Tab,
 };
 
 /// The built-in providers this module declares settings for.
@@ -94,16 +95,23 @@ impl Module for OauthClient {
             "oauth-client-memory",
             "the tokens are kept in memory, and [oauth_client] has no migrate",
         )
-        .integration(
-            "admin",
-            "a tab at /admin/connections: every connection without its tokens, and a Revoke button",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "connections",
+                "a tab at /admin/connections: every connection without its tokens, and a Revoke button",
+            ),
             true,
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/connections",
-            "Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/connections",
+                "Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
+            )
+            // A provider calls the callback back: never crawled, counted
+            // or localised.
+            .role(MountRole::Machine),
+        )
         .krate(
             Dep::brocanth("brocanth-oauth-client")
                 .feature_unless("oauth-client-memory", "postgres")
@@ -148,15 +156,22 @@ impl Module for OauthClient {
             .line(format!("{mount_at}.to_string()"));
         s.at(Slot::PagesRoutes)
             .line(format!("{mount_at}.to_owned() + \"/{{*rest}}\""));
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "oauth-client", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::AgentsSections).block(CLIENT_AGENTS.to_string());
     }
 }
 
+/// The connections tab, when the admin collects tabs. The admin's `mount`
+/// runs before the plugin builds its client, so the tab holds a cell the
+/// admin fills from the request context.
 const ADMIN_TAB: &str = "// Every connection, without its tokens, with a Revoke button, as a tab.
-config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::installed());";
+let client = late.cell(|ctx| {
+    ctx.provided::<brocanth_oauth_client::OauthClient, _>()
+        .cloned()
+});
+config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::late(client));";
 
 const CLIENT_AGENTS: &str = "\n\
     ## Connected accounts\n\
@@ -636,7 +651,6 @@ impl Plugin for OauthClientPlugin {
         let client = builder
             .build()
             .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
-        client.install();
         let secure = base.starts_with("https://");
         let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
         self.client = Some(client);

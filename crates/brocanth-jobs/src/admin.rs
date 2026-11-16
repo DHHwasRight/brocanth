@@ -130,12 +130,12 @@ impl JobsPanel {
         }
     }
 
-    /// The panel over the queue the application installed
-    /// ([`Queue::install`](crate::Queue::install)), looked up when it
-    /// renders: for a generated admin, which mounts before the jobs plugin
-    /// opens its queue. Until then each screen says so.
-    pub fn installed() -> Self {
-        Self::new(Arc::new(Installed))
+    /// The panel over a queue that arrives later, in `cell`: for a
+    /// generated admin, which mounts before the jobs plugin opens its
+    /// queue. The admin fills the cell from the first request that carries
+    /// the [`Queue`](crate::Queue). Until then each screen says so.
+    pub fn late(cell: brocanth_admin::late::Late<crate::Queue>) -> Self {
+        Self::new(Arc::new(LateQueue(cell)))
     }
 
     /// A different key, for an application that already has a `jobs` model
@@ -779,34 +779,35 @@ pub struct DeadCtx {
     pub rows: Vec<DeadRow>,
 }
 
-/// The installed queue, found when a screen asks.
-struct Installed;
+/// A queue that arrives after the admin was built, found when a screen
+/// asks.
+struct LateQueue(brocanth_admin::late::Late<crate::Queue>);
 
-impl Installed {
-    fn queue() -> Result<crate::Queue, brocanth_queue::BackendError> {
-        crate::Queue::installed().ok_or_else(|| {
+impl LateQueue {
+    fn queue(&self) -> Result<&crate::Queue, brocanth_queue::BackendError> {
+        self.0.get().ok_or_else(|| {
             brocanth_queue::BackendError::Unavailable(
-                "no jobs queue is installed yet\n\
-                 help: register the jobs plugin, which installs its queue at startup"
+                "this tab has no jobs queue yet: no request with it on its context has come\n\
+                 help: register the jobs plugin, which puts its queue on the request context"
                     .to_string(),
             )
         })
     }
 }
 
-impl brocanth_queue::Inspect for Installed {
+impl brocanth_queue::Inspect for LateQueue {
     fn has_history(&self) -> bool {
-        crate::Queue::installed().is_some_and(|q| q.reader().has_history())
+        self.0.get().is_some_and(|q| q.reader().has_history())
     }
 
     async fn stats(&self) -> Result<brocanth_queue::Stats, brocanth_queue::BackendError> {
-        Self::queue()?.reader().stats().await
+        self.queue()?.reader().stats().await
     }
 
     async fn depths(
         &self,
     ) -> Result<Vec<brocanth_queue::QueueDepth>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().depths().await
+        self.queue()?.reader().depths().await
     }
 
     async fn list(
@@ -814,56 +815,56 @@ impl brocanth_queue::Inspect for Installed {
         view: brocanth_queue::View,
         page: brocanth_queue::Page,
     ) -> Result<Vec<JobRow>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().list(view, page).await
+        self.queue()?.reader().list(view, page).await
     }
 
     async fn job(
         &self,
         id: &brocanth_queue::JobId,
     ) -> Result<Option<JobRow>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().job(id).await
+        self.queue()?.reader().job(id).await
     }
 
     async fn dead(
         &self,
         page: brocanth_queue::Page,
     ) -> Result<Vec<brocanth_queue::DeadRow>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().dead(page).await
+        self.queue()?.reader().dead(page).await
     }
 
     async fn dead_one(
         &self,
         id: &brocanth_queue::DeadId,
     ) -> Result<Option<brocanth_queue::DeadRow>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().dead_one(id).await
+        self.queue()?.reader().dead_one(id).await
     }
 
     async fn run_now(
         &self,
         id: &brocanth_queue::JobId,
     ) -> Result<bool, brocanth_queue::BackendError> {
-        Self::queue()?.reader().run_now(id).await
+        self.queue()?.reader().run_now(id).await
     }
 
     async fn discard(
         &self,
         id: &brocanth_queue::JobId,
     ) -> Result<bool, brocanth_queue::BackendError> {
-        Self::queue()?.reader().discard(id).await
+        self.queue()?.reader().discard(id).await
     }
 
     async fn requeue(
         &self,
         id: &brocanth_queue::DeadId,
     ) -> Result<Option<brocanth_queue::JobId>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().requeue(id).await
+        self.queue()?.reader().requeue(id).await
     }
 
     async fn forget(
         &self,
         id: &brocanth_queue::DeadId,
     ) -> Result<bool, brocanth_queue::BackendError> {
-        Self::queue()?.reader().forget(id).await
+        self.queue()?.reader().forget(id).await
     }
 
     async fn finished(
@@ -871,6 +872,6 @@ impl brocanth_queue::Inspect for Installed {
         since: SystemTime,
         bucket: Bucket,
     ) -> Result<Vec<brocanth_queue::Finished>, brocanth_queue::BackendError> {
-        Self::queue()?.reader().finished(since, bucket).await
+        self.queue()?.reader().finished(since, bucket).await
     }
 }

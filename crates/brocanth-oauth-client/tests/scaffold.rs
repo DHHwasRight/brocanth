@@ -58,7 +58,7 @@ fn the_client_keeps_tokens_in_postgres_and_adds_an_admin_tab() {
     assert!(plugin.contains("stamped(ctx, page.html())"));
     let mods = file(&files, "src/plugins/mod.rs");
     assert!(
-        mods.contains("ConnectionsPanel::installed()"),
+        mods.contains("ConnectionsPanel::late(client)"),
         "the admin tab"
     );
 }

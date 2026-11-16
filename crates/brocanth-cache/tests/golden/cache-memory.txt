@@ -2242,11 +2242,7 @@ impl Plugin for Cache {
 
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(MemoryCache::new());
-        let handle = CacheHandle::new(cache);
-        // The first cache this process opens is the one the admin's cache
-        // tab reads: the admin is built before any plugin starts.
-        handle.install();
-        self.handle = Some(handle);
+        self.handle = Some(CacheHandle::new(cache));
         Ok(())
     }
 

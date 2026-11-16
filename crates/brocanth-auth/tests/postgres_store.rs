@@ -408,7 +408,7 @@ async fn the_roles_tab_runs_on_postgres() {
         assert_eq!(
             post(
                 &ops,
-                "do=define&role=editor&permissions=roles.view+post.change"
+                "do=define&role=editor&permissions=roles.read+post.edit"
             )
             .await,
             303
@@ -420,7 +420,7 @@ async fn the_roles_tab_runs_on_postgres() {
         assert_eq!(store.roles_of(&ed).await.unwrap(), ["editor"]);
 
         let ed_staff = Staff::load(&*store, &ed).await.unwrap().unwrap();
-        assert!(ed_staff.allows("post.change") && !ed_staff.allows("post.delete"));
+        assert!(ed_staff.allows("post.edit") && !ed_staff.allows("post.owner"));
         let seen = admin
             .dispatch(
                 Principal::new(&ed_staff),

@@ -42,7 +42,7 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::module_ref;
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, MountRole, Opt, Project, Scaffold, Slot};
 
 /// The records API, as a choice on the `brocanth create` menu.
 ///
@@ -69,11 +69,15 @@ impl Module for Records {
             "middleware-csrf",
             "AGENTS.md says how a fetch caller and a non-browser client get past the CSRF check",
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/api",
-            "Where the records API answers. Every resource is under it.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/api",
+                "Where the records API answers. Every resource is under it.",
+            )
+            // Read by programs, not people.
+            .role(MountRole::Machine),
+        )
         .krate(
             Dep::brocanth("brocanth-resource")
                 // The page-shaped surface and nothing else. `plugin` is the

@@ -21,7 +21,7 @@
 
 use brocanth_scaffold::snippet::{configurable, integration, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// Feature flags, as a choice on the `brocanth create` menu.
@@ -53,9 +53,11 @@ impl Module for FeatureFlags {
                 .feature_with("admin", "admin")
                 .note("the flag rules, their in-process copy and their Postgres store"),
         )
-        .integration(
-            "admin",
-            "a `flags` tab in the admin that turns each declared flag on or off",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "flags",
+                "a `flags` tab in the admin that turns each declared flag on or off",
+            ),
             true,
         )
         .absent(
@@ -76,7 +78,7 @@ impl Module for FeatureFlags {
             // The literal form calls `Plugin::new`, a trait method.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "flags", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::AgentsSections)
@@ -84,11 +86,14 @@ impl Module for FeatureFlags {
     }
 }
 
-/// The flags tab, with the `admin` module. The panel finds the plugin's
-/// copy when it renders, because the admin's `mount` runs before a plugin
-/// could hand it one. It lists the flags the project declares.
+/// The flags tab, when the admin collects tabs. The admin's `mount` runs
+/// before a plugin could hand it the copy, so the tab holds a cell the
+/// admin fills from the request context. It lists the flags the project
+/// declares.
 const ADMIN_TAB: &str = "// The feature flags, as a tab that turns each one on or off.
-config = config.panel(brocanth_flags::admin::FlagsPanel::installed(
+let flags = late.cell(|ctx| ctx.provided::<brocanth_flags::Flags, _>().cloned());
+config = config.panel(brocanth_flags::admin::FlagsPanel::late(
+    flags,
     crate::plugins::flags::ALL,
 ));";
 

@@ -12,7 +12,7 @@ admin.
 | Part of | none |
 | Needs | [`superuser`](superuser.md): only a superuser gives a role, and `superuser` reads the signed-in member of staff |
 | After | [`superuser`](superuser.md) |
-| Adapts to | [`admin`](admin.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth`, feature `policy` |
@@ -26,17 +26,21 @@ Files:
 
 Slots:
 
-- `AdminPanels`, with `admin`, behind `integrate.admin`: the Roles tab,
-  `brocanth_auth::admin::RolesPanel`.
+- `AdminPanels`, when the admin collects tabs, behind `integrate.admin`:
+  the Roles tab, `brocanth_auth::admin::RolesPanel`, RBAC resource `roles`.
 - `AgentsSections`: "Roles".
 
 ## Decisions
 
-- **A permission is a string.** The admin asks for `<model>.view`, `.add`,
-  `.change`, `.delete`, and `<panel>.view` and `.act`. These are Django's
-  words, so a team that knows `post.change_post` reads them.
-- **Only a superuser changes roles.** A role holder who could edit roles
-  could give itself every permission.
+- **A permission is a level on a resource.** The admin asks for
+  `<resource>.read` to look and `<resource>.edit` for every button and
+  write. `<resource>.owner` includes both. A resource is a tab's key or a
+  model's key. Reason: three levels per tab are a model a person can hold
+  in their head (`docs/module-capabilities.md` §5.2).
+- **Only a superuser changes roles, except inside one tab.** A role holder
+  who could edit roles could give itself every permission. The owner of a
+  resource gives and takes `read` and `edit` on it, and nothing else; only
+  a superuser gives `owner`.
 - **Roles answer which people, not which rows.** `Staff::gate` turns a
   permission into a `brocanth_policy::Pred`, so a role check and a row
   rule go into one `condition()`. Nothing filters after a load.

@@ -21,7 +21,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, Hooking};
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    Tab,
 };
 
 /// The change history, as a choice on the `brocanth create` menu.
@@ -61,9 +62,11 @@ impl Module for Audit {
             "record each change the model layer publishes through `HookSink`",
             Hook::on(),
         )
-        .integration(
-            "admin",
-            "a History tab in the admin, a History link on every record, and every admin write recorded with its values",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "history",
+                "a History tab in the admin, a History link on every record, and every admin write recorded with its values",
+            ),
             true,
         )
         .absent(
@@ -88,7 +91,7 @@ impl Module for Audit {
             },
             settings(),
         );
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "audit", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
@@ -113,11 +116,12 @@ fn settings() -> Vec<Setting> {
     ]
 }
 
-/// The history in the admin. The panel and the journal find the plugin's
-/// trail when they run, because the admin's `mount` runs before a plugin
-/// could hand it one.
+/// The history in the admin. The admin's `mount` runs before a plugin
+/// could hand it the trail, so the panel and the journal hold a cell the
+/// admin fills from the request context.
 const ADMIN_TAB: &str = "// The change history: a tab, a link on every record, every admin write.
-config = brocanth_audit::admin::install(config);";
+let trail = late.cell(|ctx| ctx.provided::<brocanth_audit::Trail, _>().cloned());
+config = brocanth_audit::admin::install(config, trail);";
 
 const PRELUDE: &str = r#"
         // -- brocanth-audit: change history ---------------------------------

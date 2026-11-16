@@ -391,9 +391,8 @@ fn a_bulk_delete_records_the_actor_when_the_admin_knows_one() {
 }
 
 #[test]
-fn without_the_plugin_the_installed_tab_says_so_and_a_write_still_works() {
-    // No `AuditPlugin` is built in this test binary, so `installed()` has
-    // no trail.
+fn before_the_trail_arrives_the_tab_says_so_and_a_write_still_works() {
+    // The cell is empty: no request with a trail on its context has come.
     let config = AdminConfig::new()
         .with_policy(AllowAllUnsafeForDevelopment)
         .at("/admin")
@@ -401,7 +400,7 @@ fn without_the_plugin_the_installed_tab_says_so_and_a_write_still_works() {
         .unscoped_rows_unsafe_for_development();
     let admin = Admin::new(
         Arc::new(Fixture::blog()),
-        brocanth_audit::admin::install(config),
+        brocanth_audit::admin::install(config, brocanth_admin::late::Late::new()),
     );
     html(&send(&admin, "GET", "/admin/history", "", ""))
         .assert_text("The audit plugin is not registered");
@@ -493,6 +492,7 @@ fn a_request_built_by_hand_shows_no_values() {
         submission: &submission,
         mount: "/admin/history",
         access: None,
+        principal: brocanth_admin::policy::Principal::anonymous(),
     }))
     .unwrap();
     let Some(PanelPage::Body { html, .. }) = page else {

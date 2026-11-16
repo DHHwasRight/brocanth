@@ -1607,10 +1607,18 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
-        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+        let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));
     }
     config
 }
@@ -2248,7 +2256,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6adea811835fe014
+// brocanth-digest: f5272dc5de94737d
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2851,7 +2859,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -2934,8 +2942,11 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         config = config.stylesheet(href);
     }
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
@@ -2943,10 +2954,12 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         Arc::new(Fixture::new()),
         config,
     ));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -2955,11 +2968,15 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -3486,7 +3503,7 @@ kind = ["middleware"]
 files = ["src/modules/analytics.rs"]
 config = ["analytics"]
 crates = ["brocanth-analytics"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
 [modules.admin]
 version = "0.1.0"
@@ -3496,4 +3513,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: ac6f17a6c3305ef0
+# brocanth-digest: 83f44a6ad1bb844f

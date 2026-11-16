@@ -15,21 +15,21 @@
 //! answers which rows, and [`Staff::gate`] (feature `policy`) turns a
 //! permission into a predicate that policy can combine with a row rule.
 //!
-//! # Permission names
+//! # Permission names: a level on a resource
 //!
-//! The backoffice asks for these, and an application may use any others:
+//! The backoffice asks for a level on an RBAC resource: a tab's key or a
+//! model's key. An application may use any other permission as well.
 //!
 //! | Screen | Permission |
 //! |---|---|
-//! | a model's list and detail | `<model>.view` |
-//! | create | `<model>.add` |
-//! | change | `<model>.change` |
-//! | delete | `<model>.delete` |
-//! | a panel | `<panel>.view` |
-//! | a panel's buttons | `<panel>.act` |
+//! | a tab, or a model's list and detail | `<resource>.read` |
+//! | a tab's buttons; create, change, delete | `<resource>.edit` |
+//! | give `read` or `edit` on it to a role | `<resource>.owner` |
 //!
-//! The words are Django's, so a team that knows `post.change_post` reads
-//! them without a table.
+//! Each level includes the ones below it: a role that holds `jobs.owner`
+//! passes a check for `jobs.edit` and for `jobs.read`. The grants live in
+//! the roles tables, so a second service that reads the same tables sees
+//! the same grants (`docs/module-capabilities.md` §5.2).
 //!
 //! # An anonymous session is not staff
 //!
@@ -218,8 +218,34 @@ impl Staff {
 
     /// Whether the account may do what `permission` names. Always for a
     /// superuser.
+    ///
+    /// A level includes the ones below it: `jobs.owner` allows `jobs.edit`
+    /// and `jobs.read`, and `jobs.edit` allows `jobs.read`.
     pub fn allows(&self, permission: &str) -> bool {
-        self.superuser || self.permissions.contains(permission)
+        if self.superuser || self.permissions.contains(permission) {
+            return true;
+        }
+        let Some((resource, level)) = permission.rsplit_once('.') else {
+            return false;
+        };
+        let above: &[&str] = match level {
+            "read" => &["edit", "owner"],
+            "edit" => &["owner"],
+            _ => &[],
+        };
+        above
+            .iter()
+            .any(|level| self.permissions.contains(&format!("{resource}.{level}")))
+    }
+
+    /// The resources the account's roles make it the owner of: it may give
+    /// `read` and `edit` on each to other staff. Empty for a superuser who
+    /// holds no `owner` grant: a superuser passes every check anyway.
+    pub fn owned(&self) -> Vec<&str> {
+        self.permissions
+            .iter()
+            .filter_map(|p| p.strip_suffix(".owner"))
+            .collect()
     }
 
     /// A permission as a row predicate: every row when the account holds it,
@@ -231,7 +257,7 @@ impl Staff {
     /// ```ignore
     /// fn update(&self, who: &Visitor) -> EntityPred<Post> {
     ///     // Editors change every post; everybody else changes their own.
-    ///     who.staff.gate("post.change").or(Pred::eq(PostColumn::AuthorId, who.id))
+    ///     who.staff.gate("post.edit").or(Pred::eq(PostColumn::AuthorId, who.id))
     /// }
     /// ```
     #[cfg(feature = "policy")]
@@ -424,14 +450,18 @@ mod tests {
         assert!(!plain.is_staff(), "an account with no role is not staff");
 
         store
-            .put_role(&Role::new("editor", ["post.change"]))
+            .put_role(&Role::new("editor", ["post.edit", "jobs.owner"]))
             .await
             .unwrap();
         store.assign_role(&ed, "editor").await.unwrap();
         let editor = Staff::load(&*store, &ed).await.unwrap().unwrap();
         assert!(editor.is_staff());
-        assert!(editor.allows("post.change"));
-        assert!(!editor.allows("post.delete"));
+        assert!(editor.allows("post.edit"));
+        assert!(editor.allows("post.read"), "edit includes read");
+        assert!(!editor.allows("post.owner"), "edit does not include owner");
+        assert!(editor.allows("jobs.read") && editor.allows("jobs.edit"));
+        assert!(!editor.allows("cache.read"));
+        assert_eq!(editor.owned(), ["jobs"]);
         assert_eq!(editor.name(), "ed@example.com");
     }
 

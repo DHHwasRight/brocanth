@@ -34,8 +34,8 @@
 //!   pool. `brocanth check --deploy` reports it
 //!   (`deploy/development-only`).
 //!
-//! With `admin`, the queue is the admin's `jobs` tab: an integration, on by
-//! default, that `src/modules/jobs.rs` turns off.
+//! With `admin`, the queue is the admin's `jobs` tab (RBAC resource `jobs`):
+//! a contribution, on by default, that `src/modules/jobs.rs` turns off.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
@@ -44,7 +44,7 @@ use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// Where the generated queue keeps its jobs.
@@ -96,9 +96,11 @@ impl Module for Jobs {
             "observability-metrics",
             "/metrics shows the queue's depth and the age of its oldest job",
         )
-        .integration(
-            "admin",
-            "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "jobs",
+                "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",
+            ),
             true,
         )
         .asked_in(
@@ -138,17 +140,18 @@ impl Module for Jobs {
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "jobs", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
     }
 }
 
-/// The queue's tab, with the `admin` module. The panel finds the queue the
-/// jobs plugin installed when it renders, because the admin mounts its
-/// routes before a plugin opens a queue.
+/// The queue's tab, when the admin collects tabs. The admin mounts its
+/// routes before a plugin opens a queue, so the tab holds a cell the admin
+/// fills from the request context.
 const ADMIN_TAB: &str = "// The queue the jobs plugin runs, as a tab.
-config = config.panel(brocanth_jobs::admin::JobsPanel::installed());";
+let queue = late.cell(|ctx| ctx.provided::<brocanth_jobs::Queue, _>().cloned());
+config = config.panel(brocanth_jobs::admin::JobsPanel::late(queue));";
 
 /// `jobs-memory`: the queue in the process, for development and tests.
 pub struct JobsMemory;
@@ -393,9 +396,6 @@ impl Plugin for Jobs {{
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
 {open}{observed}
 {ready}
-        // So the admin's jobs tab, which mounts before this runs, finds it.
-        queue.install();
-
         // In the services too, for a plugin that runs a worker of its own on
         // this queue: the mail plugin sends `deliver_later` mail that way.
         // Every `before_start` runs before any `start`, so it finds it there.

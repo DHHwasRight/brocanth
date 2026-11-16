@@ -11,47 +11,40 @@
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts;
 
 use crate::flags::Flags;
-use crate::plugin::FlagsPlugin;
 use crate::rule::{valid_key, Flag, Rule};
 
 /// The flags tab.
 pub struct FlagsPanel {
-    source: Source,
+    flags: Late<Flags>,
     declared: &'static [Flag],
-}
-
-enum Source {
-    Flags(Flags),
-    Installed,
 }
 
 impl FlagsPanel {
     /// A tab over this copy, listing `declared`.
     pub fn new(flags: Flags, declared: &'static [Flag]) -> FlagsPanel {
         FlagsPanel {
-            source: Source::Flags(flags),
+            flags: Late::ready(flags),
             declared,
         }
     }
 
-    /// A tab over [`FlagsPlugin::installed`], resolved when it renders: for
-    /// a generated admin, which mounts before the plugin is built.
-    pub fn installed(declared: &'static [Flag]) -> FlagsPanel {
+    /// A tab over a copy that arrives later, in `cell`: for a generated
+    /// admin, which mounts before the plugin is built. The admin fills the
+    /// cell from the first request that carries the [`Flags`].
+    pub fn late(cell: Late<Flags>, declared: &'static [Flag]) -> FlagsPanel {
         FlagsPanel {
-            source: Source::Installed,
+            flags: cell,
             declared,
         }
     }
 
     fn flags(&self) -> Option<Flags> {
-        match &self.source {
-            Source::Flags(flags) => Some(flags.clone()),
-            Source::Installed => FlagsPlugin::installed(),
-        }
+        self.flags.get().cloned()
     }
 
     fn description(&self, key: &str) -> Option<&'static str> {

@@ -13,7 +13,7 @@ The wizard calls it: *Count visits with Google Analytics, after consent*.
 | Part of | none |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`admin`](admin.md), [`i18n`](i18n.md) |
+| Adapts to | [`config`](config.md), [`i18n`](i18n.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the hook runs in the static export too |
 | Crates | `brocanth-gtag` |

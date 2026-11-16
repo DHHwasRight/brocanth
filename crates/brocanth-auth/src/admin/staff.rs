@@ -4,34 +4,42 @@
 //! # The policy
 //!
 //! [`StaffPolicy`] reads the principal as a [`Staff`] and asks it for the
-//! permission each screen names (see [`crate::staff`] for the table). A
-//! superuser passes every check, so an application with superusers and no
-//! policy of its own still has a usable backoffice. An anonymous principal,
-//! or one of another type, passes none.
+//! level each screen needs on its RBAC resource: `<resource>.read` to look,
+//! `<resource>.edit` to press a button or write (see [`crate::staff`] for
+//! the table). A superuser passes every check, so an application with
+//! superusers and no policy of its own still has a usable backoffice. An
+//! anonymous principal, or one of another type, passes none.
 //!
-//! **Only a superuser changes roles.** A role holder who could edit roles
-//! could give itself every permission, so the buttons of the roles tab ask
-//! for the superuser flag and not for a permission. This is Django's rule
-//! for `auth.change_group` made unconditional.
+//! **Only a superuser changes roles**, with one exception inside one tab.
+//! A role holder who could edit roles could give itself every permission,
+//! so defining a role, deleting one, and giving or taking a role ask for
+//! the superuser flag. The exception: the owner of a resource
+//! (`jobs.owner`) gives or takes `jobs.read` and `jobs.edit` on a role, and
+//! nothing else. Only a superuser gives `owner`. So an owner cannot raise
+//! itself or reach past its own tab (`docs/module-capabilities.md` §5.2).
 //!
 //! # The tab
 //!
-//! [`RolesPanel`] lists the roles with their permissions and members, and
-//! has four buttons: define a role, delete one, give a role to an account by
-//! its address, and take it away. Each button is a POST, and the admin asks
-//! the policy before the panel runs.
+//! [`RolesPanel`] lists the roles with their permissions and members. A
+//! superuser has five buttons: define a role, delete one, give a role to an
+//! account by its address, take it away, and give or take a level on a
+//! resource. An owner has the last one, for its own resources. Each button
+//! is a POST; the admin asks the policy before the panel runs, and the
+//! panel checks the principal for the button pressed.
 //!
 //! The store can arrive late. A generated project builds the admin when the
 //! route table is built, before any plugin has started, so
-//! [`RolesPanel::late`] takes a cell that a plugin fills at startup. Until
-//! then the tab says the store is not ready.
+//! [`RolesPanel::late`] takes a [`Late`] cell that the admin fills from the
+//! first request that carries the store. Until then the tab says the store
+//! is not ready.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
-use brocanth_admin::policy::{Action, Policy, Principal, Request};
+use brocanth_admin::policy::{Action, Level, Policy, Principal, Request};
 use brocanth_admin::view::render;
 
 use crate::identity::{AccountId, EmailAddress};
@@ -43,28 +51,21 @@ use super::failed;
 /// The roles tab's key, and the subject of its policy questions.
 pub const ROLES_KEY: &str = "roles";
 
-/// The permission a backoffice request needs, or `None` for the index,
-/// which every member of staff may open.
+/// The permission a backoffice request needs: a level on the request's
+/// RBAC resource, or `None` for the index, which every member of staff may
+/// open.
 ///
 /// ```
 /// use brocanth_admin::policy::{Action, Request};
 /// use brocanth_auth::admin::permission;
 ///
-/// assert_eq!(permission(Request::new(Action::ViewList, "post")).as_deref(), Some("post.view"));
-/// assert_eq!(permission(Request::new(Action::Update, "post")).as_deref(), Some("post.change"));
-/// assert_eq!(permission(Request::new(Action::ActOnPanel, "jobs")).as_deref(), Some("jobs.act"));
+/// assert_eq!(permission(Request::new(Action::ViewList, "post")).as_deref(), Some("post.read"));
+/// assert_eq!(permission(Request::new(Action::Update, "post")).as_deref(), Some("post.edit"));
+/// assert_eq!(permission(Request::new(Action::ActOnPanel, "jobs")).as_deref(), Some("jobs.edit"));
 /// assert_eq!(permission(Request::new(Action::ViewIndex, "")), None);
 /// ```
 pub fn permission(request: Request<'_>) -> Option<String> {
-    let verb = match request.action {
-        Action::ViewIndex => return None,
-        Action::ViewList | Action::ViewDetail | Action::ViewPanel => "view",
-        Action::Create => "add",
-        Action::Update => "change",
-        Action::Delete => "delete",
-        Action::ActOnPanel => "act",
-    };
-    Some(format!("{}.{verb}", request.model))
+    request.action.level().map(|level| level.on(request.model))
 }
 
 /// The backoffice's screen policy, over a [`Staff`] principal.
@@ -85,8 +86,16 @@ impl Policy for StaffPolicy {
         if !staff.is_staff() {
             return false;
         }
-        if request.action == Action::ActOnPanel && request.model == ROLES_KEY {
-            return staff.is_superuser();
+        if request.model == ROLES_KEY {
+            // An owner of any resource opens the roles tab and presses its
+            // grant buttons; the panel narrows each button to what this
+            // person may give. Everything else in it is a superuser's.
+            let owner = !staff.owned().is_empty();
+            return match request.action {
+                Action::ViewPanel => owner || staff.allows(&Level::Read.on(ROLES_KEY)),
+                Action::ActOnPanel => owner || staff.is_superuser(),
+                _ => staff.is_superuser(),
+            };
         }
         match permission(request) {
             None => true,
@@ -95,43 +104,55 @@ impl Policy for StaffPolicy {
     }
 }
 
-/// Where the panel finds its store.
-enum Source<S> {
-    Now(Arc<S>),
-    Late(Arc<OnceLock<Arc<S>>>),
-}
-
 /// Roles as a tab: who holds which permissions, and the buttons that change
 /// it.
 pub struct RolesPanel<S: StaffStore + AccountDirectory> {
-    source: Source<S>,
+    store: Late<Arc<S>>,
 }
 
 impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
     /// The tab over a store the application already holds.
     pub fn new(store: Arc<S>) -> Self {
         Self {
-            source: Source::Now(store),
+            store: Late::ready(store),
         }
     }
 
-    /// The tab over a store that a plugin puts in `cell` at startup.
-    pub fn late(cell: Arc<OnceLock<Arc<S>>>) -> Self {
-        Self {
-            source: Source::Late(cell),
-        }
+    /// The tab over a store that arrives later, in `cell`: the admin fills
+    /// it from the first request that carries the auth services.
+    pub fn late(cell: Late<Arc<S>>) -> Self {
+        Self { store: cell }
     }
 
     fn store(&self) -> Result<&Arc<S>, AdminError> {
-        match &self.source {
-            Source::Now(store) => Ok(store),
-            Source::Late(cell) => cell.get().ok_or_else(|| {
-                AdminError::Render(rsx::Error::custom(
-                    "the roles tab has no store yet: the application has not started\n\
-                     help: the plugin that owns the store fills the cell in before_start",
-                ))
-            }),
+        self.store.require("accounts store")
+    }
+}
+
+/// What the person on a request may change in the roles tab.
+#[derive(Debug, Default)]
+struct Grantor {
+    /// Defines, deletes, gives and takes roles, and gives any level.
+    superuser: bool,
+    /// The resources it owns: it gives `read` and `edit` on each.
+    owns: Vec<String>,
+}
+
+impl Grantor {
+    fn of(principal: &Principal<'_>) -> Self {
+        match principal.downcast::<Staff>() {
+            Some(staff) if staff.is_staff() => Grantor {
+                superuser: staff.is_superuser(),
+                owns: staff.owned().into_iter().map(str::to_string).collect(),
+            },
+            _ => Grantor::default(),
         }
+    }
+
+    /// Whether it may give or take `level` on `resource`. Only a superuser
+    /// gives `owner`; an owner gives `read` and `edit` on its own resource.
+    fn may_grant(&self, resource: &str, level: Level) -> bool {
+        self.superuser || (level != Level::Owner && self.owns.iter().any(|r| r == resource))
     }
 }
 
@@ -159,6 +180,7 @@ impl<S: StaffStore + AccountDirectory> Panel for RolesPanel<S> {
 impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
     async fn list(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
         let store = self.store()?;
+        let grantor = Grantor::of(&r.principal);
         let mut rows = Vec::new();
         for role in store.roles().await.map_err(failed)? {
             let mut members = Vec::new();
@@ -181,13 +203,31 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join(" "),
+                grants: role
+                    .permissions
+                    .iter()
+                    .map(|permission| GrantRow {
+                        revocable: r.can_act
+                            && split(permission).is_some_and(|(resource, level)| {
+                                grantor.may_grant(resource, level)
+                            }),
+                        permission: permission.clone(),
+                    })
+                    .collect(),
                 name: role.name,
                 members,
             });
         }
         let ctx = RolesCtx {
             volatile: !store.is_durable(),
-            can_act: r.can_act,
+            can_act: r.can_act && grantor.superuser,
+            can_grant: r.can_act && (grantor.superuser || !grantor.owns.is_empty()),
+            grantable: grantor.owns.clone(),
+            levels: Level::ALL
+                .into_iter()
+                .filter(|level| grantor.superuser || *level != Level::Owner)
+                .map(|level| level.as_str().to_string())
+                .collect(),
             action: r.url(""),
             error: r
                 .param("error")
@@ -211,7 +251,17 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
             Some(refusal) => PanelPage::redirect(format!("{}?error={}", r.url(""), refusal.code())),
         };
         let name = field("role");
-        match field("do").as_str() {
+        let grantor = Grantor::of(&r.principal);
+        let action = field("do");
+        if matches!(action.as_str(), "grant" | "revoke") {
+            return self.grant(r, &grantor, &name, action == "grant").await;
+        }
+        // Everything but a grant is a superuser's: the policy let an owner
+        // through to the tab, and this is where the tab narrows it.
+        if !grantor.superuser {
+            return Ok(back(Some(Refusal::NotYours)));
+        }
+        match action.as_str() {
             "define" => {
                 if !valid_name(&name) {
                     return Ok(back(Some(Refusal::BadName)));
@@ -251,6 +301,71 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
         }
         Ok(back(None))
     }
+
+    /// Gives or takes one level on one resource to or from a role.
+    async fn grant(
+        &self,
+        r: &PanelRequest<'_>,
+        grantor: &Grantor,
+        role: &str,
+        give: bool,
+    ) -> Result<PanelPage, AdminError> {
+        let store = self.store()?;
+        let back = |refusal: Option<Refusal>| match refusal {
+            None => PanelPage::redirect(r.url("")),
+            Some(refusal) => PanelPage::redirect(format!("{}?error={}", r.url(""), refusal.code())),
+        };
+        let field = |name: &str| r.submission.get(name).unwrap_or("").trim().to_string();
+        // The take button names the permission; the give form names the
+        // resource and the level.
+        let permission = field("permission");
+        let (resource, level) = if permission.is_empty() {
+            (field("resource"), Level::parse(&field("level")))
+        } else {
+            match split(&permission) {
+                Some((resource, level)) => (resource.to_string(), Some(level)),
+                None => (String::new(), None),
+            }
+        };
+        let Some(level) = level else {
+            return Ok(back(Some(Refusal::NoLevel)));
+        };
+        if !valid_resource(&resource) {
+            return Ok(back(Some(Refusal::BadResource)));
+        }
+        if !grantor.may_grant(&resource, level) {
+            return Ok(back(Some(Refusal::NotYours)));
+        }
+        let roles = store.roles().await.map_err(failed)?;
+        let Some(mut found) = roles.into_iter().find(|candidate| candidate.name == role) else {
+            return Ok(back(Some(Refusal::NoRole)));
+        };
+        let permission = level.on(&resource);
+        if give {
+            found.permissions.insert(permission);
+        } else {
+            found.permissions.remove(&permission);
+        }
+        store.put_role(&found).await.map_err(failed)?;
+        Ok(back(None))
+    }
+}
+
+/// `jobs.edit` as `("jobs", Level::Edit)`, or `None` for a permission that
+/// is not a level on a resource, such as `accounts.impersonate`.
+fn split(permission: &str) -> Option<(&str, Level)> {
+    let (resource, level) = permission.rsplit_once('.')?;
+    Some((resource, Level::parse(level)?))
+}
+
+/// A resource is a tab's or a model's key: lower case letters, digits, `-`
+/// and `_`, so `<resource>.<level>` reads one way.
+fn valid_resource(resource: &str) -> bool {
+    resource.starts_with(|c: char| c.is_ascii_lowercase())
+        && resource.len() <= 64
+        && resource
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
 }
 
 /// Why a button did nothing, carried to the tab by the redirect.
@@ -267,15 +382,21 @@ enum Refusal {
     NoAccount,
     NoRole,
     NoAction,
+    NoLevel,
+    BadResource,
+    NotYours,
 }
 
 impl Refusal {
-    const ALL: [Refusal; 5] = [
+    const ALL: [Refusal; 8] = [
         Refusal::BadName,
         Refusal::NotAnAddress,
         Refusal::NoAccount,
         Refusal::NoRole,
         Refusal::NoAction,
+        Refusal::NoLevel,
+        Refusal::BadResource,
+        Refusal::NotYours,
     ];
 
     /// What the redirect carries in `error=`.
@@ -286,6 +407,9 @@ impl Refusal {
             Refusal::NoAccount => "no-account",
             Refusal::NoRole => "no-role",
             Refusal::NoAction => "no-action",
+            Refusal::NoLevel => "no-level",
+            Refusal::BadResource => "bad-resource",
+            Refusal::NotYours => "not-yours",
         }
     }
 
@@ -302,6 +426,13 @@ impl Refusal {
             Refusal::NoAccount => "no account has that address",
             Refusal::NoRole => "no role has that name",
             Refusal::NoAction => "the form named no action",
+            Refusal::NoLevel => "a level is read, edit or owner",
+            Refusal::BadResource => {
+                "a resource is a tab's or a model's key: lower case letters, digits, dashes and underscores"
+            }
+            Refusal::NotYours => {
+                "only a superuser does that; the owner of a tab gives read or edit on that tab only"
+            }
         }
     }
 }
@@ -323,8 +454,16 @@ fn valid_name(name: &str) -> bool {
 pub struct RolesCtx {
     /// Whether the roles go when the process does.
     pub volatile: bool,
-    /// Whether to draw the buttons.
+    /// Whether to draw a superuser's buttons: define, delete, give and take
+    /// a role.
     pub can_act: bool,
+    /// Whether to draw the form that gives a level on a resource.
+    pub can_grant: bool,
+    /// The resources this person may give levels on, for an owner. Empty
+    /// for a superuser, who types any resource.
+    pub grantable: Vec<String>,
+    /// The levels this person may give: `owner` only for a superuser.
+    pub levels: Vec<String>,
     /// Where every form posts.
     pub action: String,
     /// What the last button got wrong: the tab's own sentence for the code
@@ -341,8 +480,19 @@ pub struct RoleRow {
     pub name: String,
     /// Its permissions, space separated, sorted.
     pub permissions: String,
+    /// Its permissions, one by one, with whether this person may take each
+    /// away.
+    pub grants: Vec<GrantRow>,
     /// Who holds it.
     pub members: Vec<MemberRow>,
+}
+
+/// One permission of a role.
+pub struct GrantRow {
+    /// `jobs.edit`.
+    pub permission: String,
+    /// Whether this person may take it away.
+    pub revocable: bool,
 }
 
 /// One holder of a role.
@@ -356,6 +506,31 @@ pub struct MemberRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_superuser_gives_owner_and_an_owner_stays_in_its_tab() {
+        let owner = Grantor {
+            superuser: false,
+            owns: vec!["jobs".to_string()],
+        };
+        assert!(owner.may_grant("jobs", Level::Read));
+        assert!(owner.may_grant("jobs", Level::Edit));
+        assert!(
+            !owner.may_grant("jobs", Level::Owner),
+            "only a superuser gives owner"
+        );
+        assert!(!owner.may_grant("cache", Level::Read), "not its tab");
+        let superuser = Grantor {
+            superuser: true,
+            owns: Vec::new(),
+        };
+        assert!(superuser.may_grant("cache", Level::Owner));
+        assert!(!Grantor::default().may_grant("jobs", Level::Read));
+        assert_eq!(split("jobs.edit"), Some(("jobs", Level::Edit)));
+        assert_eq!(split("accounts.impersonate"), None);
+        assert!(valid_resource("oauth-connections"));
+        assert!(!valid_resource("Jobs") && !valid_resource("a.b") && !valid_resource(""));
+    }
 
     #[test]
     fn a_role_name_is_a_word() {

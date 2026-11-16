@@ -2019,8 +2019,7 @@ pub mod openapi {
     /// The code `openapi` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: an `API` tab in the admin, with every operation; the admin
-        /// routes stay out of the document.
+        /// With `admin`: an `API` tab in the admin, with every operation.
         pub admin: bool,
     }
 
@@ -2049,7 +2048,7 @@ pub mod openapi {
     }
 }
 
-// brocanth-digest: b7f8dbfc56339dec
+// brocanth-digest: 25f5cdccf8761720
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2132,8 +2131,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // An `API` tab in the admin, with every operation; the admin routes stay
-        // out of the document. Without the `admin` module this does nothing.
+        // An `API` tab in the admin, with every operation. Without the `admin`
+        // module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2282,6 +2281,7 @@ pub const YAML_ROUTE: &str = "/openapi.yaml";
 pub struct Rendered {
     json: Arc<str>,
     yaml: Arc<str>,
+    document: brocanth_openapi::SharedDocument,
 }
 
 impl Rendered {
@@ -2293,6 +2293,12 @@ impl Rendered {
     /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
     pub fn yaml(&self) -> &str {
         &self.yaml
+    }
+
+    /// The document itself, for the admin's `API` tab.
+    #[allow(dead_code)] // read by the admin, with `admin`
+    pub fn document(&self) -> &brocanth_openapi::SharedDocument {
+        &self.document
     }
 }
 
@@ -2371,6 +2377,7 @@ impl Plugin for OpenApi {
         self.rendered = Some(Rendered {
             json: served.body(Format::Json).into(),
             yaml: served.body(Format::Yaml).into(),
+            document: served.shared(),
         });
         self.served = Some(served);
         Ok(())

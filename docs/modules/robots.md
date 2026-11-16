@@ -13,7 +13,7 @@ The wizard calls it: *A robots.txt that says what crawlers may read*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`admin`](admin.md), [`sitemap`](sitemap.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md) |
+| Adapts to | [`config`](config.md), [`sitemap`](sitemap.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-robots` |

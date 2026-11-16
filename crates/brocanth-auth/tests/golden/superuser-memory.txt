@@ -2707,14 +2707,12 @@ fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> 
 //! };
 //! ```
 
-use std::sync::{Arc, LazyLock, OnceLock};
-
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_auth::{ensure_superuser, Staff, SuperuserOutcome};
 
 use crate::pages::{Ctx, Error};
-use crate::plugins::auth::{Services, Store};
+use crate::plugins::auth::Services;
 
 /// The superuser the server makes at start: `[superuser]` in the config
 /// file, or `$<APP>_SUPERUSER__<KEY>`.
@@ -2738,17 +2736,6 @@ impl Default for Settings {
             password_env: "MY_BLOG_SUPERUSER_PASSWORD".to_string(),
         }
     }
-}
-
-/// The accounts store, once the auth plugin has built it. The admin's
-/// roles tab reads it: the admin is built with the route table, before any
-/// plugin starts.
-static STORE: LazyLock<Arc<OnceLock<Arc<Store>>>> = LazyLock::new(Default::default);
-
-/// The cell [`STORE`] fills at startup.
-#[allow(dead_code)] // read by the roles tab, with `roles`
-pub fn store() -> Arc<OnceLock<Arc<Store>>> {
-    Arc::clone(&STORE)
 }
 
 /// The signed-in member of staff, or `None`: no session, a pre-login one,
@@ -2805,8 +2792,9 @@ impl Plugin for Superuser {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let services = lc.require_service::<Services>()?;
-        let _ = STORE.set(Arc::clone(services.store()));
+        // The auth plugin publishes its services first, or the start stops
+        // here with a `help:` line rather than at the first sign-in.
+        lc.require_service::<Services>()?;
         Ok(())
     }
 

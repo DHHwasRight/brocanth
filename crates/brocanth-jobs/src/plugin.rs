@@ -182,8 +182,6 @@ impl Plugin for JobsPlugin {
     const NAME: &'static str = "jobs";
 
     fn new(config: JobsConfig) -> Self {
-        // So `JobsPanel::installed()` finds it.
-        config.queue.install();
         Self {
             queue: config.queue,
             worker: config.worker,

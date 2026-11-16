@@ -1605,20 +1605,32 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     // The cache, as a tab: Purge expired, and Clear for each namespace you
     // name with `.namespace(..)`.
     if crate::modules::cache::MODULE.integrate.admin {
-        config = config.panel(brocanth_cache::admin::CachePanel::installed());
+        let cache = late.cell(|ctx| ctx.provided::<brocanth_cache::CacheHandle, _>().cloned());
+        config = config.panel(brocanth_cache::admin::CachePanel::late(cache));
     }
     // Superusers pass every check; a role holder passes what its roles grant.
     if crate::modules::superuser::MODULE.integrate.admin {
         config = config.with_policy(brocanth_auth::admin::StaffPolicy);
     }
-    // Roles: a superuser defines them and gives them to accounts.
+    // Roles: a superuser defines them and gives them to accounts; the owner
+    // of a tab gives `read` or `edit` on it.
     if crate::modules::roles::MODULE.integrate.admin {
-        let roles = brocanth_auth::admin::RolesPanel::late(crate::plugins::superuser::store());
-        config = config.panel(roles);
+        let store = late.cell(|ctx| {
+            let auth = ctx.provided::<crate::plugins::auth::Services, _>()?;
+            Some(std::sync::Arc::clone(auth.store()))
+        });
+        config = config.panel(brocanth_auth::admin::RolesPanel::late(store));
     }
     config
 }
@@ -2247,7 +2259,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 766b872e6c51343b
+// brocanth-digest: 9b74735e34987cf6
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2616,7 +2628,7 @@ pub mod roles {
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
         /// With `admin`: a Roles tab where a superuser defines roles and gives them
-        /// to accounts.
+        /// to accounts, and the owner of a tab gives read or edit on it.
         pub admin: bool,
     }
 
@@ -2639,7 +2651,7 @@ pub mod roles {
     }
 }
 
-// brocanth-digest: 65ab596dc9bbb415
+// brocanth-digest: 7994b36483b36d56
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2920,7 +2932,8 @@ use crate::plugins::shape::roles::{Integrate, Module};
 pub const MODULE: Module = Module {
     integrate: Integrate {
         // A Roles tab where a superuser defines roles and gives them to
-        // accounts. Without the `admin` module this does nothing.
+        // accounts, and the owner of a tab gives read or edit on it. Without the
+        // `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -3702,7 +3715,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -3796,8 +3809,11 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         })
     });
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
@@ -3805,10 +3821,12 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         Arc::new(Fixture::new()),
         config,
     ));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -3817,11 +3835,15 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -4380,11 +4402,7 @@ impl Plugin for Cache {
                      must exist: `PgCache::schema_sql()` has the statements for a migration",
                 ),
         );
-        let handle = CacheHandle::new(cache);
-        // The first cache this process opens is the one the admin's cache
-        // tab reads: the admin is built before any plugin starts.
-        handle.install();
-        self.handle = Some(handle);
+        self.handle = Some(CacheHandle::new(cache));
         Ok(())
     }
 
@@ -4682,15 +4700,18 @@ mod tests {
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
-//! A permission is a string. The admin asks for `<model>.view`, `.add`,
-//! `.change` and `.delete` for a model, and `<panel>.view` and `.act` for a
-//! tab. A page of yours may ask for any other. A superuser holds every
-//! permission. Only a superuser changes roles, in the admin's Roles tab.
+//! A permission is a string. The admin asks for a level on a resource:
+//! `<resource>.read` to see a tab or a model's screens, `<resource>.edit`
+//! for its buttons and writes. `<resource>.owner` holds both, and lets its
+//! holder give `read` or `edit` on that resource in the admin's Roles tab.
+//! A page of yours may ask for any other permission. A superuser holds
+//! every permission. Only a superuser defines roles, gives them to
+//! accounts, and gives `owner`.
 //!
 //! Who may see a page is a role question:
 //!
 //! ```ignore
-//! let staff = crate::plugins::roles::require(ctx, "report.view").await?;
+//! let staff = crate::plugins::roles::require(ctx, "report.read").await?;
 //! ```
 //!
 //! Which rows is a row question, and it goes into the query through
@@ -4700,7 +4721,7 @@ mod tests {
 //! ```ignore
 //! fn update(&self, who: &Visitor) -> EntityPred<Post> {
 //!     // Editors change every post; everybody else changes their own.
-//!     who.staff.gate("post.change").or(Pred::eq(PostColumn::AuthorId, who.id))
+//!     who.staff.gate("post.edit").or(Pred::eq(PostColumn::AuthorId, who.id))
 //! }
 //! ```
 
@@ -4752,14 +4773,12 @@ pub async fn require(ctx: &Ctx, permission: &str) -> Result<Staff, Error> {
 //! };
 //! ```
 
-use std::sync::{Arc, LazyLock, OnceLock};
-
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_auth::{ensure_superuser, Staff, SuperuserOutcome};
 
 use crate::pages::{Ctx, Error};
-use crate::plugins::auth::{Services, Store};
+use crate::plugins::auth::Services;
 
 /// The superuser the server makes at start: `[superuser]` in the config
 /// file, or `$<APP>_SUPERUSER__<KEY>`.
@@ -4784,17 +4803,6 @@ impl Default for Settings {
             password_env: "MY_BLOG_SUPERUSER_PASSWORD".to_string(),
         }
     }
-}
-
-/// The accounts store, once the auth plugin has built it. The admin's
-/// roles tab reads it: the admin is built with the route table, before any
-/// plugin starts.
-static STORE: LazyLock<Arc<OnceLock<Arc<Store>>>> = LazyLock::new(Default::default);
-
-/// The cell [`STORE`] fills at startup.
-#[allow(dead_code)] // read by the roles tab, with `roles`
-pub fn store() -> Arc<OnceLock<Arc<Store>>> {
-    Arc::clone(&STORE)
 }
 
 /// The signed-in member of staff, or `None`: no session, a pre-login one,
@@ -4851,8 +4859,9 @@ impl Plugin for Superuser {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let services = lc.require_service::<Services>()?;
-        let _ = STORE.set(Arc::clone(services.store()));
+        // The auth plugin publishes its services first, or the start stops
+        // here with a `help:` line rather than at the first sign-in.
+        lc.require_service::<Services>()?;
         Ok(())
     }
 
@@ -5140,7 +5149,7 @@ kind = ["enhancer"]
 files = ["src/modules/cache.rs", "src/plugins/cache/"]
 config = ["cache"]
 crates = ["brocanth-cache"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
 [modules.admin]
 version = "0.1.0"
@@ -5172,6 +5181,6 @@ kind = ["enhancer"]
 files = ["src/modules/roles.rs", "src/plugins/roles/"]
 config = []
 crates = ["brocanth-auth"]
-adapted_to = ["admin"]
+adapted_to = []
 
-# brocanth-digest: 880ea7f4d2b7a40d
+# brocanth-digest: 6f9a0fc6dd569403

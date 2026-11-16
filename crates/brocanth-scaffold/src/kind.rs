@@ -108,6 +108,92 @@ kind!(
     One
 );
 
+kind!(
+    /// A path where a module's routes answer, with a [`MountRole`]. Each
+    /// [`Opt::mount`](crate::Opt::mount) of a chosen module contributes
+    /// one. Readers ask [`Project::mounts_with`](crate::Project::mounts_with)
+    /// for a role, and name no module: robots and analytics leave out every
+    /// `Backoffice` mount, i18n keeps every mount that is not `Public`
+    /// unprefixed.
+    Mount,
+    group = "http",
+    runtime = "a path constant in the module file, with a role",
+    gist = "a mounted path",
+    Many
+);
+
+kind!(
+    /// A tab in the backoffice. A module contributes one with
+    /// [`Manifest::contributes`](crate::Manifest::contributes), and names its
+    /// RBAC resource there; `admin` collects them. A tab reaches application
+    /// data only through a handle that could become remote
+    /// (`docs/module-capabilities.md` §5.1).
+    AdminPanel,
+    group = "admin",
+    runtime = "brocanth_admin::panel::Panel",
+    gist = "a backoffice tab",
+    Many
+);
+
+/// Who a mounted path serves. A reader asks for a role, never for a
+/// module key (`docs/module-capabilities.md` §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MountRole {
+    /// Pages for visitors. Robots may crawl them, analytics counts them.
+    #[default]
+    Public,
+    /// The backoffice: staff only. Never crawled, never counted, never
+    /// localised. It can move to another service later.
+    Backoffice,
+    /// Called by other programs: an API, an upload endpoint, an OAuth
+    /// callback. Not a page a person reads.
+    Machine,
+}
+
+impl MountRole {
+    /// The role's name, for prose and diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            MountRole::Public => "Public",
+            MountRole::Backoffice => "Backoffice",
+            MountRole::Machine => "Machine",
+        }
+    }
+}
+
+/// One contribution to a Kind of cardinality [`Cardinality::Many`], as a
+/// manifest holds it. Build a tab with [`Tab::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Contribution {
+    /// The contribution's name. For an [`AdminPanel`] it is the tab's RBAC
+    /// resource: its `Panel::key`, and the first part of the permissions
+    /// `<resource>.read`, `<resource>.edit` and `<resource>.owner`.
+    pub name: &'static str,
+    /// What the project gets, for the module file and `explain`.
+    pub what: &'static str,
+}
+
+/// An [`AdminPanel`] contribution: a tab and its RBAC resource.
+pub type Tab = Contribution;
+
+impl Contribution {
+    /// A contribution named `name`. For a tab, `name` is the RBAC resource:
+    /// lower case letters, digits, `-` and `_`.
+    pub const fn new(name: &'static str, what: &'static str) -> Self {
+        Self { name, what }
+    }
+
+    /// Whether `name` is a valid resource: lower case ASCII letters,
+    /// digits, `-` and `_`, starting with a letter. A permission string is
+    /// `<resource>.<level>`, so a dot or a slash would make it ambiguous.
+    pub fn valid_name(name: &str) -> bool {
+        name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+    }
+}
+
 /// A requirement on a Kind, as a manifest holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
@@ -139,6 +225,18 @@ mod tests {
         assert_eq!(pool.group, "db");
         assert_eq!(pool.cardinality, Cardinality::One);
         assert_eq!(pool.to_string(), "PgPool");
+    }
+
+    #[test]
+    fn a_resource_is_one_lower_case_word() {
+        assert!(Contribution::valid_name("cache"));
+        assert!(Contribution::valid_name("oauth-connections"));
+        assert!(!Contribution::valid_name(""));
+        assert!(!Contribution::valid_name("Cache"));
+        assert!(!Contribution::valid_name("cache.edit"));
+        assert!(!Contribution::valid_name("a/b"));
+        assert_eq!(KindRef::of::<AdminPanel>().cardinality, Cardinality::Many);
+        assert_eq!(KindRef::of::<Mount>().cardinality, Cardinality::Many);
     }
 
     #[test]

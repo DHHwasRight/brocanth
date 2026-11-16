@@ -44,7 +44,10 @@
 use brocanth_scaffold::snippet::{
     configurable, integration, module_ref, settings_derive, PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AdminPanel, Category, Dep, Manifest, Module, Mount, MountRole, Project, Scaffold, Setting,
+    Slot, Tab,
+};
 
 /// What the plugin does with `pages::described()`.
 ///
@@ -120,9 +123,9 @@ impl Module for OpenApi {
             "oauth-client",
             "the connection routes it mounts are hidden from the document",
         )
-        .integration(
-            "admin",
-            "an `API` tab in the admin, with every operation; the admin routes stay out of the document",
+        .uses::<Mount>("every `Backoffice` mount, such as the admin, is hidden from the document")
+        .contributes::<AdminPanel>(
+            Tab::new("api", "an `API` tab in the admin, with every operation"),
             true,
         )
         .absent(
@@ -155,14 +158,18 @@ impl Module for OpenApi {
             // same line, and `use` twice does not compile.
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "openapi", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
     }
 }
 
 const ADMIN_TAB: &str = "// The OpenAPI document, as a read-only tab.
-config = config.panel(brocanth_openapi::admin::ApiPanel::installed());";
+let document = late.cell(|ctx| {
+    let rendered = ctx.provided::<crate::plugins::openapi::Rendered, _>()?;
+    Some(std::sync::Arc::clone(rendered.document()))
+});
+config = config.panel(brocanth_openapi::admin::ApiPanel::late(document));";
 
 /// The `.hide_under(..)` lines for the routes other modules mount.
 ///
@@ -173,7 +180,13 @@ config = config.panel(brocanth_openapi::admin::ApiPanel::installed());";
 /// moving a mount moves what is hidden.
 fn hidden_mounts(project: &Project) -> String {
     let mut out = String::new();
-    for key in ["admin", "auth-oauth", "oauth-client"] {
+    for (key, field) in project.mounts_with(MountRole::Backoffice) {
+        out.push_str(&format!(
+            "\n            .hide_under({})",
+            module_ref(key, field)
+        ));
+    }
+    for key in ["auth-oauth", "oauth-client"] {
         if project.has(key) {
             out.push_str(&format!(
                 "\n            .hide_under({})",
@@ -294,14 +307,6 @@ fn plugin_rs(project: &Project) -> String {
         )
     };
 
-    // The admin builds its tabs with the route table, before this plugin
-    // derives the document, so its tab reads the installed one.
-    let install = if project.has("admin") {
-        "        // The admin's `API` tab reads it from here.\n        served.install();\n"
-    } else {
-        ""
-    };
-
     format!(
         r##"//! The OpenAPI document, as this application derives it.
 //!
@@ -373,6 +378,7 @@ pub const YAML_ROUTE: &str = "/openapi.yaml";
 pub struct Rendered {{
     json: Arc<str>,
     yaml: Arc<str>,
+    document: brocanth_openapi::SharedDocument,
 }}
 
 impl Rendered {{
@@ -384,6 +390,12 @@ impl Rendered {{
     /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
     pub fn yaml(&self) -> &str {{
         &self.yaml
+    }}
+
+    /// The document itself, for the admin's `API` tab.
+    #[allow(dead_code)] // read by the admin, with `admin`
+    pub fn document(&self) -> &brocanth_openapi::SharedDocument {{
+        &self.document
     }}
 }}
 
@@ -460,8 +472,9 @@ impl Plugin for OpenApi {{
         self.rendered = Some(Rendered {{
             json: served.body(Format::Json).into(),
             yaml: served.body(Format::Yaml).into(),
+            document: served.shared(),
         }});
-{install}        self.served = Some(served);
+        self.served = Some(served);
         Ok(())
     }}
 
@@ -485,6 +498,5 @@ impl Plugin for OpenApi {{
 "##,
         title = project.title,
         hidden = hidden_mounts(project),
-        install = install,
     )
 }

@@ -911,7 +911,7 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 /// than as a project that compiles and is missing a piece.
 fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
     let known = all();
-    let mounts: Vec<(&str, &str)> = a
+    let mounts: Vec<(&str, &str, brocanth_scaffold::MountRole)> = a
         .picks
         .iter()
         .flat_map(|&key| {
@@ -919,10 +919,11 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
                 .options
                 .into_iter()
                 .filter(|option| option.mount)
-                .map(move |option| (key, option.key))
+                .map(move |option| (key, option.key, option.role))
         })
         .collect();
-    let bindings = crate::resolve::bindings(&a.picks);
+    let mut bindings = crate::resolve::bindings(&a.picks);
+    bindings.extend(crate::resolve::collectors(&a.picks));
     let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
         .with_mounts(&mounts)
         .with_bindings(&bindings);
@@ -4411,19 +4412,35 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
 /// `admin_panels`, from `Slot::AdminPanels`.
 fn admin_panels(built: &Built) -> String {
     let doc = "/// The tabs other modules add to the admin. Each one is behind the module\n\
-               /// file of the module that adds it: `integrate.admin` in src/modules/.\n";
+               /// file of the module that adds it: `integrate.admin` in src/modules/.\n\
+               ///\n\
+               /// A tab reads what a plugin builds at start through a cell from `late`,\n\
+               /// which the admin fills from each request's context. No tab reads a\n\
+               /// process-wide global, so a tab can move to a backoffice service.\n";
+    let signature = |config: &str, late: &str| {
+        format!(
+            "pub fn admin_panels(\n\
+             \x20   {config}: brocanth_admin::AdminConfig,\n\
+             \x20   {late}: &mut brocanth_admin::LateCells<crate::pages::Ctx>,\n\
+             ) -> brocanth_admin::AdminConfig {{\n"
+        )
+    };
     if built.slot_is_empty(Slot::AdminPanels) {
         return format!(
             "{doc}///\n\
              /// No module in this project adds one.\n\
-             pub fn admin_panels(config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {{\n\
+             {}\
              \x20   config\n\
-             }}\n"
+             }}\n",
+            signature("config", "_late")
         );
     }
-    let mut out = format!(
-        "{doc}pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {{\n"
-    );
+    let late = if built.slot(Slot::AdminPanels).any(|b| b.contains("late.")) {
+        "late"
+    } else {
+        "_late"
+    };
+    let mut out = format!("{doc}{}", signature("mut config", late));
     for block in built.slot(Slot::AdminPanels) {
         out.push_str(block);
     }
@@ -6432,8 +6449,9 @@ mod tests {
     /// end.
     fn project(picks: &'static [&'static str]) -> brocanth_scaffold::Project<'static> {
         let known: &'static [&'static str] = Box::leak(all().into_boxed_slice());
-        let bindings: &'static [(&str, &str)] =
-            Box::leak(crate::resolve::bindings(picks).into_boxed_slice());
+        let mut bound = crate::resolve::bindings(picks);
+        bound.extend(crate::resolve::collectors(picks));
+        let bindings: &'static [(&str, &str)] = Box::leak(bound.into_boxed_slice());
         brocanth_scaffold::Project::new("my-blog", "My Blog", picks, known).with_bindings(bindings)
     }
 

@@ -40,7 +40,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AdminPanel, Category, Dep, Manifest, Module, MountRole, Opt, Project, Scaffold, Setting, Slot,
+};
 
 /// The backoffice, as a choice on the `brocanth create` menu.
 ///
@@ -85,11 +87,19 @@ impl Module for Backoffice {
             "middleware-csrf",
             "the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row",
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/admin",
-            "Where the backoffice answers. A page of yours under this path is a build error, not a race. Every environment serves the same routes, so this is a constant and not a setting.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/admin",
+                "Where the backoffice answers. A page of yours under this path is a build error, not a race. Every environment serves the same routes, so this is a constant and not a setting.",
+            )
+            // Staff only: robots, analytics and i18n leave it alone by its
+            // role, and it can move to a service of its own later.
+            .role(MountRole::Backoffice),
+        )
+        .collects::<AdminPanel>(
+            "each tab in the sidebar, behind its RBAC resource; `plugins::admin_panels` lists them",
+        )
         .krate(
             Dep::brocanth("brocanth-admin")
                 // The `RouteSource` is for a host that mounts one. A
@@ -539,9 +549,58 @@ const MODELS_DOC_ORM: &str = "\
 /// before this line existed.
 pub const PANELS: &str =
     "    // The tabs other modules add, such as analytics. Each one is on or off in
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
+";
+
+/// [`PANELS`] as the generator wrote it before the tabs took late cells.
+pub const PANELS_BEFORE_LATE: &str =
+    "    // The tabs other modules add, such as analytics. Each one is on or off in
     // the module file of the module that adds it: `integrate.admin`.
     config = crate::plugins::admin_panels(config);
 ";
+
+/// `text`, the admin file as the generator writes it now, as the generator
+/// wrote it before the tabs took late cells: what `brocanth add` compares
+/// an old file with, to rewrite one nobody edited. The old forms keep
+/// [`PANELS_BEFORE_LATE`], so [`LEGACY_ANALYTICS_PANEL`] replaces it.
+pub fn before_late(text: &str) -> String {
+    let mut out = text.to_string();
+    for (now, before) in [
+        (PANELS, PANELS_BEFORE_LATE),
+        (LATE_ARC, ""),
+        (ROUTE_LATE, ROUTE_BEFORE_LATE),
+        (SCREEN_LATE, SCREEN_BEFORE_LATE),
+        (CLONE_LATE, ""),
+        (FILL, ""),
+        (
+            "use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};",
+            "use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};",
+        ),
+    ] {
+        out = out.replace(now, before);
+    }
+    out
+}
+
+/// `mount` shares the cells with every route.
+const LATE_ARC: &str = "    let late = Arc::new(late);\n    \
+                        let handler = || screen(Arc::clone(&admin), Arc::clone(&late));\n";
+/// One route, with the cells.
+const ROUTE_LATE: &str = "handler()";
+const ROUTE_BEFORE_LATE: &str = "screen(Arc::clone(&admin))";
+/// `screen`'s signature, with the cells: `Admin` or `OverOrm`.
+const SCREEN_LATE: &str = ">, late: Arc<LateCells<Ctx>>) -> Handler {";
+const SCREEN_BEFORE_LATE: &str = ">) -> Handler {";
+/// The handler's own handle on the cells.
+const CLONE_LATE: &str = "        let late = Arc::clone(&late);\n";
+/// The fill, before the admin reads a tab.
+const FILL: &str = "            // Each tab's handle, from the context the plugins put on this\n\
+                    \x20           // request, the first time it is there.\n\
+                    \x20           late.fill(ctx);\n";
 
 /// The analytics tab, as the generator wrote it into the admin's file with
 /// `analytics`, before `plugins::admin_panels`. `brocanth add` compares an
@@ -652,7 +711,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -731,10 +790,12 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-@WHO_LABEL@@PANELS@@HOLD@    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+@WHO_LABEL@@PANELS@@HOLD@    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
+    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -743,11 +804,15 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<@HELD@>) -> Handler {
+fn screen(admin: Arc<@HELD@>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
 @PICK@            // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",

@@ -68,7 +68,7 @@ pub mod kind;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use kind::{KindRef, PgPool, Requirement};
+pub use kind::{AdminPanel, Contribution, KindRef, Mount, MountRole, PgPool, Requirement, Tab};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -291,6 +291,16 @@ pub struct Manifest {
     ///
     /// [`adapts_to`]: Manifest::adapts_to
     pub uses: Vec<(KindRef, &'static str)>,
+    /// What this module adds to a Kind of cardinality many, each with the
+    /// default of its toggle. Set with [`Manifest::contributes`].
+    ///
+    /// A contribution is written only when a module collects the Kind
+    /// ([`Project::collector`]), and the module file holds its toggle as
+    /// `integrate.<group>`: a tab is `integrate.admin`.
+    pub contributions: Vec<(KindRef, Contribution, bool)>,
+    /// The Kinds of cardinality many this module collects, each with what
+    /// it does with them. Set with [`Manifest::collects`].
+    pub collects: Vec<(KindRef, &'static str)>,
 }
 
 impl Manifest {
@@ -323,6 +333,8 @@ impl Manifest {
             provides: Vec::new(),
             requires: Vec::new(),
             uses: Vec::new(),
+            contributions: Vec::new(),
+            collects: Vec::new(),
         }
     }
 
@@ -366,6 +378,27 @@ impl Manifest {
         self
     }
 
+    /// Add `item` to the Kind `K`, which many modules contribute to and one
+    /// collects; `on` is the default of its toggle.
+    ///
+    /// A tab: `.contributes::<AdminPanel>(Tab::new("jobs", "the queue: retry,
+    /// discard"), true)`. The tab's name is its RBAC resource. `contribute`
+    /// asks [`Project::collector`] and writes the tab only when a module
+    /// collects it, so it never names the collector's key. The module file
+    /// holds the toggle as `integrate.<group>` (`integrate.admin`).
+    pub fn contributes<K: kind::Kind>(mut self, item: Contribution, on: bool) -> Self {
+        self.contributions.push((KindRef::of::<K>(), item, on));
+        self.integrations.push((K::GROUP, item.what, on));
+        self
+    }
+
+    /// Collect the contributions to the Kind `K`, and say what is done with
+    /// them: `admin` collects [`AdminPanel`] tabs.
+    pub fn collects<K: kind::Kind>(mut self, what: &'static str) -> Self {
+        self.collects.push((KindRef::of::<K>(), what));
+        self
+    }
+
     /// The requirements that hold in a project of `picks`.
     pub fn requirements<'m>(&'m self, picks: &'m [&str]) -> impl Iterator<Item = &'m Requirement> {
         self.requires.iter().filter(move |r| r.active(picks))
@@ -383,6 +416,7 @@ impl Manifest {
             .iter()
             .map(|(k, _)| k.name)
             .chain(self.requires.iter().map(|r| r.kind.name))
+            .chain(self.contributions.iter().map(|(k, _, _)| k.name))
             .collect()
     }
 
@@ -697,6 +731,9 @@ pub struct Opt {
     /// chosen modules, so a module that treats routes it does not own
     /// (i18n keeps them unprefixed) reads them all and names none.
     pub mount: bool,
+    /// Who the mounted path serves, for a mount option. Set with
+    /// [`Opt::role`]; [`Project::mounts_with`] filters on it.
+    pub role: MountRole,
 }
 
 /// The type of an [`Opt`].
@@ -739,6 +776,15 @@ impl Opt {
         }
     }
 
+    /// Who the mounted path serves. A mount is `Public` until it says
+    /// otherwise; the admin is `Backoffice`, an API or a callback is
+    /// `Machine`.
+    #[must_use]
+    pub fn role(mut self, role: MountRole) -> Self {
+        self.role = role;
+        self
+    }
+
     /// A boolean.
     pub fn bool(key: &'static str, default: bool, help: &'static str) -> Self {
         Self::new(key, OptKind::Bool, default.to_string(), help)
@@ -761,6 +807,7 @@ impl Opt {
             default,
             help,
             mount: false,
+            role: MountRole::Public,
         }
     }
 }
@@ -997,7 +1044,7 @@ pub struct Project<'a> {
     pub title: &'a str,
     on: &'a [&'a str],
     known: &'a [&'a str],
-    mounts: &'a [(&'a str, &'a str)],
+    mounts: &'a [(&'a str, &'a str, MountRole)],
     /// The provider bound to each Kind, as `(Kind name, module key)`.
     bindings: &'a [(&'a str, &'a str)],
     /// Every Kind asked about through [`Project::provider`], in order.
@@ -1029,15 +1076,16 @@ impl<'a> Project<'a> {
     }
 
     /// Give the view the mount options of the modules: `(module key, option
-    /// key)` for each [`Opt::mount()`]. The CLI passes them from the
+    /// key, role)` for each [`Opt::mount()`]. The CLI passes them from the
     /// manifests; a view without them has no mounts.
-    pub fn with_mounts(mut self, mounts: &'a [(&'a str, &'a str)]) -> Self {
+    pub fn with_mounts(mut self, mounts: &'a [(&'a str, &'a str, MountRole)]) -> Self {
         self.mounts = mounts;
         self
     }
 
     /// Give the view the provider the CLI bound to each Kind, as `(Kind
-    /// name, module key)`. A view without them binds nothing.
+    /// name, module key)`, and the collector of each Kind of cardinality
+    /// many. A view without them binds nothing.
     pub fn with_bindings(mut self, bindings: &'a [(&'a str, &'a str)]) -> Self {
         self.bindings = bindings;
         self
@@ -1057,6 +1105,43 @@ impl<'a> Project<'a> {
             .map(|(_, key)| *key)
     }
 
+    /// The module that collects the contributions to the Kind `K` in this
+    /// project, or `None`: `admin` for [`AdminPanel`].
+    ///
+    /// The question a contributor asks instead of naming the admin: write the
+    /// tab when somebody collects tabs. Declare the contribution with
+    /// [`Manifest::contributes`]; a test holds the two to each other.
+    pub fn collector<K: kind::Kind>(&self) -> Option<&'a str> {
+        self.provider::<K>()
+    }
+
+    /// Every mounted path of a chosen module with role `role`, as `(module
+    /// key, option key)`: what to pass to [`snippet::module_ref`].
+    ///
+    /// The question robots, analytics and gtag ask instead of naming
+    /// `admin`: "leave out every `Backoffice` mount". Declare
+    /// `uses::<Mount>`; a test holds the two to each other.
+    pub fn mounts_with(&self, role: MountRole) -> Vec<(&'a str, &'a str)> {
+        self.mounts_where(|r| r == role)
+    }
+
+    /// Every mounted path of a chosen module whose role is not `role`. See
+    /// [`Project::mounts_with`].
+    pub fn mounts_except(&self, role: MountRole) -> Vec<(&'a str, &'a str)> {
+        self.mounts_where(|r| r != role)
+    }
+
+    fn mounts_where(&self, keep: impl Fn(MountRole) -> bool) -> Vec<(&'a str, &'a str)> {
+        self.asked_kinds
+            .borrow_mut()
+            .push(<Mount as kind::Kind>::NAME);
+        self.mounts
+            .iter()
+            .filter(|(key, _, role)| self.on.contains(key) && keep(*role))
+            .map(|(key, field, _)| (*key, *field))
+            .collect()
+    }
+
     /// Every Kind asked about through [`Project::provider`], in order.
     pub fn asked_kinds(&self) -> Vec<&'static str> {
         self.asked_kinds.borrow().clone()
@@ -1073,8 +1158,8 @@ impl<'a> Project<'a> {
     pub fn mounts(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
         self.mounts
             .iter()
-            .copied()
-            .filter(|(key, _)| self.on.contains(key))
+            .filter(|(key, _, _)| self.on.contains(key))
+            .map(|(key, field, _)| (*key, *field))
     }
 
     /// Whether this project embeds static files, so `src/assets.rs` and
@@ -1207,7 +1292,13 @@ pub enum Slot {
     /// guest's module file: `if crate::modules::analytics::MODULE
     /// .integrate.admin { .. }`. The generator writes the function only in
     /// a project with `admin`, so write here only when
-    /// `project.has("admin")`.
+    /// `project.collector::<AdminPanel>()` is `Some`, and declare the tab
+    /// with [`Manifest::contributes`].
+    ///
+    /// `late` (a `brocanth_admin::LateCells<Ctx>`) is in scope too: a tab
+    /// takes a handle that a plugin builds at start through
+    /// `late.cell(|ctx: &Ctx| ctx.provided::<H, _>().cloned())`, never
+    /// through a process-wide global (`docs/module-capabilities.md` §5.1).
     ///
     /// The admin's own file calls the function once. The tab used to be a
     /// line in that file, written by the admin module, which had to know

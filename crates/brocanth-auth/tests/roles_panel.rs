@@ -3,12 +3,14 @@
 //! A superuser defines a role and gives it to an account. The role holder
 //! then opens what the role grants and nothing else, and sees no button on
 //! the roles tab: a role holder who could edit roles could give itself every
-//! permission.
+//! permission. The one exception: the owner of a tab gives `read` and `edit`
+//! on that tab, and nothing else (`docs/module-capabilities.md` §5.2).
 
 #![cfg(feature = "admin")]
 
 use std::sync::Arc;
 
+use brocanth_admin::late::Late;
 use brocanth_admin::policy::Principal;
 use brocanth_admin::rt::block_on;
 use brocanth_admin::{Admin, AdminConfig, Discovery, Fixture, Submission};
@@ -103,7 +105,7 @@ async fn a_superuser_gives_a_role_and_the_holder_gets_only_what_it_grants() {
     let define = form(&[
         ("do", "define"),
         ("role", "editor"),
-        ("permissions", "roles.view post.change"),
+        ("permissions", "roles.read post.edit"),
     ]);
     assert_eq!(
         status(&admin, Some(&ops), "POST", "/admin/roles", &define),
@@ -122,13 +124,14 @@ async fn a_superuser_gives_a_role_and_the_holder_gets_only_what_it_grants() {
 
     let roles = page(&admin, &ops, "/admin/roles");
     roles.assert_text("editor");
-    roles.assert_text("post.change roles.view");
+    roles.assert_text("post.edit");
+    roles.assert_text("roles.read");
     roles.assert_text("ed@example.com");
     roles.assert_button("Add");
 
     // The editor opens the admin and reads the roles tab, which its role
     // grants, with no button on it. An account whose role does not grant
-    // `roles.view` does not see the tab.
+    // `roles.read` does not see the tab.
     let ed = staff(&store, &ed).await;
     assert_eq!(
         status(&admin, Some(&ed), "GET", "/admin", &Submission::new()),
@@ -142,7 +145,7 @@ async fn a_superuser_gives_a_role_and_the_holder_gets_only_what_it_grants() {
     );
     let other = account(&store, "other@example.com").await;
     store
-        .put_role(&Role::new("support", ["ticket.view"]))
+        .put_role(&Role::new("support", ["ticket.read"]))
         .await
         .unwrap();
     store.assign_role(&other, "support").await.unwrap();
@@ -156,7 +159,7 @@ async fn a_superuser_gives_a_role_and_the_holder_gets_only_what_it_grants() {
             &Submission::new()
         ),
         403,
-        "no role of this account grants roles.view"
+        "no role of this account grants roles.read"
     );
     let grab = form(&[
         ("do", "define"),
@@ -230,28 +233,23 @@ async fn superuser(store: &MemoryStore) -> Staff {
 fn post_screens() -> Vec<(&'static str, &'static str, Submission, &'static str)> {
     let edit = || form(&[("title", "Taken over"), ("body", "x"), ("author_id", "1")]);
     vec![
-        ("GET", "/admin/post", Submission::new(), "post.view"),
-        ("GET", "/admin/post/1", Submission::new(), "post.view"),
-        ("GET", "/admin/post/new", Submission::new(), "post.add"),
-        ("POST", "/admin/post", edit(), "post.add"),
-        (
-            "GET",
-            "/admin/post/1/edit",
-            Submission::new(),
-            "post.change",
-        ),
-        ("POST", "/admin/post/1", edit(), "post.change"),
+        ("GET", "/admin/post", Submission::new(), "post.read"),
+        ("GET", "/admin/post/1", Submission::new(), "post.read"),
+        ("GET", "/admin/post/new", Submission::new(), "post.edit"),
+        ("POST", "/admin/post", edit(), "post.edit"),
+        ("GET", "/admin/post/1/edit", Submission::new(), "post.edit"),
+        ("POST", "/admin/post/1", edit(), "post.edit"),
         (
             "GET",
             "/admin/post/1/delete",
             Submission::new(),
-            "post.delete",
+            "post.edit",
         ),
         (
             "POST",
             "/admin/post/1/delete",
             Submission::new(),
-            "post.delete",
+            "post.edit",
         ),
     ]
 }
@@ -263,7 +261,7 @@ async fn staff_without_a_permission_is_refused_on_every_screen() {
     let store = Arc::new(MemoryStore::new());
     let admin = open_rows(&store);
     let ops = superuser(&store).await;
-    let reader = holder(&store, "reader@example.com", &["user.view"]).await;
+    let reader = holder(&store, "reader@example.com", &["user.read"]).await;
     assert_eq!(
         status(&admin, Some(&reader), "GET", "/admin", &Submission::new()),
         200,
@@ -298,28 +296,23 @@ async fn staff_without_a_permission_is_refused_on_every_screen() {
             &Submission::new()
         ),
         403,
-        "a panel needs <panel>.view"
+        "a panel needs <panel>.read"
     );
 }
 
-/// Each permission opens its own screens and no other.
+/// Each level opens its own screens and the ones below it, and no other.
 #[tokio::test]
-async fn each_permission_opens_its_own_screens_only() {
+async fn each_level_opens_its_own_screens_only() {
     let store = Arc::new(MemoryStore::new());
     let admin = open_rows(&store);
-    for granted in ["post.view", "post.add", "post.change", "post.delete"] {
-        // `view` comes with every grant: a write screen loads the record.
-        let permissions: Vec<&str> = if granted == "post.view" {
-            vec![granted]
-        } else {
-            vec!["post.view", granted]
-        };
+    for granted in ["post.read", "post.edit", "post.owner"] {
         let email = format!("{}@example.com", granted.replace('.', "-"));
-        let who = holder(&store, Box::leak(email.into_boxed_str()), &permissions).await;
+        let who = holder(&store, Box::leak(email.into_boxed_str()), &[granted]).await;
         for (method, path, submission, needs) in post_screens() {
-            // A write that is allowed would change the fixture; only the
-            // pages are checked for "allowed".
-            let expected_open = permissions.contains(&needs);
+            // A level includes the ones below it: `edit` reads, `owner`
+            // edits. A write that is allowed would change the fixture; only
+            // the pages are checked for "allowed".
+            let expected_open = needs == "post.read" || granted != "post.read";
             if expected_open && method == "POST" {
                 continue;
             }
@@ -339,7 +332,12 @@ async fn each_permission_opens_its_own_screens_only() {
 async fn no_role_grants_what_only_the_flag_grants() {
     let store = Arc::new(MemoryStore::new());
     let admin = admin(&store);
-    let star = holder(&store, "star@example.com", &["*", "post.*", "superuser"]).await;
+    let star = holder(
+        &store,
+        "star@example.com",
+        &["*", "post.*", "*.owner", "superuser"],
+    )
+    .await;
     assert!(!star.is_superuser());
     assert_eq!(
         status(
@@ -353,7 +351,7 @@ async fn no_role_grants_what_only_the_flag_grants() {
     );
     let id = account(&store, "named@example.com").await;
     store
-        .put_role(&Role::new("superuser", ["roles.view"]))
+        .put_role(&Role::new("superuser", ["roles.read"]))
         .await
         .unwrap();
     store.assign_role(&id, "superuser").await.unwrap();
@@ -362,7 +360,7 @@ async fn no_role_grants_what_only_the_flag_grants() {
     let define = form(&[
         ("do", "define"),
         ("role", "x"),
-        ("permissions", "post.view"),
+        ("permissions", "post.read"),
     ]);
     assert_eq!(
         status(&admin, Some(&named), "POST", "/admin/roles", &define),
@@ -370,7 +368,7 @@ async fn no_role_grants_what_only_the_flag_grants() {
     );
 }
 
-/// A role holder that holds `roles.view` and even `roles.act` is refused on
+/// A role holder that holds `roles.read` and even `roles.edit` is refused on
 /// every button of the roles tab, and the store does not change. Only the
 /// superuser flag opens them.
 #[tokio::test]
@@ -378,7 +376,7 @@ async fn a_role_holder_presses_no_roles_button() {
     let store = Arc::new(MemoryStore::new());
     let admin = admin(&store);
     let ops = superuser(&store).await;
-    let climber = holder(&store, "climber@example.com", &["roles.view", "roles.act"]).await;
+    let climber = holder(&store, "climber@example.com", &["roles.read", "roles.edit"]).await;
     let victim = account(&store, "victim@example.com").await;
     store.assign_role(&victim, "r-climber").await.unwrap();
     let before = store.roles().await.unwrap();
@@ -389,12 +387,12 @@ async fn a_role_holder_presses_no_roles_button() {
         form(&[
             ("do", "define"),
             ("role", "r-climber"),
-            ("permissions", "post.view post.delete"),
+            ("permissions", "post.read post.edit"),
         ]),
         form(&[
             ("do", "define"),
             ("role", "god"),
-            ("permissions", "post.delete"),
+            ("permissions", "post.edit"),
         ]),
         form(&[
             ("do", "assign"),
@@ -433,7 +431,7 @@ async fn a_superuser_unassigns_and_deletes_and_is_told_what_is_wrong() {
     let store = Arc::new(MemoryStore::new());
     let admin = admin(&store);
     let ops = superuser(&store).await;
-    let ed = holder(&store, "ed@example.com", &["post.view"]).await;
+    let ed = holder(&store, "ed@example.com", &["post.read"]).await;
     let ed_id = ed.account().id.clone();
 
     for (submission, reason) in [
@@ -647,7 +645,7 @@ async fn without_the_roles_panel_there_is_no_roles_tab() {
 async fn a_late_store_that_is_not_there_yet_says_so() {
     let store = Arc::new(MemoryStore::new());
     let ops = superuser(&store).await;
-    let cell = Arc::new(std::sync::OnceLock::new());
+    let cell = Late::new();
     let admin = Admin::new(
         Arc::new(Fixture::blog()),
         AdminConfig::new()
@@ -664,7 +662,7 @@ async fn a_late_store_that_is_not_there_yet_says_so() {
     ))
     .expect_err("no store yet");
     assert!(error.to_string().contains("help:"), "{error}");
-    cell.set(store.clone()).ok().unwrap();
+    assert!(cell.set(store.clone()));
     page(&admin, &ops, "/admin/roles").assert_text("No role has been defined.");
 }
 
@@ -686,4 +684,121 @@ async fn only_a_staff_principal_passes_the_policy() {
         &Principal::new(&ops),
         Request::new(Action::ActOnPanel, "roles")
     ));
+}
+
+/// The owner of a tab gives and takes `read` and `edit` on that tab, on any
+/// role, and nothing else: not `owner`, not another tab, not a role.
+#[tokio::test]
+async fn an_owner_gives_read_and_edit_on_its_own_tab_only() {
+    let store = Arc::new(MemoryStore::new());
+    // Rows open, so the screen policy is the only gate.
+    let admin = open_rows(&store);
+    let ops = superuser(&store).await;
+    // A superuser makes ann the owner of `post`.
+    let ann = holder(&store, "ann@example.com", &[]).await;
+    let ann_id = ann.account().id.clone();
+    let give = |role: &str, resource: &str, level: &str| {
+        form(&[
+            ("do", "grant"),
+            ("role", role),
+            ("resource", resource),
+            ("level", level),
+        ])
+    };
+    let posted = |who: &Staff, submission: &Submission| {
+        let response =
+            block_on(admin.dispatch(Principal::new(who), "POST", "/admin/roles", "", submission))
+                .expect("dispatch");
+        response.location().map(str::to_string)
+    };
+    assert_eq!(
+        posted(&ops, &give("r-ann", "post", "owner")).as_deref(),
+        Some("/admin/roles")
+    );
+    let ann = staff(&store, &ann_id).await;
+    assert_eq!(ann.owned(), ["post"]);
+
+    // Bob holds nothing on `post` yet.
+    let bob = holder(&store, "bob@example.com", &["user.read"]).await;
+    let bob_id = bob.account().id.clone();
+    assert_eq!(
+        status(&admin, Some(&bob), "GET", "/admin/post", &Submission::new()),
+        403
+    );
+
+    // Ann sees the roles tab, with a form for her tab only, and gives Bob's
+    // role `edit` on `post`. The grant is a row in the roles tables, so
+    // Bob's next request opens the screens: no code changed.
+    let tab = page(&admin, &ann, "/admin/roles");
+    tab.assert_button("Give");
+    assert!(
+        tab.button("Save the role").is_none(),
+        "an owner defines no role"
+    );
+    assert_eq!(
+        posted(&ann, &give("r-bob", "post", "edit")).as_deref(),
+        Some("/admin/roles")
+    );
+    let bob = staff(&store, &bob_id).await;
+    assert!(bob.allows("post.edit") && bob.allows("post.read"));
+    assert_eq!(
+        status(
+            &admin,
+            Some(&bob),
+            "GET",
+            "/admin/post/1/edit",
+            &Submission::new()
+        ),
+        200
+    );
+
+    // Everything past her tab comes back refused, and changes nothing.
+    let before = store.roles().await.unwrap();
+    for refused in [
+        give("r-bob", "post", "owner"),
+        give("r-bob", "user", "read"),
+        give("r-ann", "user", "edit"),
+        form(&[
+            ("do", "define"),
+            ("role", "x"),
+            ("permissions", "post.edit"),
+        ]),
+        form(&[
+            ("do", "assign"),
+            ("role", "r-ann"),
+            ("email", "bob@example.com"),
+        ]),
+        form(&[("do", "delete"), ("role", "r-bob")]),
+    ] {
+        let location = posted(&ann, &refused).expect("a redirect");
+        assert!(location.contains("error="), "{refused:?}: {location}");
+    }
+    assert_eq!(
+        store.roles().await.unwrap(),
+        before,
+        "no refused form changed a role"
+    );
+    page_with_query(&admin, &ann, "/admin/roles", "error=not-yours")
+        .assert_text("only a superuser does that");
+
+    // She takes back what she gave.
+    let take = form(&[
+        ("do", "revoke"),
+        ("role", "r-bob"),
+        ("permission", "post.edit"),
+    ]);
+    assert_eq!(posted(&ann, &take).as_deref(), Some("/admin/roles"));
+    assert!(!staff(&store, &bob_id).await.allows("post.read"));
+
+    // Bob, who owns nothing, presses no button on the roles tab.
+    assert_eq!(
+        status(
+            &admin,
+            Some(&bob),
+            "POST",
+            "/admin/roles",
+            &give("r-bob", "post", "read")
+        ),
+        403
+    );
 }

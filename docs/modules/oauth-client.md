@@ -14,7 +14,7 @@ The wizard calls it: *Connect accounts and call their APIs*.
 | Needs | [`auth`](auth.md): a connection belongs to a signed-in account, and `auth` holds the sessions |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | [`auth`](auth.md), [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`oauth-client-memory`](oauth-client-memory.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`oauth-client-memory`](oauth-client-memory.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-oauth-client` (feature `postgres` unless `oauth-client-memory`; `admin` with that module) |

@@ -59,7 +59,7 @@ fn with_db_the_cache_reuses_the_pool_and_the_admin_gets_a_tab() {
     assert!(!file(&files, "config/development.toml").contains("[cache]\nurl"));
     let plugins = file(&files, "src/plugins/mod.rs");
     assert!(plugins.contains("if crate::modules::cache::MODULE.integrate.admin {"));
-    assert!(plugins.contains("CachePanel::installed()"));
+    assert!(plugins.contains("CachePanel::late(cache)"));
 }
 
 /// `cache-memory` writes the plugin over `MemoryCache`, with no URL, and

@@ -1528,10 +1528,21 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     // The OpenAPI document, as a read-only tab.
     if crate::modules::openapi::MODULE.integrate.admin {
-        config = config.panel(brocanth_openapi::admin::ApiPanel::installed());
+        let document = late.cell(|ctx| {
+            let rendered = ctx.provided::<crate::plugins::openapi::Rendered, _>()?;
+            Some(std::sync::Arc::clone(rendered.document()))
+        });
+        config = config.panel(brocanth_openapi::admin::ApiPanel::late(document));
     }
     config
 }
@@ -1971,7 +1982,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 9cd94375c740aabb
+// brocanth-digest: 88e5266cae115d55
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2140,8 +2151,7 @@ pub mod openapi {
     /// The code `openapi` writes into another module. A field exists whether
     /// that module is in the project or not, and does nothing without it.
     pub struct Integrate {
-        /// With `admin`: an `API` tab in the admin, with every operation; the admin
-        /// routes stay out of the document.
+        /// With `admin`: an `API` tab in the admin, with every operation.
         pub admin: bool,
     }
 
@@ -2170,7 +2180,7 @@ pub mod openapi {
     }
 }
 
-// brocanth-digest: c40a5724b08d21ec
+// brocanth-digest: 28aa7347c026e320
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2303,8 +2313,8 @@ pub const MODULE: Module = Module {
     rename: &[],
 
     integrate: Integrate {
-        // An `API` tab in the admin, with every operation; the admin routes stay
-        // out of the document. Without the `admin` module this does nothing.
+        // An `API` tab in the admin, with every operation. Without the `admin`
+        // module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -2448,7 +2458,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -2531,8 +2541,11 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         config = config.stylesheet(href);
     }
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
@@ -2540,10 +2553,12 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         Arc::new(Fixture::new()),
         config,
     ));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -2552,11 +2567,15 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -2699,6 +2718,7 @@ pub const YAML_ROUTE: &str = "/openapi.yaml";
 pub struct Rendered {
     json: Arc<str>,
     yaml: Arc<str>,
+    document: brocanth_openapi::SharedDocument,
 }
 
 impl Rendered {
@@ -2710,6 +2730,12 @@ impl Rendered {
     /// The document as YAML, served by `src/pages/openapi.yaml.rs`.
     pub fn yaml(&self) -> &str {
         &self.yaml
+    }
+
+    /// The document itself, for the admin's `API` tab.
+    #[allow(dead_code)] // read by the admin, with `admin`
+    pub fn document(&self) -> &brocanth_openapi::SharedDocument {
+        &self.document
     }
 }
 
@@ -2790,9 +2816,8 @@ impl Plugin for OpenApi {
         self.rendered = Some(Rendered {
             json: served.body(Format::Json).into(),
             yaml: served.body(Format::Yaml).into(),
+            document: served.shared(),
         });
-        // The admin's `API` tab reads it from here.
-        served.install();
         self.served = Some(served);
         Ok(())
     }
@@ -2957,6 +2982,6 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/openapi.rs", "src/pages/openapi.json.rs", "src/pages/openapi.yaml.rs", "src/plugins/openapi/"]
 config = ["openapi"]
 crates = ["brocanth-openapi"]
-adapted_to = ["config", "admin"]
+adapted_to = ["config"]
 
-# brocanth-digest: b4472059c0414898
+# brocanth-digest: ad515475900af2e5

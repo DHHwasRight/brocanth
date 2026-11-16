@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_body::Body;
-use brocanth::plugin_context::Base;
+/// The context an application with the analytics plugin builds: its
+/// recorder, for the admin's tab.
+type Base =
+    brocanth::plugin_context::With<brocanth_analytics::Recorder, brocanth::plugin_context::Base>;
 use brocanth::plugin_hooks::HookFamilies;
 use brocanth::plugin_routes::{Handler, RouteCx};
 use brocanth::routing::{Router, Verb};

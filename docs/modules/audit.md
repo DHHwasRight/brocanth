@@ -14,7 +14,7 @@ The wizard calls it: *Change history: who changed which row, and when*.
 | Needs | [`model`](model.md): it records the changes the model layer publishes |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | none |
-| Adapts to | [`config`](config.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-audit` (feature `config` with `config`, `admin` with `admin`) |
@@ -40,7 +40,7 @@ Slots:
 - src/plugins/mod.rs (the builder chain): `plugin_hooking_from_config::<brocanth_audit::AuditPlugin>("audit")`, then `hooks_off_from("audit", "src/modules/audit.rs", ..)`
 - src/plugins/mod.rs (the provider list): `audit brocanth_audit::AuditPlugin`
 - src/plugins/mod.rs (the hook record): `brocanth_audit::AuditPlugin`
-- src/plugins/mod.rs (admin_panels), with `admin`: `brocanth_audit::admin::install(config)`
+- src/plugins/mod.rs (admin_panels), when the admin collects tabs: `brocanth_audit::admin::install(config, trail)`, RBAC resource `history`
 - config/<env>.toml: `[audit]`
 - AGENTS.md: `## Change history`
 

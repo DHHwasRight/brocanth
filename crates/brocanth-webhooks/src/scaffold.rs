@@ -21,7 +21,8 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    Tab,
 };
 
 /// The parent: the crate both directions are written in.
@@ -515,9 +516,11 @@ impl Module for WebhooksOut {
         )
         .after("jobs")
         .after("config")
-        .integration(
-            "admin",
-            "a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "webhooks",
+                "a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button",
+            ),
             true,
         )
         .absent(
@@ -539,15 +542,19 @@ impl Module for WebhooksOut {
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "webhooks-out", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::AgentsSections).block(OUT_AGENTS.to_string());
     }
 }
 
+/// The deliveries tab, when the admin collects tabs. The admin's `mount`
+/// runs before the plugin builds its `Outgoing`, so the tab holds a cell
+/// the admin fills from the request context.
 const ADMIN_TAB: &str = "// The outgoing deliveries, with a Send again button, as a tab.
-config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::installed());";
+let outgoing = late.cell(|ctx| ctx.provided::<brocanth_webhooks::Outgoing, _>().cloned());
+config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::late(outgoing));";
 
 fn outgoing_settings() -> Vec<Setting> {
     vec![

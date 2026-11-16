@@ -10,7 +10,9 @@
 //! project sends nothing to Google from a developer's machine.
 
 use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, Mount, MountRole, Project, Scaffold, Setting, Slot,
+};
 
 /// Google Analytics 4 behind a consent banner.
 pub struct Gtag;
@@ -26,9 +28,8 @@ impl Module for Gtag {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "admin",
-            "the admin never gets the tag, at the path src/modules/admin.rs mounts it",
+        .uses::<Mount>(
+            "a `Backoffice` mount, such as the admin, never gets the tag, at the path its module file mounts it",
         )
         .integration(
             "i18n",
@@ -65,6 +66,9 @@ impl Module for Gtag {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        // The backoffice never gets the tag. Each path is read from its
+        // module file, never copied into `exclude`.
+        let backoffice = project.mounts_with(MountRole::Backoffice);
         let turn_on = if project.has("config") {
             "`enabled = true` and `measurement_id` under\n        // [gtag] in config/production.toml"
         } else {
@@ -77,7 +81,7 @@ impl Module for Gtag {
         } else {
             ""
         };
-        let admin = if project.has("admin") {
+        let admin = if !backoffice.is_empty() {
             "\n        // The admin never gets the tag, wherever src/modules/admin.rs\n        \
              // mounts it."
         } else {
@@ -95,7 +99,7 @@ impl Module for Gtag {
                     .replace("@TURN_ON@", turn_on)
                     .replace("@ADMIN@", admin)
                     .replace("@WORDS@", words),
-                adjust: adjust(project),
+                adjust: adjust(project, &backoffice),
             },
             vec![
                 Setting::bool(
@@ -146,7 +150,7 @@ impl Module for Gtag {
                     &[],
                     "Paths that never get the tag, each with everything under it: \"/drafts\".",
                 )
-                .note(if project.has("admin") {
+                .note(if !backoffice.is_empty() {
                     "The admin never gets the tag: src/plugins/mod.rs reads its path from\n\
                      src/modules/admin.rs."
                 } else {
@@ -201,10 +205,10 @@ impl Module for Gtag {
 /// The chain on the `[gtag]` configuration, after the file and the flags.
 ///
 /// With `i18n`: the catalogs' words, behind `integrate.i18n`. The feature
-/// stays on; the field decides at build time. With `admin`: the admin's
-/// path, read from its module file and never copied into `exclude`, so a
-/// moved admin needs no edit (docs/module-config.md §9).
-fn adjust(project: &Project) -> Option<String> {
+/// stays on; the field decides at build time. Each `Backoffice` mount (the
+/// admin): its path, read from its module file and never copied into
+/// `exclude`, so a moved admin needs no edit (docs/module-config.md §9).
+fn adjust(project: &Project, backoffice: &[(&str, &str)]) -> Option<String> {
     let mut chain = String::new();
     if project.has("i18n") {
         chain.push_str(&format!(
@@ -212,11 +216,8 @@ fn adjust(project: &Project) -> Option<String> {
             module_ref("gtag", "integrate.i18n")
         ));
     }
-    if project.has("admin") {
-        chain.push_str(&format!(
-            ".exclude_path({})",
-            module_ref("admin", "mount_at")
-        ));
+    for (key, field) in backoffice {
+        chain.push_str(&format!(".exclude_path({})", module_ref(key, field)));
     }
     (!chain.is_empty()).then_some(chain)
 }
