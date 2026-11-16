@@ -181,6 +181,11 @@ fn provider_sign_in_mounts_the_flow_and_reads_its_section() {
     // A printed `Settings` shows no client secret.
     let plugin = file(&files, "src/plugins/auth_oauth/mod.rs");
     assert!(!plugin.contains("derive(Debug"), "{plugin}");
+    // The flow reads the settings on the request: nothing is process-wide.
+    assert!(
+        !plugin.lines().any(|line| line.starts_with("static ")),
+        "{plugin}"
+    );
     for provider in ["github", "google", "microsoft", "gitlab"] {
         assert!(
             plugin.contains(&format!(

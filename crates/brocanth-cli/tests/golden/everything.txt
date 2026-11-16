@@ -3747,6 +3747,16 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "db.lock_timeout",
+        help: "Seconds a migration statement waits for a table lock. 0 waits forever.",
+        flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "db.search_path",
         help: "The schemas for a table name with no schema. Empty is the server's default.",
         flag: true,
@@ -5448,6 +5458,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.lock_timeout", format!("{:?}", db.lock_timeout)),
         ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
@@ -6097,7 +6108,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 091c88afe0af6c80
+// brocanth-digest: c79806934ea59ec1
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -6426,6 +6437,7 @@ pub mod db {
         AcquireTimeout,
         IdleTimeout,
         StatementTimeout,
+        LockTimeout,
         SearchPath,
         ReadOnly,
         ApplicationName,
@@ -6441,6 +6453,7 @@ pub mod db {
                 Key::AcquireTimeout => "db.acquire_timeout",
                 Key::IdleTimeout => "db.idle_timeout",
                 Key::StatementTimeout => "db.statement_timeout",
+                Key::LockTimeout => "db.lock_timeout",
                 Key::SearchPath => "db.search_path",
                 Key::ReadOnly => "db.read_only",
                 Key::ApplicationName => "db.application_name",
@@ -8631,7 +8644,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 83b189f4385f5592
+// brocanth-digest: 82f413c37808f7a1
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -11025,6 +11038,9 @@ idle_timeout = 600
 # Seconds before the server cancels a statement. 0 is no limit.
 # `migrate` ignores it: a migration runs with no statement limit.
 statement_timeout = 30
+# Seconds a migration statement waits for a table lock. 0 waits forever.
+# Only `migrate` sets it: a busy table fails the run, not every query behind it.
+lock_timeout = 10
 # The schemas for a table name with no schema. Empty is the server's default.
 search_path = []
 # Every transaction is read-only: for a replica, or a reporting process.
@@ -12325,7 +12341,7 @@ use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
-use brocanth_model::Orm;
+use brocanth_model::{migrating, Orm};
 
 use crate::migrations::Migrator;
 
@@ -12402,8 +12418,10 @@ fn apply(what: Apply) -> anyhow::Result<()> {
     let mut config = database()?;
     // The server's limits are not a migration's: a long `ALTER TABLE` must
     // not hit the statement timeout, and a read-only pool cannot migrate.
+    // `lock_timeout` is the migration's own: `[db] lock_timeout`.
     config.statement_timeout = None;
     config.read_only = false;
+    let lock_timeout = config.lock_timeout;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
@@ -12417,24 +12435,23 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             Apply::Down(_) => "migrate down",
             Apply::Status => "migrate status",
         };
-        let before = orm
-            .migrate_locked(async |txn| {
-                let before = Migrator::get_migration_with_status(txn).await?;
-                match what {
-                    Apply::Up => Migrator::up(txn, None).await?,
-                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
-                    Apply::Status => {}
-                }
-                Ok(before)
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "{verb} failed, and nothing of it was kept\n\
-                     help: read the database error below, fix the migration it names, then \
-                     run `{verb}` again; `migrate status` lists what is applied"
-                )
-            })?;
+        let before = migrating::locked(orm.connection(), lock_timeout, async |txn| {
+            let before = Migrator::get_migration_with_status(txn).await?;
+            match what {
+                Apply::Up => Migrator::up(txn, None).await?,
+                Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                Apply::Status => {}
+            }
+            Ok(before)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "{verb} failed, and nothing of it was kept\n\
+                 help: read the database error below, fix the migration it names, then \
+                 run `{verb}` again; `migrate status` lists what is applied"
+            )
+        })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()
@@ -14311,7 +14328,7 @@ mod models;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use brocanth::plugin_api::Plugin;
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
 use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
@@ -14353,25 +14370,31 @@ impl Default for Settings {
     }
 }
 
-/// The settings this run chose, kept for [`mount`].
-///
-/// `mount` runs when the route table is built, after the plugins are, and
-/// takes no argument it could carry them in. A test that builds the table
-/// without the application gets the defaults.
-static CHOSEN: OnceLock<Settings> = OnceLock::new();
+/// The settings this application chose, on each request's context, for
+/// [`Later`]. They are this application's: a second application in this
+/// process reads its own.
+pub struct Chosen(Arc<Settings>);
 
-/// Holds the admin's settings. It puts nothing on the context.
-pub struct AdminSettings;
+impl ContextItem for Chosen {}
+
+/// Holds the admin's settings and puts them on the context.
+pub struct AdminSettings {
+    settings: Arc<Settings>,
+}
 
 impl Plugin for AdminSettings {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Chosen>;
     const NAME: &'static str = "admin";
 
     fn new(config: Settings) -> Self {
-        // The first application built in this process decides.
-        let _ = CHOSEN.set(config);
-        Self
+        Self {
+            settings: Arc::new(config),
+        }
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Chosen(Arc::clone(&self.settings)));
     }
 }
 
@@ -14381,21 +14404,9 @@ impl Plugin for AdminSettings {
 /// The admin parses its own paths, so the table gives it the whole path and
 /// does not split it into twelve routes.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
-    let defaults = Settings::default();
-    let settings = CHOSEN.get().unwrap_or(&defaults);
-    let mut config = AdminConfig::new().titled(&settings.title).at(prefix);
-    if let Some(header) = &settings.header {
-        config = config.headed(header);
-    }
-    if let Some(heading) = &settings.index_title {
-        config = config.index_titled(heading);
-    }
-    if let Some(href) = &settings.site_url {
-        config = config.site_url(href);
-    }
-    if let Some(href) = &settings.stylesheet {
-        config = config.stylesheet(href);
-    }
+    // The titles, the link and the theme come with the first request: see
+    // `Later`.
+    let mut config = AdminConfig::new().at(prefix);
     // Who made a write, as the change history names them: the member of
     // staff's address, or their account id when they have none.
     config = config.user_label(|principal| {
@@ -14413,8 +14424,8 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     // fills from each request's context: no tab reads a global.
     let mut late = LateCells::new();
     config = crate::plugins::admin_panels(config, &mut late);
-    // Built by the first request, over the ORM: see `OverOrm`.
-    let admin = Arc::new(OverOrm::new(config));
+    // Built by the first request: see `Later`.
+    let admin = Arc::new(Later::new(config));
     let late = Arc::new(late);
     let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
@@ -14425,13 +14436,13 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     Ok(())
 }
 
-/// The admin over the ORM, built once, by the first request.
+/// The admin, built once, by the first request.
 ///
-/// `mount` runs when the route table is built, and the plugins start after
-/// that: the `db` plugin opens the pool in `before_start`, and the `model`
-/// plugin wraps it. So the admin cannot be built in `mount`. The first
-/// request after the start carries the ORM on its context, and the admin is
-/// built from it then.
+/// `mount` runs when the route table is built, before the plugins start,
+/// and takes no argument that could carry the settings. The first request
+/// carries them on its context, and the admin is built from them then.
+/// They are this application's and not the process's: two applications in
+/// one process (two tests, say) each build their own admin.
 ///
 /// A configuration the admin refuses -- a row policy for a model that is not
 /// listed, say -- is kept with its `help:` line, and every request answers
@@ -14439,14 +14450,13 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// One per route table. The table `src/app.rs` builds only ever sees a
 /// request the application dispatched. A table a test builds sees a `Ctx`
-/// built by hand, which has no ORM: that admin is built over an empty
-/// source, with the same configuration, and shows no rows.
-struct OverOrm {
+/// built by hand, with nothing on it: that admin has the default settings.
+struct Later {
     config: Mutex<Option<AdminConfig>>,
     built: OnceLock<Result<Arc<Admin>, String>>,
 }
 
-impl OverOrm {
+impl Later {
     fn new(config: AdminConfig) -> Self {
         Self {
             config: Mutex::new(Some(config)),
@@ -14468,6 +14478,11 @@ impl OverOrm {
                             help: read the first error the server printed"
                     .to_string());
             };
+            let defaults = Settings::default();
+            let settings = ctx
+                .provided::<Chosen, _>()
+                .map_or(&defaults, |chosen| &*chosen.0);
+            let config = branded(config, settings);
             let admin = match ctx.provided::<brocanth_model::Orm, _>() {
                 Some(orm) => Admin::try_new(
                     Arc::new(models::Models::new(orm.connection().clone())),
@@ -14484,11 +14499,29 @@ impl OverOrm {
     }
 }
 
+/// `config` with the titles, the "View site" link and the theme.
+fn branded(mut config: AdminConfig, settings: &Settings) -> AdminConfig {
+    config = config.titled(&settings.title);
+    if let Some(header) = &settings.header {
+        config = config.headed(header);
+    }
+    if let Some(heading) = &settings.index_title {
+        config = config.index_titled(heading);
+    }
+    if let Some(href) = &settings.site_url {
+        config = config.site_url(href);
+    }
+    if let Some(href) = &settings.stylesheet {
+        config = config.stylesheet(href);
+    }
+    config
+}
+
 /// One handler for every screen. The admin reads the path and decides.
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<OverOrm>, late: Arc<LateCells<Ctx>>) -> Handler {
+fn screen(admin: Arc<Later>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
         let late = Arc::clone(&late);
@@ -14579,6 +14612,20 @@ mod tests {
         let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
+    }
+
+    /// The application's admin is built from the settings its plugin put on
+    /// the request, and not from a process-wide global.
+    #[tokio::test]
+    async fn the_admin_shows_this_applications_title() {
+        let app = crate::app::build().expect("the application builds");
+        let at = crate::modules::admin::MODULE.mount_at;
+        let response = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, at)).await;
+        assert_eq!(response.status, 403);
+        let body = response.body.bytes().expect("a whole body");
+        let body = std::str::from_utf8(body).expect("utf-8");
+        let title = super::Settings::default().title;
+        assert!(body.contains(&title), "{body}");
     }
 }
 ===== src/plugins/admin/models.rs =====
@@ -15113,7 +15160,7 @@ mod tests {
 use std::sync::{Arc, OnceLock};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_auth::http_client::ReqwestClient;
 use brocanth_auth::oauth::web::{OauthAnswer, OauthRequest, OauthRoutes};
@@ -15277,41 +15324,48 @@ impl Settings {
     }
 }
 
-/// The settings this run chose, kept for [`mount`].
+/// The settings this application chose, on each request's context, for
+/// [`mount`].
 ///
-/// `mount` runs when the route table is built, after the plugins are, and
-/// takes no argument it could carry them in. A test that builds the table
-/// without the application gets the defaults, and so no provider.
-static CHOSEN: OnceLock<Settings> = OnceLock::new();
+/// `mount` runs when the route table is built, and takes no argument it
+/// could carry them in. The first request carries them instead. They are
+/// this application's and not the process's: two applications in one
+/// process (two tests, say) each read their own.
+pub struct Chosen(Arc<Settings>);
 
-/// Holds the settings and checks them at startup. It puts nothing on the
-/// context: the routes read the auth plugin's services.
-pub struct AuthOauth;
+impl ContextItem for Chosen {}
+
+/// Holds the settings, checks them at startup and puts them on the
+/// context. The routes also read the auth plugin's services.
+pub struct AuthOauth {
+    settings: Arc<Settings>,
+}
 
 impl Plugin for AuthOauth {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Chosen>;
     const NAME: &'static str = "auth_oauth";
 
     fn new(config: Settings) -> Self {
-        // The first application built in this process decides.
-        let _ = CHOSEN.set(config);
-        Self
+        Self {
+            settings: Arc::new(config),
+        }
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let Some(settings) = CHOSEN.get() else {
-            return Ok(());
-        };
         // A provider without a secret is a button that answers an error. In
         // this project's own tests no secret is set, so nothing is checked.
         if cfg!(test) {
             return Ok(());
         }
-        settings
+        self.settings
             .configured(crate::modules::auth_oauth::MODULE.mount_at)
             .map(drop)
             .map_err(PluginError::new)
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Chosen(Arc::clone(&self.settings)));
     }
 }
 
@@ -15322,29 +15376,54 @@ type Routes = OauthRoutes<ReqwestClient, SystemClock>;
 /// Two routes: everything under the prefix, for GET and for POST. The flow
 /// reads the provider and the step from the path.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
-    let defaults = Settings::default();
-    let settings = CHOSEN.get().unwrap_or(&defaults);
-    // `configure` refuses a provider without its registration, so this
-    // drops one only when the application is not the one being started.
-    let providers = settings.configured(prefix).unwrap_or_default();
     // Fails only when the TLS backend cannot start, which no request could
     // recover from.
     let http = ReqwestClient::with_default_timeout().expect("auth_oauth: an HTTP client");
-    let mut flow = Routes::new(Arc::new(http), Arc::new(SystemClock), providers)
-        .at(prefix)
-        .after_sign_in(&settings.after_sign_in);
-    if let Some(page) = &settings.sign_in_page {
-        flow = flow.sign_in_page(page);
-    }
-    let flow = Arc::new(flow);
+    let flow = Arc::new(Flow {
+        prefix: prefix.to_string(),
+        http: Arc::new(http),
+        routes: OnceLock::new(),
+    });
     let pattern = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     routes.route(&pattern, Verb::Get, step(Arc::clone(&flow)))?;
     routes.route(&pattern, Verb::Post, step(flow))?;
     Ok(())
 }
 
+/// The flow of one route table, built by its first request from the
+/// settings on that request's context.
+///
+/// A table a test builds sees a `Ctx` built by hand, with no settings: its
+/// flow uses the defaults, and so no provider.
+struct Flow {
+    prefix: String,
+    http: Arc<ReqwestClient>,
+    routes: OnceLock<Routes>,
+}
+
+impl Flow {
+    fn for_request(&self, ctx: &Ctx) -> &Routes {
+        self.routes.get_or_init(|| {
+            let defaults = Settings::default();
+            let settings = ctx
+                .provided::<Chosen, _>()
+                .map_or(&defaults, |chosen| &*chosen.0);
+            // `configure` refuses a provider without its registration, so
+            // this drops one only when the application did not start.
+            let providers = settings.configured(&self.prefix).unwrap_or_default();
+            let mut flow = Routes::new(Arc::clone(&self.http), Arc::new(SystemClock), providers)
+                .at(&self.prefix)
+                .after_sign_in(&settings.after_sign_in);
+            if let Some(page) = &settings.sign_in_page {
+                flow = flow.sign_in_page(page);
+            }
+            flow
+        })
+    }
+}
+
 /// One handler for every step. The flow reads the path and decides.
-fn step(flow: Arc<Routes>) -> Handler {
+fn step(flow: Arc<Flow>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let flow = Arc::clone(&flow);
         Box::pin(async move {
@@ -15364,6 +15443,7 @@ fn step(flow: Arc<Routes>) -> Handler {
                 cookies: ctx.header("cookie").unwrap_or(""),
             };
             let answer = flow
+                .for_request(ctx)
                 .answer(auth, request)
                 .await
                 .map_err(|e| Error::internal(format!("auth_oauth: {e}")))?;
@@ -15863,6 +15943,9 @@ pub struct Settings {
     pub idle_timeout: u64,
     /// Seconds before the server cancels a statement. 0 is no limit.
     pub statement_timeout: u64,
+    /// Seconds a migration statement waits for a table lock. 0 waits
+    /// forever. Only `migrate` sets it.
+    pub lock_timeout: u64,
     /// The schemas for a table name with no schema. Empty is the server's
     /// default.
     pub search_path: Vec<String>,
@@ -15887,6 +15970,7 @@ impl std::fmt::Debug for Settings {
             .field("acquire_timeout", &self.acquire_timeout)
             .field("idle_timeout", &self.idle_timeout)
             .field("statement_timeout", &self.statement_timeout)
+            .field("lock_timeout", &self.lock_timeout)
             .field("search_path", &self.search_path)
             .field("read_only", &self.read_only)
             .field("application_name", &self.application_name)
@@ -15904,6 +15988,7 @@ impl Default for Settings {
             acquire_timeout: 30,
             idle_timeout: 600,
             statement_timeout: 30,
+            lock_timeout: 10,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -15922,6 +16007,7 @@ impl Settings {
         config.acquire_timeout = Duration::from_secs(self.acquire_timeout);
         config.idle_timeout = seconds(self.idle_timeout);
         config.statement_timeout = seconds(self.statement_timeout);
+        config.lock_timeout = seconds(self.lock_timeout);
         config.search_path = self.search_path.clone();
         config.read_only = self.read_only;
         config.application_name =
@@ -17831,10 +17917,6 @@ fn key(settings: &Settings) -> Result<Key, PluginError> {
     }
 }
 
-/// The routes this run built, for [`mount`]. The route table is built
-/// before the plugins start, so a request reads them when it arrives.
-static ROUTES: OnceLock<ConnectRoutes> = OnceLock::new();
-
 /// Builds the client over the token store, puts it on the context and in
 /// the admin tab.
 pub struct OauthClientPlugin {
@@ -17873,8 +17955,6 @@ impl Plugin for OauthClientPlugin {
         let client = builder
             .build()
             .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
-        let secure = base.starts_with("https://");
-        let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
         self.client = Some(client);
         Ok(())
     }
@@ -17887,13 +17967,48 @@ impl Plugin for OauthClientPlugin {
 }
 
 /// The connect pages, under `prefix`.
+///
+/// The route table is built before the plugins start, so the pages are
+/// built later, by the first request that carries the client on its
+/// context. The cell belongs to this table, not to the process: two
+/// applications in one process (two tests, say) each use their own client.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
     let prefix = prefix.trim_end_matches('/');
     let rest = format!("{prefix}/{{*rest}}");
-    routes.route(prefix, Verb::Get, step())?;
-    routes.route(&rest, Verb::Get, step())?;
-    routes.route(&rest, Verb::Post, step())?;
+    let pages = Arc::new(Pages {
+        prefix: prefix.to_string(),
+        routes: OnceLock::new(),
+    });
+    routes.route(prefix, Verb::Get, step(Arc::clone(&pages)))?;
+    routes.route(&rest, Verb::Get, step(Arc::clone(&pages)))?;
+    routes.route(&rest, Verb::Post, step(pages))?;
     Ok(())
+}
+
+/// The connect pages of one route table, built by its first request.
+struct Pages {
+    prefix: String,
+    routes: OnceLock<ConnectRoutes>,
+}
+
+impl Pages {
+    /// The pages, over the client the plugin put on this request.
+    fn for_request(&self, ctx: &Ctx) -> Result<&ConnectRoutes, Error> {
+        if let Some(routes) = self.routes.get() {
+            return Ok(routes);
+        }
+        let Some(client) = ctx.provided::<OauthClient, _>() else {
+            return Err(Error::new(
+                503,
+                "oauth_client: the plugin did not start\n\
+                 help: register it in src/plugins/mod.rs",
+            ));
+        };
+        let secure = client.callback_base().starts_with("https://");
+        Ok(self
+            .routes
+            .get_or_init(|| ConnectRoutes::new(client.clone(), &self.prefix, secure)))
+    }
 }
 
 /// The signed-in account, or `None`. An operator who impersonates a
@@ -17924,17 +18039,12 @@ async fn account(ctx: &Ctx) -> Result<Option<String>, Error> {
 }
 
 /// One handler for every page. The routes read the path and decide.
-fn step() -> Handler {
-    Box::new(|ctx: &mut Ctx| {
+fn step(pages: Arc<Pages>) -> Handler {
+    Box::new(move |ctx: &mut Ctx| {
+        let pages = Arc::clone(&pages);
         Box::pin(async move {
             let ctx = &*ctx;
-            let Some(routes) = ROUTES.get() else {
-                return Err(Error::new(
-                    503,
-                    "oauth_client: the plugin did not start\n\
-                     help: register it in src/plugins/mod.rs",
-                ));
-            };
+            let routes = pages.for_request(ctx)?;
             let account = account(ctx).await?;
             let request = ConnectRequest {
                 post: ctx.verb == Verb::Post,

@@ -3385,7 +3385,7 @@ fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> 
 use std::sync::{Arc, OnceLock};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_auth::http_client::ReqwestClient;
 use brocanth_auth::oauth::web::{OauthAnswer, OauthRequest, OauthRoutes};
@@ -3549,41 +3549,48 @@ impl Settings {
     }
 }
 
-/// The settings this run chose, kept for [`mount`].
+/// The settings this application chose, on each request's context, for
+/// [`mount`].
 ///
-/// `mount` runs when the route table is built, after the plugins are, and
-/// takes no argument it could carry them in. A test that builds the table
-/// without the application gets the defaults, and so no provider.
-static CHOSEN: OnceLock<Settings> = OnceLock::new();
+/// `mount` runs when the route table is built, and takes no argument it
+/// could carry them in. The first request carries them instead. They are
+/// this application's and not the process's: two applications in one
+/// process (two tests, say) each read their own.
+pub struct Chosen(Arc<Settings>);
 
-/// Holds the settings and checks them at startup. It puts nothing on the
-/// context: the routes read the auth plugin's services.
-pub struct AuthOauth;
+impl ContextItem for Chosen {}
+
+/// Holds the settings, checks them at startup and puts them on the
+/// context. The routes also read the auth plugin's services.
+pub struct AuthOauth {
+    settings: Arc<Settings>,
+}
 
 impl Plugin for AuthOauth {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Chosen>;
     const NAME: &'static str = "auth_oauth";
 
     fn new(config: Settings) -> Self {
-        // The first application built in this process decides.
-        let _ = CHOSEN.set(config);
-        Self
+        Self {
+            settings: Arc::new(config),
+        }
     }
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let Some(settings) = CHOSEN.get() else {
-            return Ok(());
-        };
         // A provider without a secret is a button that answers an error. In
         // this project's own tests no secret is set, so nothing is checked.
         if cfg!(test) {
             return Ok(());
         }
-        settings
+        self.settings
             .configured(crate::modules::auth_oauth::MODULE.mount_at)
             .map(drop)
             .map_err(PluginError::new)
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Chosen(Arc::clone(&self.settings)));
     }
 }
 
@@ -3594,29 +3601,54 @@ type Routes = OauthRoutes<ReqwestClient, SystemClock>;
 /// Two routes: everything under the prefix, for GET and for POST. The flow
 /// reads the provider and the step from the path.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
-    let defaults = Settings::default();
-    let settings = CHOSEN.get().unwrap_or(&defaults);
-    // `configure` refuses a provider without its registration, so this
-    // drops one only when the application is not the one being started.
-    let providers = settings.configured(prefix).unwrap_or_default();
     // Fails only when the TLS backend cannot start, which no request could
     // recover from.
     let http = ReqwestClient::with_default_timeout().expect("auth_oauth: an HTTP client");
-    let mut flow = Routes::new(Arc::new(http), Arc::new(SystemClock), providers)
-        .at(prefix)
-        .after_sign_in(&settings.after_sign_in);
-    if let Some(page) = &settings.sign_in_page {
-        flow = flow.sign_in_page(page);
-    }
-    let flow = Arc::new(flow);
+    let flow = Arc::new(Flow {
+        prefix: prefix.to_string(),
+        http: Arc::new(http),
+        routes: OnceLock::new(),
+    });
     let pattern = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     routes.route(&pattern, Verb::Get, step(Arc::clone(&flow)))?;
     routes.route(&pattern, Verb::Post, step(flow))?;
     Ok(())
 }
 
+/// The flow of one route table, built by its first request from the
+/// settings on that request's context.
+///
+/// A table a test builds sees a `Ctx` built by hand, with no settings: its
+/// flow uses the defaults, and so no provider.
+struct Flow {
+    prefix: String,
+    http: Arc<ReqwestClient>,
+    routes: OnceLock<Routes>,
+}
+
+impl Flow {
+    fn for_request(&self, ctx: &Ctx) -> &Routes {
+        self.routes.get_or_init(|| {
+            let defaults = Settings::default();
+            let settings = ctx
+                .provided::<Chosen, _>()
+                .map_or(&defaults, |chosen| &*chosen.0);
+            // `configure` refuses a provider without its registration, so
+            // this drops one only when the application did not start.
+            let providers = settings.configured(&self.prefix).unwrap_or_default();
+            let mut flow = Routes::new(Arc::clone(&self.http), Arc::new(SystemClock), providers)
+                .at(&self.prefix)
+                .after_sign_in(&settings.after_sign_in);
+            if let Some(page) = &settings.sign_in_page {
+                flow = flow.sign_in_page(page);
+            }
+            flow
+        })
+    }
+}
+
 /// One handler for every step. The flow reads the path and decides.
-fn step(flow: Arc<Routes>) -> Handler {
+fn step(flow: Arc<Flow>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let flow = Arc::clone(&flow);
         Box::pin(async move {
@@ -3636,6 +3668,7 @@ fn step(flow: Arc<Routes>) -> Handler {
                 cookies: ctx.header("cookie").unwrap_or(""),
             };
             let answer = flow
+                .for_request(ctx)
                 .answer(auth, request)
                 .await
                 .map_err(|e| Error::internal(format!("auth_oauth: {e}")))?;

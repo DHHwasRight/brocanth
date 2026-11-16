@@ -55,6 +55,11 @@ fn the_client_keeps_tokens_in_postgres_and_adds_an_admin_tab() {
     );
     let plugin = file(&files, "src/plugins/oauth_client/mod.rs");
     assert!(plugin.contains("PgTokenStore::new(db)"));
+    // The pages read the client on the request: nothing is process-wide.
+    assert!(
+        !plugin.lines().any(|line| line.starts_with("static ")),
+        "{plugin}"
+    );
     assert!(plugin.contains("stamped(ctx, page.html())"));
     let mods = file(&files, "src/plugins/mod.rs");
     assert!(
