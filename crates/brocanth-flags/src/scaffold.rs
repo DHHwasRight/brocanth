@@ -34,6 +34,7 @@ impl Module for FeatureFlags {
             "flags",
             "feature flags: on for all, a percentage, users or groups; rows in your Postgres",
         )
+        .tables(&["brocanth_flags"])
         .category(Category::Enhancer)
         .adapts_to(
             "auth",

@@ -76,6 +76,7 @@ impl Module for WebhooksIn {
             "webhooks-in",
             "POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler",
         )
+        .tables(&["brocanth_webhooks_seen"])
         .category(Category::Middleware)
         .asked_in("doors", "Receive webhooks: signature, replay window, idempotency key")
         .part_of("webhooks")
@@ -497,6 +498,7 @@ impl Module for WebhooksOut {
             "webhooks-out",
             "signed outgoing webhooks: endpoints and a delivery log in Postgres, retries on a Postgres queue",
         )
+        .tables(&["brocanth_webhook_deliveries", "brocanth_webhook_endpoints"])
         .category(Category::Enhancer)
         .asked_in("doors", "Send signed webhooks, retried on a Postgres queue")
         .part_of_but_off("webhooks")

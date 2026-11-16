@@ -34,6 +34,7 @@ impl Module for Search {
             "search",
             "Postgres full-text and trigram search: a site index, its migration, a page at /search",
         )
+        .tables(&["search_documents"])
         .contributes::<AgentsSection>(Contribution::new("search", "how a model is searched"), true)
         .category(Category::Routes)
         .requires::<PgPool>("the index is a table and the page queries it through the `db` pool")
