@@ -353,6 +353,7 @@ async fn run(
     let server = brocanth_server::Server::bind(addr)
         .await
         .map_err(|e| e.to_string())?
+        .max_body(plugins::max_body()?)
         .with_streams(app.core.streams().clone());
     let bound = server.local_addr().map_err(|e| e.to_string())?;
     let stopper = server.stopper();
@@ -1732,6 +1733,15 @@ pub const SETTINGS: &[Setting] = &[
         none_as: None,
         text: false,
     },
+    Setting {
+        path: "server.max_body_bytes",
+        help: "The largest request body the server reads, in bytes; a larger one gets 413.",
+        flag: true,
+        file: "src/modules/brocanth.rs",
+        flags: Flags::Project,
+        none_as: None,
+        text: false,
+    },
 ];
 
 /// One value this run was given, above the defaults.
@@ -2060,6 +2070,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
+        (
+            "server.max_body_bytes",
+            format!("{:?}", server.max_body_bytes),
+        ),
     ]
 }
 
@@ -2103,12 +2117,15 @@ fn hooks_off_notes() -> Vec<(&'static str, String)> {
 pub struct ServerSettings {
     /// Seconds a stop waits for open requests, then for the plugins.
     pub shutdown_grace_secs: u64,
+    /// The largest request body the server reads, in bytes; a larger one gets 413.
+    pub max_body_bytes: usize,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+            max_body_bytes: brocanth_server::MAX_BODY,
         }
     }
 }
@@ -2133,6 +2150,28 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
         .ok_or_else(|| {
             format!(
                 "`[server] shutdown_grace_secs` is {}, and it must be a whole number of seconds\nhelp: set it to a whole number of seconds, such as 25",
+                value.display()
+            )
+        })
+}
+
+/// `[server] max_body_bytes` from every settings layer, or
+/// [`brocanth_server::MAX_BODY`] when none sets it.
+pub fn max_body() -> Result<usize, String> {
+    let config = layers()?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("max_body_bytes"))
+    else {
+        return Ok(brocanth_server::MAX_BODY);
+    };
+    value
+        .as_integer()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .or_else(|| value.as_str().and_then(|bytes| bytes.trim().parse().ok()))
+        .ok_or_else(|| {
+            format!(
+                "`[server] max_body_bytes` is {}, and it must be a whole number of bytes\nhelp: set it to a whole number of bytes, such as 16777216 (16 MiB)",
                 value.display()
             )
         })
@@ -2179,7 +2218,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 1bb8ab9748850cd2
+// brocanth-digest: a0420498990b149d
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2234,6 +2273,7 @@ pub mod brocanth {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         ShutdownGraceSecs,
+        MaxBodyBytes,
     }
 
     impl Key {
@@ -2241,6 +2281,7 @@ pub mod brocanth {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::ShutdownGraceSecs => "server.shutdown_grace_secs",
+                Key::MaxBodyBytes => "server.max_body_bytes",
             }
         }
     }
@@ -2354,7 +2395,7 @@ pub mod errors {
     }
 }
 
-// brocanth-digest: f6d9191bdc341cbb
+// brocanth-digest: 5cda8ac377fadaeb
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2495,6 +2536,9 @@ name = "My Blog"
 # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
+# The largest request body the server reads, in bytes; a larger one gets 413.
+# An upload route refuses to start with a limit above it.
+max_body_bytes = 16777216
 
 [errors]
 # Show the cause of a 500 in a debug build. A release build never shows it.
