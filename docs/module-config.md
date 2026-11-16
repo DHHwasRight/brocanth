@@ -6,6 +6,15 @@ toggles (§2.3, §3.2) is `AppBuilder::hooks_off`, `hooks_off_from` and
 §4, §6) is in `crates/brocanth-scaffold` and `crates/brocanth-cli`
 (`src/choices.rs`). §8 records what the build decided.
 
+**Changed by stage 3 of `docs/module-capabilities.md` (2026-11-16).** The
+flags are on beside a config file, so `flags_with_config` in
+`src/modules/brocanth.rs` is gone and `Flags::Project` reads the flags in
+every project. A module file with flags gains `set`, a value in code under
+the file, the environment and the flags. `brocanth create` and `brocanth
+add` write an option with `--<module>.<option>=VALUE`. The examples below
+that show `flags_with_config` are the earlier design; `docs/module-flags.md`
+is current.
+
 ## The request
 
 Max asked for this:

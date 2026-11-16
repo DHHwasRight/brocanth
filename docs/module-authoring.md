@@ -876,25 +876,25 @@ Write a plain plugin with `snippet::plugin` (`lib.rs:1013`). It writes
 `AppPlugins` and `PluginsInstalled` together:
 
 ```rust
-pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str)
+pub fn plugin(s: &mut Scaffold, key: &str, ty: &str)
 ```
 
-It writes one of two forms, chosen by `project.has("config")`:
+It writes one form in every project. The trait is named in the call, so
+no file needs it in scope:
 
 ```rust
-// with config: built from the `[key]` section
-let builder = builder
-    .plugin_from_config::<crate::plugins::cache::Cache>("cache")
-    .map_err(|e| e.to_string())?;
-
-// without: built from a literal the compiler checks
-let builder = builder.plugin(crate::plugins::cache::Cache::new(
-    crate::plugins::cache::Settings::default(),
-));
+let builder = builder.plugin(
+    <crate::plugins::model::Model as brocanth::plugin_api::Plugin>::new(
+        crate::plugins::model::Settings::default(),
+    ),
+);
 ```
 
-The second form calls a trait method. So without config, also write
-`s.at(Slot::AppUses).once(snippet::PLUGIN_TRAIT_USE)`.
+A plugin with declared settings uses `snippet::configurable`, which
+writes the same form with `crate::plugins::<key>_settings(&layers)?` as
+the argument. A module never asks whether the project has `config`: the
+scaffold reads the `ConfigSource` binding (`docs/module-capabilities.md`
+§6).
 
 The `Plugin` trait (`crates/brocanth/src/plugin_api.rs:345`) has these
 stages. Each one runs for every instance before the next stage starts:
@@ -991,10 +991,10 @@ Two modules that declare the same key fail `create` and name both. The
 flag layer, the renames in `src/modules/` and the precedence are in
 `docs/module-flags.md`.
 
-A settings struct that `plugin_from_config` reads must derive
-`Deserialize` only with config. `snippet::settings_derive(project,
-section)` returns the right derive lines and a doc sentence. Without
-config the project then has no parser in its tree.
+A settings struct must derive `Deserialize` only with a file layer.
+`snippet::settings_derive(project, section)` returns the right derive
+lines and a doc sentence. Without a file the project then has no parser
+in its tree.
 
 `settings_derive` derives `Debug`, and a derived `Debug` prints every
 field. When the settings hold a `.secret()`, pass the finished file
@@ -1003,8 +1003,10 @@ from the derive and writes a `Debug` that prints `<redacted>` for each
 secret. It also writes a test into the file's `mod tests`. Reason: a
 `{settings:?}` in a log line or a panic message must not leak a password.
 
-`Slot::ConfigSections` is still there for a section with no plugin
-behind it. Write it only when `project.has("config")`.
+`Slot::ConfigSections` is still there for what only a file can hold: a
+list of records, such as rate-limit rules. Declare
+`uses::<ConfigSource>(why)` and write it only when
+`project.provider::<ConfigSource>()` is bound.
 
 #### `Scaffold::binary`
 
@@ -1317,8 +1319,8 @@ is chosen:
 let config = if project.has("admin") { WITH_ADMIN } else { DEFAULT };
 ```
 
-`snippet::configurable` asks `project.has("config")`, so every module with
-declared settings adapts to `config` (13 today). The generated
+A module with declared settings does not adapt to `config`: the
+scaffold reads the `ConfigSource` binding for it. The generated
 `brocanth.toml` lists, per module, `adapted_to`: the declared keys that
 were chosen. `create` prints them under the module in its receipt.
 
@@ -1362,8 +1364,8 @@ without a change to the CLI.
 4. `absent` that says what the project lacks without the module.
 5. Plugins in `src/plugins/<key>/mod.rs`, registered through
    `snippet::plugin`, or `snippet::hooking` with `snippet::hooking_line`.
-6. Settings through `snippet::configurable`; `Deserialize` only when
-   `project.has("config")`.
+6. Settings through `snippet::configurable`; `Deserialize` through
+   `snippet::settings_derive`. Never ask `project.has("config")`.
 7. A `PagesRoutes` line for each route the module adds.
 8. An `AgentsSections` block for each rule an agent must follow.
 9. `outside_runtime()` when the module does not run in the server.

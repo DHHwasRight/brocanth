@@ -3,7 +3,8 @@
 Status: accepted (2026-11-16)
 
 The owner's answers and corrections are in §4, §5, §6 and §13. Stage 1
-(one pool, the resolver) is built; see the note under §12. Base:
+(one pool, the resolver) and stage 3 (settings layers, `ConfigSource`) are
+built; see the notes under §12. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -646,6 +647,67 @@ registration form; secret pointer flags (`_file`, `_env`). Exit:
 `adapts_to("config")` 40 -> 0; `PLUGIN_TRAIT_USE` gone; every run-time
 setting has a flag (a secret through `_file` / `_env`), except record
 lists.
+
+**Stage 3: done (2026-11-16).** Measured with a grep of non-test code under
+`crates/*/src` (each `#[cfg(test)] mod tests` block is cut out by brace
+matching, so code after a test module counts):
+
+| Relation | Before (`91beb93e`) | After |
+|---|---|---|
+| `has("config")` | 56 | 1 (`brocanth check` in the CLI: the `check` command is the `config` module's own file) |
+| `adapts_to("config")` | 41 | 0 |
+| `after("config")` | 17 | 0 |
+| `PLUGIN_TRAIT_USE` | 49 | 0 (the constant is gone) |
+| `provider::<ConfigSource>()` | 0 | 6, in 4 modules that declare `uses::<ConfigSource>` |
+
+The counts on `91beb93e` differ from §1 (47, 40), which was measured on
+`8f546fc` with test modules cut at their first line. The six provider calls
+are the choices only a file makes: the rate-limit rules and the robots
+groups are records (file or code, decision 1), the robots development file
+opens the site, and `db` and `webhooks-in` keep an empty default URL or
+secret when each environment's file names its own.
+
+What was built, and the choices made on the way:
+
+- `ConfigSource` is a Kind (`brocanth_scaffold::kind`), provided by
+  `config`, cardinality one. The scaffold asks for it, never a module: the
+  helper reads the binding without recording a question, so a module that
+  only declares settings declares no `uses`. `check_module` runs every
+  module with and without it bound.
+- **One registration form.** `snippet::configurable`,
+  `configurable_hooking` and `plugin` write
+  `builder.plugin(<Ty as brocanth::plugin_api::Plugin>::new(crate::plugins::<section>_settings(&layers)?))`
+  in every project. The trait is named in the call, so no file imports
+  it. `plugin_line` and `hooking_line` share one rustfmt-shape function,
+  with the measured thresholds in a test.
+- **The layers**, lowest first: the plugin's default, `set` in the module
+  file, the files (with a `ConfigSource`), the environment, the flags. The
+  CLI writes `Layers`, `layers()` and one `<section>_settings(&Layers)` per
+  section in `src/plugins/mod.rs`. Without a file, `Layers` is the list of
+  given values and each reader parses them over the default. With one, it
+  is `brocanth_config::Config`, and `brocanth-config` gained the code layer
+  (`Loader::code`, `code_list`, `Provenance::Code`) and list flags
+  (`Loader::flag_list`). Commands that read `[db]` (`migrate`, `dbshell`,
+  `rls`, `createsuperuser`) call the same reader, so they see the flags.
+- **The flags stay on with `config`.** `flags_with_config` is gone, and
+  `Flags::Off` in a module file is the one way to turn flags off; the binary
+  refuses such a flag by name in both kinds of project.
+- **A list of strings has a flag**, the items joined by commas. A list of
+  records has no declaration and no flag.
+- **Secrets**: `--<section>.<key>_file=PATH` and `--<section>.<key>_env=VAR`.
+  The report shows the pointer and `(secret)`. A pointer is not renamed.
+- **Build-time options**: `brocanth create|add --<module>.<option>=VALUE`
+  writes the value into the module file it writes, checked against the
+  option's type, and refuses an option for a file that exists.
+- Proven by `declared_flags_reach_the_plugin_with_and_without_a_config_file`
+  (ignored, runs cargo): three generated binaries, one without a file and
+  two with, show each layer over the one under it in the settings report
+  and in a value the plugin refuses at start, a rename, a module with its
+  flags off, and a secret through `_file` and `_env`.
+
+Not done here: a JSON or HCL provider of `ConfigSource`, and the merge of
+several files (cardinality many). The variable of a list keeps two
+spellings: commas without a file, an index with one.
 
 **Stage 4 — hook phases (2 days).** `Phase` in `brocanth::plugin_order`;
 the registrar and `.hook` take it. Exit: cross-plugin
