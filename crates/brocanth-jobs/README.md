@@ -52,7 +52,13 @@ context. Where the jobs live depends on the other modules:
 
 - in Postgres, the queue requires the project's pool (`PgPool`), so
   `brocanth create --with jobs` adds `db`. It runs on the `db` database,
-  and `[jobs]` has no `url`;
+  through one small control pool of its own (ten connections,
+  `Queue::beside`) beside the shared `db` pool. Job bodies use the shared
+  pool; the claim, the heartbeat and the settle use the control pool, so a
+  running job never blocks the heartbeat's connection. The control pool
+  reads no URL of its own: it takes the `db` pool's connection options,
+  and `[jobs]` has no `url`. This is a decision, and it stays: count ten
+  more connections per process when you size the database;
 - with `jobs-memory` (a child of `jobs`, off by default), the queue lives
   in the process. `brocanth check --deploy` reports it as an error
   (`deploy/development-only`).
@@ -64,16 +70,13 @@ The `[jobs]` section holds these settings:
 
 | Key | Default | Flag | Environment | When |
 |---|---|---|---|---|
-| `url` | `postgres://localhost/development` | none (secret) | `$<APP>_JOBS__URL` | without `db` and `jobs-memory` |
 | `migrate` | `true` | `--jobs.migrate` | `$<APP>_JOBS__MIGRATE` | without `jobs-memory` |
 | `worker` | `true` | `--jobs.worker` | `$<APP>_JOBS__WORKER` | always |
 | `queues` | `["default"]` | none (a list) | by index, with `config` only | always |
 | `concurrency` | `5` | `--jobs.concurrency` | `$<APP>_JOBS__CONCURRENCY` | always |
 
-`url` has no flag because a URL can carry a password, and every user on the
-host can read a process's arguments. `migrate` is for development. In
-production, put the statements from `Queue::schema_sql` in a migration
-somebody reviewed. Those statements do not move the rows of the first
+`migrate` is for development. In production, put the statements from
+`Queue::schema_sql` in a migration somebody reviewed. Those statements do not move the rows of the first
 queue's tables (`brocanth_jobs`, `brocanth_dead_jobs`): a project that ran
 it calls `Queue::migrate_legacy` once the tables exist, and again after the
 last old worker stopped. With the `config` module, the binary refuses a flag

@@ -52,6 +52,26 @@ Section `[jobs]`. Environment variable: `$<APP>_JOBS__<KEY>`. Flag: `--jobs.<key
 The jobs run on the `brocanth-queue` engine (`brocanth-queue/docs/DECISIONS.md`, Part 6).
 
 - In Postgres: the queue requires `PgPool`, so `brocanth create --with jobs` adds `db` and prints `added db: jobs requires PgPool (a Postgres pool)`. The queue runs on the `db` database, through a small control pool of its own (`Queue::beside`), so a running job never holds the connection its heartbeat needs. `[jobs]` has no `url`.
+
+### The control pool
+
+In Postgres, `jobs` opens one more pool: a small control pool of ten
+connections (`Queue::beside(db.pool(), 10)`), on the same database as the
+shared `db` pool.
+
+- Job bodies use the shared `db` pool. The queue's own calls (claim,
+  heartbeat, settle, enqueue) use the control pool.
+- Reason: a running job must not block the heartbeat's connection. On one
+  shared pool, busy jobs can hold every connection. Then the heartbeats
+  stop, and every lease expires at the same time.
+- The control pool reads no URL of its own. It copies the connection
+  options of the `db` pool, so `[jobs]` has no `url` and the database URL
+  is set in one place.
+- Cost: ten connections more per process. `[db] max_connections` sizes the
+  pages and the jobs; add ten for the queue when you size the database.
+
+**Decision:** keep the control pool. The owner chose it over one shared
+pool, for the reason above.
 - With [`jobs-memory`](jobs-memory.md): the queue lives in the process (`Queue::memory()`). For development and tests only.
 
 ## Choices
