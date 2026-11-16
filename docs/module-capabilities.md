@@ -1,7 +1,7 @@
 # Module capabilities: kinds, providers and contribution points
 
-Status: **proposal**, revised 2026-11-16 with the owner's answers to the
-first three questions (§4, §5, §6). Nothing here is built. Base:
+Status: **proposal**, revised 2026-11-16 with the owner's answers and
+corrections (§4, §5, §6). Nothing here is built. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -98,7 +98,7 @@ checks that code.
 
 | Kind | Group | Runtime type | Card. | Providers | Consumers |
 |---|---|---|---|---|---|
-| `PgPool` | db | `brocanth_db::Db` | base | `db` (always present, §4) | auth, jobs, cache, flags, oauth-client, audit, analytics, storage, webhooks, model |
+| `PgPool` | db | `brocanth_db::Db` | one | `db` (auto-added by a requirement, §4) | auth, jobs, cache, flags, oauth-client, audit, analytics, storage, webhooks, model |
 | `JobQueue` | jobs | `brocanth_jobs::Queue` | one | `jobs` (Postgres); dev: `jobs-memory` | mail, webhooks, observe |
 | `CacheStore` | cache | `dyn brocanth_cache::Cache` | one | `cache` (Postgres), `cache-redis`; dev: `cache-memory` | route cache, application code |
 | `Mount` | http | a path setting + role | many | admin, auth-oauth, oauth-client, resource, storage-routes | i18n-routing, route table test, robots, sitemap, analytics, gtag |
@@ -121,8 +121,9 @@ closed enum, not a Kind.
   present. It replaces `adapts_to` on a provider key.
 
 There is no fallback provider. The first draft let `jobs` and `cache`
-provide `PgPool` when `db` was absent. §4 makes `db` always present, so
-the idea and its cost (publishing a second pool as `brocanth_db::Db`) go.
+provide `PgPool` when `db` was absent. §4 makes `db` the only provider of
+the one shared pool, so the idea and its cost (publishing a second pool
+as `brocanth_db::Db`) go.
 
 ### 3.3 Capability Kinds: Postgres first, replaced below the trait
 
@@ -183,7 +184,7 @@ pub trait Kind: 'static {
     const NAME: &'static str;        // "JobQueue"
     const GROUP: &'static str;       // "jobs"
     const RUNTIME: &'static str;     // "brocanth_jobs::Queue", for generated code
-    const CARDINALITY: Cardinality;  // Base | One | Many
+    const CARDINALITY: Cardinality;  // One | Many
 }
 kind!(JobQueue, group = "jobs", runtime = "brocanth_jobs::Queue", One);
 
@@ -206,11 +207,11 @@ Manifest::new("mail", "..").uses::<JobQueue>("sends through the queue; without o
 
 ```rust
 // src/plugins/mod.rs, the chain the CLI writes
-    // PgPool <- db (base). `brocanth explain PgPool`
+    // PgPool <- db (added: jobs requires PgPool). `brocanth explain PgPool`
     .plugin_from_config::<crate::plugins::db::Database>("db")
     // JobQueue <- jobs
     .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
-    .plugin_from_config::<crate::plugins::auth::Auth>("auth")   // requires PgPool
+    .plugin_from_config::<crate::plugins::auth::Auth>("auth")   // uses PgPool
     .plugin_from_config::<crate::plugins::mail::Mail>("mail")   // uses JobQueue
 ```
 
@@ -218,55 +219,79 @@ Auth reads `lc.services().get::<brocanth_db::Db>()` in `before_start`.
 Mail reads `lc.services().get::<brocanth_jobs::Queue>()`, the trait
 handle, so `jobs-memory` in development and `jobs` in production give the
 same mail file. Today mail declares `adapts_to("jobs")` and
-`adapts_to("jobs-memory")` separately (`crates/brocanth-mail/src/scaffold.rs:62-73`). Auth has one file: `POSTGRES_WITH`, the `MemoryStore`
-plugin file and `[auth] url` go.
+`adapts_to("jobs-memory")` separately
+(`crates/brocanth-mail/src/scaffold.rs:62-73`).
 
-## 4. Decision 1: Postgres is part of the base
+Auth keeps two files, not three: on the shared pool when `PgPool` is
+bound, on `MemoryStore` when it is not. `POSTGRES_WITH`, the "own pool"
+variant and `[auth] url` go.
 
-Owner, Q1: a Postgres pool is always present. `db` is part of the base,
-not a choice. A project that wants another store writes another module.
+## 4. Decision 1: one shared pool, added on demand
 
-Consequences:
+Owner, Q1, with a correction: `db` is **not** in every project. A project
+may serve static JSON only, or relay API calls, with no database. `db`
+comes in when it is chosen, or when a chosen module requires `PgPool`.
+PLAN.md §8 ("nothing ships unless asked") does not change, and there is
+no ADR for it.
 
-- `PgPool` has cardinality **base**: always bound to `db`, never resolved,
-  never missing. `requires::<PgPool>` documents the edge for `explain`.
-- `db` leaves the chooser. Its `absent` line goes, and `needs("db")` (8),
-  `after("db")` (11), `adapts_to("db")` (9) and `has("db")` (9) go.
-- `jobs` and `cache` require `PgPool`; they open no pool of their own.
+What does change:
+
+- **One pool per project.** `db` is the only provider of `PgPool`. `jobs`,
+  `cache`, flags, audit and the other Postgres modules require it and
+  never open their own. **Reason:** one set of connections, sized by
+  `[db] max_connections`; one URL; one place for TLS and migrations.
+- **Postgres first, replaced below the trait** (§3.3). Modules may rely
+  on Postgres extensions (pg_cron, TimescaleDB). A module that needs one
+  says so in its `requires` line and in `brocanth check`.
+- **Optional users stay optional.** A module that only *adapts* to a
+  database declares `uses::<PgPool>`, not `requires`, and keeps its code
+  path without one. Auth without `db` writes the `MemoryStore` plugin as
+  today. mail without `db` keeps the test that starts the application.
 - **Development-only providers stay.** `jobs-memory` and `cache-memory`
-  provide `JobQueue` and `CacheStore` as today, marked
-  `development_only` (`brocanth check --deploy` refuses them). They exist
-  for fast tests, not to run without Postgres: the base pool is still
-  there. `MemoryStore` in auth stays a library type for unit tests; no
-  generated project writes it.
-- **`static` is the exception.** A static export has no running server
-  (`outside_runtime`), so it gets no pool. The base applies to every
-  project that serves requests.
+  provide `JobQueue` and `CacheStore` with no pool, marked
+  `development_only` (`brocanth check --deploy` refuses them). They do not
+  require `PgPool`, so they do not pull `db` in.
+- `has("db")` (9) becomes `provider::<PgPool>()`; `needs("db")` (8)
+  becomes `requires::<PgPool>`; `adapts_to("db")` (9) becomes
+  `uses::<PgPool>`; `after("db")` (11) is implied by both.
 
-Proposed ADR text, for PLAN.md §13:
+### 4.1 How the resolver adds `db`
 
-> ### ADR 10 — A served project has a Postgres pool. `db` is part of the base.
->
-> **Status:** proposed. **Touches:** §8, the CLI, every module that
-> asked `has("db")`.
->
-> The generator writes `db` into every project that serves requests, as
-> it writes `server`. A module may require the pool and Postgres
-> extensions. **Reason:** ADR 5 made Postgres the only database. Optional
-> `db` then cost a second code path in every Postgres module (auth kept
-> three: memory, own pool, shared pool) and bought nothing, because
-> every useful project had one. §8 is unchanged for the **core**: the
-> core crate depends on no database, and `db` is still a plugin named in
-> `src/plugins/mod.rs`, where you can read it. What changes is the
-> generator's default: `db` is no longer asked. A project that wants no
-> Postgres removes the line and writes its own module, in plain sight.
-> Capability modules (jobs, cache, scheduler, time series, search) expose
-> a trait with a Postgres provider first; a later backend is a module
-> that provides the same trait.
+A chosen module `requires::<K>` and no chosen module provides K:
 
-Risk: a new user needs a running Postgres before the first `cargo run`.
-Mitigation: the `docker` module and the getting-started guide start one;
-open question 1 asks whether the CLI should.
+- **One provider in the registry** (non-development): the CLI adds it.
+  `brocanth create` prints `added db: jobs requires PgPool (a Postgres
+  pool)`, `brocanth.toml` records the reason, and `brocanth explain`
+  shows it. **Reason:** there is nothing to choose, and an error that
+  names the one fix only adds a round trip. The wizard ticks it on
+  screen, so the flags and the chooser agree.
+- **Several providers** (`JobQueue`: `jobs`, `jobs-memory`): an error that
+  names each one, with a `help:` line. Reason: a backend is a real choice.
+- `remove db` while a chosen module requires `PgPool` is refused, and the
+  error names the modules that require it.
+
+Today `needs` refuses on the command line and ticks in the chooser. For a
+requirement on a Kind, both routes now add the single provider.
+
+### 4.2 `db-embedded`: Postgres in the binary, for development
+
+Owner, former open question 1: **offer** to bundle Postgres for local work. A
+module `db-embedded`, part of `db`, starts a Postgres server from the
+binary before `db` opens its pool, and hands `db` the URL. `PgPool` is
+still `db`'s; nothing else changes.
+
+- Offered at `brocanth create` and `brocanth add db`, off by default.
+- `development_only`: `brocanth check --deploy` refuses it, as it refuses
+  `jobs-memory`.
+- Crate: `postgresql_embedded` (theseus-rs). Its `bundled` feature embeds
+  the server archive at build time; without it, the archive downloads at
+  first start. Precedent: zonky `embedded-postgres` (io.zonky.test, Maven)
+  for Java tests.
+- Trade-offs: the archive adds tens of MB to a development binary, per
+  target platform. PostgreSQL's licence is permissive (BSD-style); check
+  the crate's own licence and the archive's source before shipping it.
+  Because `check --deploy` refuses the module, a deployed build does not
+  carry it.
 
 ## 5. Decision 2: the backoffice is a separable service
 
@@ -339,7 +364,9 @@ rewrite:
    set of grants.
 
 The split itself: the CLI writes a second binary, `backoffice`, that
-registers `db`, the admin and each module's data implementation.
+registers `db`, the admin and each module's data implementation. Points
+3 and 5 need a database, so an admin with `roles` or `superuser`
+requires `PgPool`, and the resolver adds `db` (§4.1).
 
 ### 5.4 Mount roles
 
@@ -378,9 +405,20 @@ layer loader.
 **Reason:** the narrower decision wins (`docs/module-flags.md`): a file is
 shared by every deployment, a variable by one container, a flag by one
 run. **The environment stays.** Containers and platforms set variables,
-not flags, and a secret must not be a flag: a flag is visible in `ps` to
-every user on the host. So a secret keeps env and file only; that is the
-one exception to "every option is a flag" (open question 3).
+not flags.
+
+**Decision 3e: a secret has flags, and no flag carries its value.**
+Owner, former open question 3. A flag is visible in `ps` to every user on the
+host, so a secret setting gets two pointer flags instead of a value flag:
+
+- `--auth.signing_key_file=/run/secrets/key` reads the value from a file
+  (Docker and Kubernetes secrets mount so);
+- `--auth.signing_key_env=MY_VAR` renames the variable read, instead of
+  the default `$<APP>_AUTH__SIGNING_KEY`.
+
+**Reason:** every setting stays reachable from the command line, and the
+value never enters the process list. The settings report shows the
+pointer, never the value (`<redacted>`, as today).
 
 **Decision 3c: `ConfigSource` is the Kind.** `config` (TOML) provides it;
 a JSON or HCL module is another provider of the same Kind. Cardinality
@@ -388,16 +426,20 @@ a JSON or HCL module is another provider of the same Kind. Cardinality
 files. The other layers are core, not a Kind. `ConfigSection` from the
 first draft goes: a module's section is derived from its declaration.
 
-**Decision 3d: options and settings become one declaration.** An `Opt`
-(today a constant in the module file) becomes a setting whose code layer
-is the module file. A reader takes the resolved value at start:
-i18n-routing calls `keep_unprefixed(settings.admin.mount_at)`, not the
-constant. **Reason:** otherwise `--admin.mount_at` would exist for some
-options and not others. Risk: a mount path then differs per deployment;
-open question 2 asks if structural options may be overridden at run time.
+**Decision 3d: structural options are build-time.** Owner, former
+open question 2. An `Opt` that shapes the build (`mount_at`, `integrate.*`,
+hook toggles) stays a constant in the module file. No flag, variable or
+file overrides it at run time. The brocanth command line sets it when it
+writes the file: `brocanth add admin --admin.mount_at=/backoffice`.
+Readers keep `module_ref(..)` to the constant, as i18n-routing does.
+**Reason:** the route table test, the i18n exceptions and the robots
+rules are generated from the constant and checked by the compiler. A
+mount path that differs per deployment would break them silently. So
+the two declarations stay: `Opt` (build time, `brocanth` flags) and
+`Setting` (run time, binary flags, env, file).
 
 Lists of records (rate-limit rules, robots groups) have no flag form.
-They stay in code or in the file (open question 4).
+They stay in code or in the file (open question 1).
 
 ## 7. How it keeps ADR 1
 
@@ -417,11 +459,15 @@ filled by whatever links. This model adds none.
 `brocanth-cli` gains one pass between "chosen keys" and "contribute":
 
 1. Collect `provides`, `requires`, `uses` and `contributes` of each chosen
-   module. Bind each **base** Kind to its base module.
+   module.
 2. For each Kind with cardinality **one**:
-   - No provider and a `requires`: refuse, like `needs` today:
+   - No chosen provider and a `requires`: if the registry has one
+     non-development provider, add it and print why (§4.1); repeat from
+     step 1 for the added module. With several, refuse:
      `error: <key> requires JobQueue` / `help: add one of: jobs,
-     jobs-memory`. The wizard ticks the first non-development provider.
+     jobs-memory`.
+   - No chosen provider and only `uses`: bind nothing. The module writes
+     its code path without K.
    - One provider: bind it.
    - Two providers: a conflict that names both. Reason: two queues or two
      session cookies are a bug, not a choice.
@@ -451,21 +497,24 @@ must ask `project.provider::<K>()`, and a module that asks must declare.
 
 | Today | New form |
 |---|---|
-| `needs("db")` ×8, `after("db")` ×11, `adapts_to("db")` ×9, `has("db")` ×9 | gone: `PgPool` is base (§4) |
+| `needs("db")` ×8 | `requires::<PgPool>`; the resolver adds `db` (§4.1) |
+| `adapts_to("db")` ×9, `has("db")` ×9 | `uses::<PgPool>`, `provider::<PgPool>()` |
+| `after("db")` ×11 | implied by `requires`/`uses` |
 | `needs(key)` (other) | unchanged for a Slot need; `requires::<K>` when the key provides a Kind |
 | `after(key)` (other) | implied by `requires`/`uses`; a hook order becomes a phase; else unchanged |
 | `adapts_to(provider key)` | `uses::<K>`: mail on `jobs` -> `uses::<JobQueue>` |
 | `adapts_to("config")` ×40, `after("config")` ×17, `has("config")` ×47 | gone: one registration form, layers, `ConfigSource` (§6) |
 | `adapts_to("admin")`, `integration("admin", ..)` | `contributes::<AdminPanel>(Tab { resource, .. }, on)` |
-| `adapts_to(renderer / own child)`, `recommends`, `conflicts`, `asked_in`, `part_of`, `absent` (except `db`) | unchanged |
-| `option(Opt::*)` | a `Setting` whose code layer is the module file (§6, 3d) |
-| `option(Opt::mount)` | that, plus `provides::<Mount>` with a role (§5.4) |
+| `adapts_to(renderer / own child)`, `recommends`, `conflicts`, `asked_in`, `part_of`, `absent` | unchanged |
+| `option(Opt::*)` | unchanged: build time, set by `brocanth` flags (§6, 3d) |
+| `option(Opt::mount)` | also `provides::<Mount>` with a role (§5.4) |
+| `Setting::secret()` | gains `--<m>.<key>_file` and `--<m>.<key>_env` flags (§6, 3e) |
 | `hook(name, what, Hook)` | gains a phase; `Hook::required()` unchanged |
 | `development_only` on `jobs-memory`, `cache-memory` | unchanged; they also `provides::<JobQueue/CacheStore>` |
 | `Project::has(other key)` | `provider::<K>()` / `contributions::<K>()`; unchanged for needs, renderer, own children |
 | `Project::mounts()` | `contributions::<Mount>()`, filtered by role |
 | `module_ref(other, field)` | must name an `exports` field; mount reads go through `Mount` |
-| `POSTGRES_WITH`, `SCREEN_PATHS`, `MIGRATES` | gone (base pool), an export, `contributes::<ConfigCheck>` |
+| `POSTGRES_WITH`, `SCREEN_PATHS`, `MIGRATES` | `uses::<PgPool>` (one pool), an export, `contributes::<ConfigCheck>` |
 | `static INSTALLED: OnceLock` ×7 | a late cell in `Services` (§5.1) |
 | `after_if_present("<plugin>.<hook>")` | a phase; `after` only inside a phase |
 | `StaffPolicy` per-model verbs | levels `read` / `edit` / `owner` per RBAC resource (§5.2) |
@@ -488,11 +537,13 @@ Risks:
 
 - Two vocabularies during migration. Mitigation: one Kind at a time; the
   PR that adds a Kind removes the old keys.
-- Every served project needs Postgres to start (§4).
+- Auto-add hides a dependency. Mitigation: the create output,
+  `brocanth.toml` and `explain` name each added module and its reason.
 - Phases too coarse. Mitigation: `Order::after` inside a phase; a
   cross-phase `after` is a build error.
-- Decision 3d moves module-file constants to run-time values; some
-  generated tests read them at compile time and must read settings.
+- Two declarations (`Opt` at build time, `Setting` at run time) can
+  confuse an author. Mitigation: `explain` and the docs table mark each
+  as "build" or "run".
 - RBAC levels too coarse for a big tab. Mitigation: a tab may declare
   more than one resource later; not now.
 
@@ -501,10 +552,17 @@ Risks:
 Sizes assume one engineer who knows the scaffold crate. Each stage
 re-blesses the goldens and reads the diff.
 
-**Stage 1 — Postgres base, the resolver (2-3 days).** ADR 10; `db` leaves
-the chooser; Kind trait, manifest methods, resolver, `check_module` rules.
-Exit: `has("db")` 9 -> 0, `needs("db")` 8 -> 0, `after("db")` 11 -> 0;
-`POSTGRES_WITH`, `[auth] url` and the auth `MemoryStore` file are gone.
+**Stage 1 — one pool, the resolver (2-3 days).** Kind trait, manifest
+methods, resolver with auto-add (§4.1), `check_module` rules. Exit:
+`has("db")` 9 -> 0 (now `provider::<PgPool>()`), `needs("db")` 8 -> 0,
+`after("db")` 11 -> 0; `POSTGRES_WITH`, the auth "own pool" variant and
+`[auth] url` are gone; no module but `db` opens a pool; `brocanth create
+--jobs` prints `added db`.
+
+**Stage 1b — `db-embedded` (1-2 days, independent).** The module over
+`postgresql_embedded`, offered in the wizard, refused by `check --deploy`.
+Exit: `brocanth create --db --db-embedded` runs `cargo run` with no
+Postgres installed; `check --deploy` reports it as an error.
 
 **Stage 2 — backoffice: `Mount`, `AdminPanel`, RBAC (4-5 days).** Mount
 roles; tabs on late cells and async traits; `read`/`edit`/`owner` in
@@ -513,10 +571,11 @@ roles; tabs on late cells and async traits; `read`/`edit`/`owner` in
 24 -> ≤ 4; each tab declares a resource, checked by `check_module`.
 
 **Stage 3 — settings layers and `ConfigSource` (3-4 days).** One
-registration form; `Opt` becomes `Setting`; code layer. Exit:
+registration form; secret pointer flags (`_file`, `_env`). Exit:
 `has("config")` 47 -> ≤ 3 (inside `config` and the scaffold helper);
-`adapts_to("config")` 40 -> 0; `PLUGIN_TRAIT_USE` gone; each option has a
-flag except secrets and record lists.
+`adapts_to("config")` 40 -> 0; `PLUGIN_TRAIT_USE` gone; every run-time
+setting has a flag (a secret through `_file` / `_env`), except record
+lists.
 
 **Stage 4 — hook phases (2 days).** `Phase` in `brocanth::plugin_order`;
 the registrar and `.hook` take it. Exit: cross-plugin
@@ -536,27 +595,21 @@ same data writes a table on each `docs/modules/*.md` page, and
 `docs_check` compares it. Exit: 77 of 77 pages carry a generated table; a
 manifest edit without a re-bless fails `docs_check`.
 
-Total: 14-19 days (first draft: 10-13). Stage 1 shrank; stages 2 and 3
+Total: 15-21 days (first draft: 10-13). Stage 1b is new; stages 2 and 3
 grew with RBAC and the settings layers.
 
 ## 13. Open questions for the owner
 
-1. Postgres for a new user: should `brocanth create` start a local
-   Postgres (Docker or a managed binary), or only print how?
-2. Structural options (`mount_at`): may a flag or variable override them
-   at run time, or does the module file (code) have the last word for
-   them?
-3. Secrets: confirm they get no flag (env and file only), as today.
-4. Lists of records (rate-limit rules, robots groups): code and file only,
+1. Lists of records (rate-limit rules, robots groups): code and file only,
    or a flag form (a JSON value)?
-5. Phases: are the four names right, and is a cross-phase `after` a build
+2. Phases: are the four names right, and is a cross-phase `after` a build
    error or a warning?
-6. `brocanth check` reads `ConfigCheck` entries from where:
+3. `brocanth check` reads `ConfigCheck` entries from where:
    `brocanth.toml`, or generated code? And does `brocanth.toml` record
    `[bindings]`, or does `explain` recompute them each time?
-7. Edition: add `edition` now, or with the first codemod that needs it?
-8. Outside modules: core Kinds only, as proposed, or may an outside crate
+4. Edition: add `edition` now, or with the first codemod that needs it?
+5. Outside modules: core Kinds only, as proposed, or may an outside crate
    define a Kind?
-9. AGENTS.md sections as a contribution point: in stage 5 or later?
-10. RBAC `owner`: may an owner grant `owner` to another person, or only a
-    superuser (as proposed)?
+6. AGENTS.md sections as a contribution point: in stage 5 or later?
+7. RBAC `owner`: may an owner grant `owner` to another person, or only a
+   superuser (as proposed)?
