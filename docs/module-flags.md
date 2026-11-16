@@ -236,8 +236,10 @@ help: set `flags: Flags::On` in src/modules/storage.rs, or set `storage.token_tt
 ```
 
 `Flags::Project` (the default) and `Flags::On` both read the flags.
-`flags_with_config` in `src/modules/brocanth.rs` is gone; an old
-`src/flags.rs` with `WITH_CONFIG = true` moves without it.
+Nothing reads `flags_with_config` in `src/modules/brocanth.rs` any more. A
+new file does not write it, and the field stays in `shape.rs` so an older
+file that sets it still compiles. An old `src/flags.rs` with
+`WITH_CONFIG = true` moves without it.
 
 A flag nobody declared is still `clap`'s error.
 

@@ -689,9 +689,10 @@ What was built, and the choices made on the way:
   (`Loader::code`, `code_list`, `Provenance::Code`) and list flags
   (`Loader::flag_list`). Commands that read `[db]` (`migrate`, `dbshell`,
   `rls`, `createsuperuser`) call the same reader, so they see the flags.
-- **The flags stay on with `config`.** `flags_with_config` is gone, and
-  `Flags::Off` in a module file is the one way to turn flags off; the binary
-  refuses such a flag by name in both kinds of project.
+- **The flags stay on with `config`.** Nothing reads `flags_with_config`
+  (the field stays, so an older `brocanth.rs` compiles), and `Flags::Off`
+  in a module file is the one way to turn flags off; the binary refuses
+  such a flag by name in both kinds of project.
 - **A list of strings has a flag**, the items joined by commas. A list of
   records has no declaration and no flag.
 - **Secrets**: `--<section>.<key>_file=PATH` and `--<section>.<key>_env=VAR`.

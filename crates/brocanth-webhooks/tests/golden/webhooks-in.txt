@@ -2087,6 +2087,9 @@ pub mod brocanth {
 
     /// What src/modules/brocanth.rs holds.
     pub struct Module {
+        /// No longer read: the flags are on beside a config file. Kept so an older
+        /// file that sets it still compiles.
+        pub flags_with_config: bool,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
         /// Values in code, as a flag spells them: over the default, under the
@@ -2097,6 +2100,7 @@ pub mod brocanth {
     impl Module {
         /// The value of each field the file does not name.
         pub const DEFAULT: Self = Self {
+            flags_with_config: false,
             rename: &[],
             set: &[],
         };
@@ -2170,7 +2174,7 @@ pub mod webhooks_in {
     }
 }
 
-// brocanth-digest: f662b24e06be93a1
+// brocanth-digest: 8e71658edf4e4fcb
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
