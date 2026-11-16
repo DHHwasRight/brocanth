@@ -21,12 +21,12 @@
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::journal::{AdminWrite, Journal, Written};
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts::{self, encode, escape};
 use brocanth_admin::AdminConfig;
 
 use crate::entry::{format_time, Entry, Field, Kind};
-use crate::plugin::AuditPlugin;
 use crate::store::Query;
 use crate::trail::Trail;
 
@@ -37,32 +37,24 @@ pub const KEY: &str = "history";
 const PAGE: usize = 50;
 
 /// Adds the history tab, the journal and the "History" link to `config`,
-/// over [`AuditPlugin::installed`].
+/// over a trail that arrives later, in `trail`: for a generated admin,
+/// which mounts before the audit plugin is built. The admin fills the cell
+/// from the first request that carries the [`Trail`].
 ///
 /// The admin has one journal, so this replaces one set before.
 ///
 /// ```
-/// let config = brocanth_audit::admin::install(brocanth_admin::AdminConfig::new());
+/// use brocanth_admin::late::Late;
+///
+/// let config = brocanth_audit::admin::install(brocanth_admin::AdminConfig::new(), Late::new());
 /// # let _ = config;
 /// ```
-pub fn install(config: AdminConfig) -> AdminConfig {
-    install_over(config, None)
-}
-
-/// [`install`] over this trail, for a test or an application that builds
-/// the trail itself.
-pub fn install_with(config: AdminConfig, trail: Trail) -> AdminConfig {
-    install_over(config, Some(trail))
-}
-
-fn install_over(config: AdminConfig, trail: Option<Trail>) -> AdminConfig {
-    let (panel, journal) = match trail {
-        Some(trail) => (AuditPanel::new(trail.clone()), AuditJournal::new(trail)),
-        None => (AuditPanel::installed(), AuditJournal::installed()),
-    };
+pub fn install(config: AdminConfig, trail: Late<Trail>) -> AdminConfig {
     config
-        .panel(panel)
-        .journal(journal)
+        .panel(AuditPanel {
+            trail: trail.clone(),
+        })
+        .journal(AuditJournal { trail })
         .record_link("History", |r| {
             Some(format!(
                 "{}/{KEY}?table={}&row={}",
@@ -73,47 +65,35 @@ fn install_over(config: AdminConfig, trail: Option<Trail>) -> AdminConfig {
         })
 }
 
-/// Where the trail comes from.
-#[derive(Clone)]
-enum Source {
-    Trail(Trail),
-    Installed,
-}
-
-impl Source {
-    fn trail(&self) -> Option<Trail> {
-        match self {
-            Source::Trail(t) => Some(t.clone()),
-            Source::Installed => AuditPlugin::installed(),
-        }
-    }
+/// [`install`] over this trail, for a test or an application that builds
+/// the trail itself.
+pub fn install_with(config: AdminConfig, trail: Trail) -> AdminConfig {
+    install(config, Late::ready(trail))
 }
 
 /// Records every admin write in the trail.
 pub struct AuditJournal {
-    source: Source,
+    trail: Late<Trail>,
 }
 
 impl AuditJournal {
     /// A journal over this trail.
     pub fn new(trail: Trail) -> AuditJournal {
         AuditJournal {
-            source: Source::Trail(trail),
+            trail: Late::ready(trail),
         }
     }
 
-    /// A journal over [`AuditPlugin::installed`], resolved at each write.
-    /// A write made while no plugin is installed is not recorded.
-    pub fn installed() -> AuditJournal {
-        AuditJournal {
-            source: Source::Installed,
-        }
+    /// A journal over a trail that arrives later, in `cell`. A write made
+    /// before the cell is filled is not recorded.
+    pub fn late(cell: Late<Trail>) -> AuditJournal {
+        AuditJournal { trail: cell }
     }
 }
 
 impl Journal for AuditJournal {
     fn record(&self, write: &AdminWrite<'_>) {
-        let Some(trail) = self.source.trail() else {
+        let Some(trail) = self.trail.get() else {
             return;
         };
         trail.record(Entry {
@@ -144,23 +124,21 @@ impl Journal for AuditJournal {
 
 /// The history tab.
 pub struct AuditPanel {
-    source: Source,
+    trail: Late<Trail>,
 }
 
 impl AuditPanel {
     /// A tab over this trail.
     pub fn new(trail: Trail) -> AuditPanel {
         AuditPanel {
-            source: Source::Trail(trail),
+            trail: Late::ready(trail),
         }
     }
 
-    /// A tab over [`AuditPlugin::installed`], resolved when it renders:
-    /// for a generated admin, which mounts before the plugin is built.
-    pub fn installed() -> AuditPanel {
-        AuditPanel {
-            source: Source::Installed,
-        }
+    /// A tab over a trail that arrives later, in `cell`: for a generated
+    /// admin, which mounts before the plugin is built.
+    pub fn late(cell: Late<Trail>) -> AuditPanel {
+        AuditPanel { trail: cell }
     }
 }
 
@@ -178,7 +156,7 @@ impl Panel for AuditPanel {
         if !r.path.is_empty() || r.post {
             return Ok(None);
         }
-        let Some(trail) = self.source.trail() else {
+        let Some(trail) = self.trail.get() else {
             return Ok(Some(PanelPage::body(
                 "History",
                 format!(

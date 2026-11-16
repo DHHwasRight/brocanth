@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts;
 
@@ -21,7 +22,7 @@ pub const PER_PAGE: u32 = 50;
 
 /// The connections tab.
 pub struct ConnectionsPanel {
-    client: Option<OauthClient>,
+    client: Late<OauthClient>,
     per_page: u32,
 }
 
@@ -30,17 +31,17 @@ impl ConnectionsPanel {
     /// its own.
     pub fn new(client: OauthClient) -> Self {
         Self {
-            client: Some(client),
+            client: Late::ready(client),
             per_page: PER_PAGE,
         }
     }
 
-    /// A panel over the client the plugin installs. A generated admin mounts
-    /// its routes before any plugin starts, so the panel looks when it
-    /// renders.
-    pub fn installed() -> Self {
+    /// A panel over a client that arrives later, in `cell`. A generated
+    /// admin mounts its routes before any plugin starts, and fills the cell
+    /// from the first request that carries the client.
+    pub fn late(cell: Late<OauthClient>) -> Self {
         Self {
-            client: None,
+            client: cell,
             per_page: PER_PAGE,
         }
     }
@@ -54,7 +55,7 @@ impl ConnectionsPanel {
     }
 
     fn client(&self) -> Option<OauthClient> {
-        self.client.clone().or_else(OauthClient::installed)
+        self.client.get().cloned()
     }
 }
 

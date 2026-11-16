@@ -38,7 +38,7 @@ fn cache_redis_writes_the_plugin_over_redis() {
         .find(|l| l.starts_with("brocanth-cache "))
         .expect("a brocanth-cache line");
     assert!(!line.contains("postgres"), "{line}");
-    assert!(file("src/plugins/mod.rs").contains("CachePanel::installed()"));
+    assert!(file("src/plugins/mod.rs").contains("CachePanel::late(cache)"));
     if testing::building() {
         let built = brocanth_cli::testing::generate_for_build("my-app", picks, &[&CacheRedis])
             .unwrap_or_else(|e| panic!("{e}"));

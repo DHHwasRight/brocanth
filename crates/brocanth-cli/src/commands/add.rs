@@ -425,17 +425,21 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
 /// The admin's own file.
 const ADMIN_FILE: &str = "src/plugins/admin/mod.rs";
 
-/// The line that reads the tabs of other modules into the admin.
-const PANELS_CALL: &str = "crate::plugins::admin_panels(config)";
+/// The line that reads the tabs of other modules into the admin, with the
+/// late cells the tabs read their handles from.
+const PANELS_CALL: &str = "crate::plugins::admin_panels(config, &mut late)";
 
-/// `text`, the admin file as the generator writes it now, in the two forms
-/// the generator wrote before `plugins::admin_panels`: no tab, and the
-/// analytics tab without a guard.
+/// `text`, the admin file as the generator writes it now, in the forms the
+/// generator wrote before: before the tabs took late cells, and, before
+/// `plugins::admin_panels`, with no tab and with the analytics tab without
+/// a guard.
 fn old_admin(text: &str) -> Vec<String> {
-    use brocanth_admin::scaffold::{LEGACY_ANALYTICS_PANEL, PANELS};
+    use brocanth_admin::scaffold::{before_late, LEGACY_ANALYTICS_PANEL, PANELS_BEFORE_LATE};
+    let late = before_late(text);
     vec![
-        text.replace(PANELS, ""),
-        text.replace(PANELS, LEGACY_ANALYTICS_PANEL),
+        late.replace(PANELS_BEFORE_LATE, ""),
+        late.replace(PANELS_BEFORE_LATE, LEGACY_ANALYTICS_PANEL),
+        late,
     ]
 }
 

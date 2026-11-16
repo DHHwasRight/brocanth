@@ -17,7 +17,9 @@
 //! [`Robots::render`]: crate::Robots::render
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, Mount, MountRole, Opt, Project, Scaffold, Setting, Slot,
+};
 
 pub use crate::scaffold_sitemap::Sitemap;
 
@@ -36,13 +38,16 @@ impl Module for Robots {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
+        .uses::<Mount>(
+            "every `Backoffice` mount, such as the admin, is disallowed, at the path its module file mounts it",
+        )
         // A choice and not a fact: `Disallow: /admin` also tells every
         // reader of robots.txt where the backoffice is.
-        .integration(
-            "admin",
-            "the admin is disallowed in robots.txt, at the path src/modules/admin.rs mounts it",
+        .option(Opt::bool(
+            "disallow_backoffice",
             true,
-        )
+            "Disallow every Backoffice mount, such as the admin. The rule also tells every reader of robots.txt where the backoffice is.",
+        ))
         .adapts_to(
             "sitemap",
             "the Sitemap: line names /sitemap.xml at the sitemap's base URL, unless `sitemap` is set",
@@ -104,30 +109,42 @@ fn index_in_file(project: &Project) -> bool {
     project.has("static")
 }
 
-/// The paths a fresh project keeps every crawler out of: the admin's,
-/// through `integrate.admin`, and not through the `disallow` setting.
-fn disallowed(project: &Project) -> Vec<&'static str> {
-    if project.has("admin") {
-        vec!["/admin"]
-    } else {
-        Vec::new()
-    }
+/// A stand-in path for the `i`th `Backoffice` mount in the expected text.
+/// The test reads the real path from the mount's module file.
+fn placeholder(i: usize) -> String {
+    format!("/backoffice-mount-{i}")
 }
 
-/// The admin's path, behind `integrate.admin` in src/modules/robots.rs.
+/// The paths a fresh project keeps every crawler out of: each `Backoffice`
+/// mount's, through `disallow_backoffice`, and not through the `disallow`
+/// setting. A stand-in each, for the expected text.
+fn disallowed(project: &Project) -> Vec<String> {
+    (0..project.mounts_with(MountRole::Backoffice).len())
+        .map(placeholder)
+        .collect()
+}
+
+/// Each `Backoffice` mount's path, behind `disallow_backoffice` in
+/// src/modules/robots.rs.
 fn admin_rule(project: &Project) -> String {
-    if !project.has("admin") {
+    let backoffice = project.mounts_with(MountRole::Backoffice);
+    if backoffice.is_empty() {
         return String::new();
     }
-    format!(
-        "        // The admin, where src/modules/admin.rs mounts it. Turn it off with\n\
-         \x20       // `integrate.admin` in src/modules/robots.rs.\n\
-         \x20       if {} {{\n\
-         \x20           text = text.disallow({});\n\
-         \x20       }}\n",
-        module_ref("robots", "integrate.admin"),
-        module_ref("admin", "mount_at"),
-    )
+    let mut out = format!(
+        "        // The backoffice, such as the admin, where its module file mounts\n\
+         \x20       // it. Turn it off with `disallow_backoffice` in src/modules/robots.rs.\n\
+         \x20       if {} {{\n",
+        module_ref("robots", "disallow_backoffice"),
+    );
+    for (key, field) in backoffice {
+        out.push_str(&format!(
+            "            text = text.disallow({});\n",
+            module_ref(key, field)
+        ));
+    }
+    out.push_str("        }\n");
+    out
 }
 
 /// The `[robots]` section.
@@ -207,8 +224,8 @@ fn expected(project: &Project) -> String {
     let open = !project.has("config") || index_in_file(project);
     let text = if open {
         let text = disallowed(project)
-            .into_iter()
-            .fold(crate::Robots::new(), crate::Robots::disallow);
+            .iter()
+            .fold(crate::Robots::new(), |text, path| text.disallow(path));
         if project.has("sitemap") {
             let base = crate::scaffold_sitemap::DEFAULT_BASE;
             text.sitemap(format!("{base}/sitemap.xml"))
@@ -232,14 +249,18 @@ fn generated_literal(text: &str) -> String {
     }
 }
 
-/// The test's expected text. A literal, unless it names the admin: then a
-/// function that reads the admin's path from src/modules/admin.rs, so a
+/// The test's expected text. A literal, unless it names a `Backoffice`
+/// mount: then a function that reads each path from its module file, so a
 /// moved admin does not fail the project's own test
 /// (docs/module-config.md §9).
 fn generated_item(project: &Project) -> (String, &'static str) {
     let text = expected(project);
-    let rule = "Disallow: /admin\n";
-    if !text.contains(rule) {
+    let backoffice = project.mounts_with(MountRole::Backoffice);
+    let rules: Vec<String> = (0..backoffice.len())
+        .map(|i| format!("Disallow: {}\n", placeholder(i)))
+        .filter(|rule| text.contains(rule.as_str()))
+        .collect();
+    if rules.is_empty() {
         let item = format!(
             "    /// What this project answered the day it was generated. Change the\n\
              \x20   /// `[robots]` settings and this line with them.\n\
@@ -248,21 +269,25 @@ fn generated_item(project: &Project) -> (String, &'static str) {
         );
         return (item, "GENERATED");
     }
-    let template = text
-        .replace('{', "{{")
-        .replace('}', "}}")
-        .replace(rule, "Disallow: {}\n");
+    let mut template = text.replace('{', "{{").replace('}', "}}");
+    for rule in &rules {
+        template = template.replace(rule.as_str(), "Disallow: {}\n");
+    }
+    // No comma after the last argument, as rustfmt leaves a `format!`.
+    let paths = backoffice
+        .iter()
+        .map(|(key, field)| format!("\n            {}", module_ref(key, field)))
+        .collect::<Vec<_>>()
+        .join(",");
     let item = format!(
-        "    /// What this project answered the day it was generated, with the admin\n\
-         \x20   /// where src/modules/admin.rs mounts it. Change the `[robots]` settings\n\
-         \x20   /// and this text with them.\n\
+        "    /// What this project answered the day it was generated, with the\n\
+         \x20   /// backoffice where its module file mounts it. Change the `[robots]`\n\
+         \x20   /// settings and this text with them.\n\
          \x20   fn generated() -> String {{\n\
          \x20       format!(\n\
-         \x20           {template:?},\n\
-         \x20           {}\n\
+         \x20           {template:?},{paths}\n\
          \x20       )\n\
-         \x20   }}\n",
-        module_ref("admin", "mount_at")
+         \x20   }}\n"
     );
     (item, "generated()")
 }

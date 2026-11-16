@@ -3,7 +3,8 @@
 Status: accepted (2026-11-16)
 
 The owner's answers and corrections are in §4, §5, §6 and §13. Stage 1
-(one pool, the resolver) is built; see the note under §12. Base:
+(one pool, the resolver) and stage 2 (backoffice: mounts, tabs, RBAC) are
+built; see the notes under §12. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -149,6 +150,23 @@ sections are contribution points. Tabs already work so
 (`Slot::AdminPanels`, `.integration("admin", ..)`); the model gives the
 pattern one name and one API.
 
+One API serves them all: `Manifest::contributes::<K>(Contribution, on)`
+declares an entry and the default of its toggle, and
+`Manifest::collects::<K>` declares the module that collects `K`. A
+contributor asks `Project::collector::<K>()` and writes its entry only
+when the answer is `Some`. The toggle lands in the module file as
+`integrate.<group>`.
+
+`AgentsSection` and `ConfigCheck` have no collecting module: the
+generator collects them (the `AGENTS.md` writer and the generated `check`
+command). Their Kind says so (`Kind::COLLECTED_BY`), the collector is
+always there, and the entry has no toggle in the module file. The entry
+takes the module's key as its name and `true`. **Reason:** a toggle such
+as `integrate.docs` would only let a project hide a rule from its coding
+agent or skip a migration check, and 49 module files would carry a line
+nobody turns off. Such an entry is held to its slot
+(`Slot::contribution`) both ways, not to a `collector` question.
+
 ### 3.5 Exports
 
 A module declares the fields of its module file that other modules may
@@ -203,7 +221,7 @@ Manifest::new("jobs", "a job queue in Postgres ..")
     .requires::<PgPool>("the queue tables live in the project's database")
     .provides::<JobQueue>("the queue, on Postgres (SKIP LOCKED)")
     .contributes::<AdminPanel>(Tab::new("jobs", "the queue: retry, discard"), true)
-    .contributes::<ConfigCheck>("deploy/migrate for [jobs]", true)
+    .contributes::<ConfigCheck>(Contribution::new("jobs", "deploy/migrate for [jobs]"), true)
 
 Manifest::new("jobs-memory", "the queue in memory; gone at restart")
     .provides::<JobQueue>("the queue, in this process")
@@ -642,6 +660,76 @@ roles; tabs on late cells and async traits; `read`/`edit`/`owner` in
 `StaffPolicy` and the roles tab. Exit: `static INSTALLED` 7 -> 0;
 `module_ref("admin", ..)` outside `brocanth-admin` 5 -> 0; `has("admin")`
 24 -> ≤ 4; each tab declares a resource, checked by `check_module`.
+
+**Stage 2: done (2026-11-16).** Measured with `git grep` of `crates/*/src`
+on `91beb93e` (before) and on the stage 2 branch (after):
+
+| Relation | Before (`91beb93e`) | After |
+|---|---|---|
+| a tab's process-wide global (`static INSTALLED: OnceLock`, `RwLock`) | 8 (the 7 of §1, and the jobs queue's `RwLock`) | 0 |
+| `X::installed()` / `install()` for a tab | 9 tabs | 0 |
+| `module_ref("admin", ..)` outside `brocanth-admin` | 5 | 0 |
+| `has("admin")` calls | 25 | 4 |
+| tabs with a declared RBAC resource | 0 | 9 |
+
+Two `static INSTALLED` remain and serve no tab: the jobs panic hook
+(`Once`) and the observe log subscriber (`AtomicBool`). Both are global by
+nature. The four `has("admin")` left: `superuser` (it sets the admin's
+policy, not a tab), `middleware` (the CSP hash of the admin's inline
+script), and the CLI's `create` and `admin` commands.
+
+What was built, and the choices made on the way:
+
+- **Kinds.** `Mount` and `AdminPanel`, both cardinality many.
+  `Manifest::contributes::<K>(Tab::new(resource, what), on)` declares a tab
+  and its RBAC resource, and keeps the module file's toggle
+  (`integrate.admin`). `Manifest::collects::<K>` declares the collector
+  (`admin`). A contributor asks `Project::collector::<AdminPanel>()`, never
+  `has("admin")`. `check_module` holds a tab to its declaration both ways,
+  checks the resource (lower case, no dot), and refuses a module that adds
+  `.panel(` to the admin without declaring a tab.
+- **Mount roles.** `Opt::mount(..).role(MountRole::..)`. `admin` is
+  `Backoffice`; `resource`, `storage-routes`, `auth-oauth` and
+  `oauth-client` are `Machine`. `Project::mounts_with(role)` and
+  `mounts_except(role)` record a question about `Mount`, so a reader
+  declares `uses::<Mount>`. analytics, gtag, robots, sitemap and openapi
+  read every `Backoffice` mount; i18n keeps every non-`Public` mount
+  unprefixed. robots' toggle `integrate.admin` became the option
+  `disallow_backoffice`.
+- **Late cells, not globals.** `brocanth_admin::late::{Late, LateCells}`.
+  The generated `admin_panels(config, late)` makes one cell per tab with
+  `late.cell(|ctx| ctx.provided::<H, _>().cloned())`; the admin's `screen`
+  fills the cells from each request's context, once. A cell belongs to one
+  admin, so two applications in one process see their own handles.
+  Analytics now puts its `Recorder` on the request context; openapi's
+  `Rendered` carries the document. The generated `superuser` file lost its
+  `STORE` static: the roles tab reads the store off the auth services.
+  Why not "a late cell in `Services`" as §5.1 said: the admin is mounted by
+  `pages::router()`, which reads no `Services`. The request context is the
+  per-application path that exists, and a split backoffice replaces the
+  filler with a client.
+- **RBAC.** `brocanth_admin::policy::Level` (`read`, `edit`, `owner`) and
+  `Action::level()`. `StaffPolicy` asks `<resource>.read` to look and
+  `<resource>.edit` for every button and write; `Staff::allows` treats a
+  higher level as holding the lower ones. The old verbs (`view`, `add`,
+  `change`, `delete`, `act`) are gone: a role that held `post.change` must
+  hold `post.edit`. The roles tab: a superuser keeps every button; the
+  owner of a resource opens the tab and gives or takes `read` and `edit`
+  on that resource only; only a superuser gives `owner`. The panel reads
+  the principal from the new `PanelRequest::principal` to narrow the
+  policy's yes, never to widen it.
+- **Path to decoupling, as tests.** `crates/brocanth-admin/tests/decoupling.rs`
+  holds points 1, 2 and 4 of §5.3; `brocanth-auth/tests/roles_panel.rs`
+  holds point 5 (a grant made in the tab changes another member's access
+  with no code change).
+- **Upgrade.** `brocanth add` rewrites an unedited admin file from before
+  the late cells (`brocanth_admin::scaffold::before_late`) and shows the
+  diff for an edited one. A project's own generated plugin files that call
+  `.install()` (cache, jobs, oauth-client, openapi) must drop that line.
+
+Left for later: tab data traits with serde types (`AdminData` and
+`AccountDirectory` are async, the other tabs read a crate handle), and a
+second binary.
 
 **Stage 3 — settings layers and `ConfigSource` (3-4 days).** One
 registration form; secret pointer flags (`_file`, `_env`). Exit:

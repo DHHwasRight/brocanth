@@ -1229,6 +1229,7 @@ impl Admin {
             submission,
             mount: &mount,
             access: Some(&reader),
+            principal,
         };
         match panel.render(request).await? {
             // The panel's own 404, rendered as the admin's, so a panel does
@@ -1382,6 +1383,7 @@ impl Admin {
                 submission,
                 mount: &mount,
                 access: Some(&reader),
+                principal,
             },
             key: record.as_ref().map(|(key, _)| key),
             record: record.as_ref().map(|(_, row)| row),

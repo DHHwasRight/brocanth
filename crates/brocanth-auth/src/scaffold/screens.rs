@@ -33,7 +33,8 @@
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    AgentsSection, Category, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Contribution, Manifest, Module, Opt, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 use super::uses_postgres;
@@ -47,7 +48,7 @@ impl Module for AuthScreens {
             "auth-screens",
             "sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account",
         )
-        .contributes::<AgentsSection>("which pages the account screens own, and how they are changed")
+        .contributes::<AgentsSection>(Contribution::new("auth-screens", "which pages the account screens own, and how they are changed"), true)
         .category(Category::Routes)
         .category(Category::Enhancer)
         .part_of_but_off("auth")

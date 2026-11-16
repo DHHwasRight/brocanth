@@ -1453,15 +1453,26 @@ mod tests {
 
     #[test]
     fn an_admin_file_from_before_admin_panels_is_rewritten_or_shown() {
-        use brocanth_admin::scaffold::{LEGACY_ANALYTICS_PANEL, PANELS};
+        use brocanth_admin::scaffold::{
+            before_late, LEGACY_ANALYTICS_PANEL, PANELS, PANELS_BEFORE_LATE,
+        };
         let file = "src/plugins/admin/mod.rs";
         let picks = ["config", "db", "analytics", "admin"];
         let root = project("addadmin", &picks);
         let now = read(&root, file);
         assert!(now.contains(PANELS), "{now}");
+        let legacy = before_late(&now).replace(PANELS_BEFORE_LATE, LEGACY_ANALYTICS_PANEL);
         // As the generator wrote it before: the tab, with no guard.
-        std::fs::write(root.join(file), now.replace(PANELS, LEGACY_ANALYTICS_PANEL))
-            .expect("write");
+        std::fs::write(root.join(file), &legacy).expect("write");
+        if let Err(e) = add(&root, &["cache"]) {
+            panic!("{}", said(&e));
+        }
+        assert_eq!(read(&root, file), now);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // As the generator wrote it before the late cells: rewritten too.
+        let root = project("addadmin", &picks);
+        std::fs::write(root.join(file), before_late(&now)).expect("write");
         if let Err(e) = add(&root, &["cache"]) {
             panic!("{}", said(&e));
         }
@@ -1470,7 +1481,7 @@ mod tests {
 
         // Edited as well: the add goes on, and the file stays as it is.
         let root = project("addadmin2", &picks);
-        let edited = format!("{}// mine\n", now.replace(PANELS, LEGACY_ANALYTICS_PANEL));
+        let edited = format!("{legacy}// mine\n");
         std::fs::write(root.join(file), &edited).expect("write");
         if let Err(e) = add(&root, &["cache"]) {
             panic!("{}", said(&e));

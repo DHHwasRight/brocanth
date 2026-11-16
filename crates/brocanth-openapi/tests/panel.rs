@@ -213,20 +213,19 @@ fn an_unknown_operation_and_a_post_are_both_the_admins_404() {
 }
 
 #[test]
-fn the_installed_tab_is_a_404_until_the_plugin_installs_its_document() {
-    let late = || {
-        Admin::new(
-            Arc::new(Fixture::blog()),
-            AdminConfig::new()
-                .discovering(Discovery::new().under("blog::models"))
-                .panel(ApiPanel::installed())
-                .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
-        )
-    };
-    assert_eq!(status(&late(), "GET", "/admin/api"), 404);
+fn the_late_tab_is_a_404_until_the_document_arrives() {
+    let cell = brocanth_admin::late::Late::new();
+    let late = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .panel(ApiPanel::late(cell.clone()))
+            .with_policy(policy_fn(|_: &Principal<'_>, _: Request<'_>| true)),
+    );
+    assert_eq!(status(&late, "GET", "/admin/api"), 404);
 
-    OpenApiPlugin::new(OpenApiConfig::new(blog_document())).install();
-    get(&late(), "/admin/api").assert_text("4 operations over 2 paths");
+    assert!(cell.set(OpenApiPlugin::new(OpenApiConfig::new(blog_document())).shared()));
+    get(&late, "/admin/api").assert_text("4 operations over 2 paths");
 }
 
 /// Prints the two screens, for a human who wants to see them.

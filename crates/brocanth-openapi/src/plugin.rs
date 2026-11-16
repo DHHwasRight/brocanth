@@ -47,7 +47,7 @@
 //! part of the API. Hide them when the document is built:
 //! `.hide("/openapi.json", Verb::Get)`.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::NoContext;
@@ -58,20 +58,6 @@ use crate::drift::{render, Format};
 
 /// The document, shared with anything that asks the application for it.
 pub type SharedDocument = Arc<Document>;
-
-/// The first document installed in this process, for the admin tab only.
-///
-/// The admin builds its tabs when the route table is built, before any
-/// plugin derives a document, so its tab reads this when a request comes.
-/// The same seam as the other modules' admin tabs.
-static INSTALLED: OnceLock<SharedDocument> = OnceLock::new();
-
-/// The document [`OpenApiPlugin::install`] installed, if one did.
-#[cfg(feature = "admin")]
-#[must_use]
-pub(crate) fn installed() -> Option<SharedDocument> {
-    INSTALLED.get().cloned()
-}
 
 /// The document an application installed, if it installed one.
 ///
@@ -141,12 +127,6 @@ impl OpenApiPlugin {
     #[must_use]
     pub fn shared(&self) -> SharedDocument {
         Arc::clone(&self.document)
-    }
-
-    /// Makes this document the one the admin tab (`ApiPanel::installed`)
-    /// reads. The first call in a process wins.
-    pub fn install(&self) {
-        let _ = INSTALLED.set(self.shared());
     }
 
     /// The rendered body for one format.

@@ -1,7 +1,7 @@
 //! [`AuditPlugin`] and [`AuditConfig`]: the trail on the request context,
 //! the model hook that feeds it, and the task that writes and purges it.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
@@ -16,13 +16,6 @@ use brocanth_model::plugin::RowWritten;
 #[cfg(not(feature = "postgres"))]
 use crate::store::MemoryStore;
 use crate::trail::Trail;
-
-/// The first trail built in this process, for a panel the admin mounts
-/// before a plugin can hand it one. See [`AuditPlugin::installed`].
-static INSTALLED: OnceLock<Trail> = OnceLock::new();
-
-/// Whether the warning about a second plugin was printed: once per process.
-static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Seconds between two purges: once a day.
 const PURGE_EVERY: u64 = 86_400;
@@ -80,18 +73,6 @@ impl AuditPlugin {
     pub fn trail(&self) -> Trail {
         self.trail.clone()
     }
-
-    /// The trail of the first `AuditPlugin` built in this process.
-    ///
-    /// A generated admin mounts its routes before any plugin can hand it a
-    /// value, so its panel and its journal ask here. A process that builds
-    /// one application has one trail, so "the first" is "the one". A second
-    /// `AuditPlugin` does not replace it: the process prints a warning once,
-    /// and an admin of the second application should take its trail with
-    /// [`crate::admin::install_with`].
-    pub fn installed() -> Option<Trail> {
-        INSTALLED.get().cloned()
-    }
 }
 
 impl Plugin for AuditPlugin {
@@ -103,16 +84,6 @@ impl Plugin for AuditPlugin {
 
     fn new(config: AuditConfig) -> Self {
         let trail = Trail::new(config.retention_days);
-        if INSTALLED.set(trail.clone()).is_err()
-            && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            eprintln!(
-                "warning: [audit] a second AuditPlugin was built in this process; \
-                 `AuditPlugin::installed` keeps the first trail\n\
-                 help: give the second application's admin its own trail with \
-                 `brocanth_audit::admin::install_with(config, plugin.trail())`"
-            );
-        }
         AuditPlugin {
             config,
             trail,

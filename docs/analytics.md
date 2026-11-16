@@ -141,10 +141,11 @@ value is a bound parameter. Days travel as integers
 
 ### 6. The dashboard is an admin tab
 
-With `admin`, the admin module writes one line in its `mount`:
+With `admin`, the module writes two lines in `plugins::admin_panels`:
 
 ```rust
-config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));
 ```
 
 The tab shows one site at a time (decision 7: the server's own, or a
@@ -161,9 +162,11 @@ with presentation attributes, so the screen needs nothing from the
 Content-Security-Policy. It is behind the admin's policy like every tab:
 reading it is `Action::ViewPanel` on `analytics`.
 
-`installed()` resolves the recorder when the tab renders, because a
-generated admin mounts its routes before the plugin is built. The first
-`Analytics` built in a process is the one it finds.
+The tab holds a late cell, because a generated admin mounts its routes
+before the plugin is built. The plugin puts its recorder on the request
+context, and the admin fills the cell from the first request. No
+process-wide global: two applications in one process show their own
+numbers (`docs/module-capabilities.md` §5.1).
 
 **Without `admin`: no endpoint.** Decision: no JSON endpoint behind a token.
 Reason: a token-protected endpoint is a second authentication scheme to get

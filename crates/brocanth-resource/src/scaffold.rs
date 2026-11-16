@@ -43,7 +43,8 @@
 
 use brocanth_scaffold::snippet::module_ref;
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot,
+    AgentsSection, Category, Contribution, Dep, Manifest, Module, MountRole, Opt, Project,
+    Scaffold, Slot,
 };
 
 /// The records API, as a choice on the `brocanth create` menu.
@@ -65,18 +66,25 @@ impl Module for Records {
             "resource",
             "typed CRUD routes over one table, with the policy in the WHERE clause",
         )
-        .contributes::<AgentsSection>("the records API, and its CSRF rule")
+        .contributes::<AgentsSection>(
+            Contribution::new("resource", "the records API, and its CSRF rule"),
+            true,
+        )
         .category(Category::Routes)
         .asked_in("doors", "")
         .adapts_to(
             "middleware-csrf",
             "AGENTS.md says how a fetch caller and a non-browser client get past the CSRF check",
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/api",
-            "Where the records API answers. Every resource is under it.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/api",
+                "Where the records API answers. Every resource is under it.",
+            )
+            // Read by programs, not people.
+            .role(MountRole::Machine),
+        )
         .krate(
             Dep::brocanth("brocanth-resource")
                 // The page-shaped surface and nothing else. `plugin` is the

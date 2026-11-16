@@ -720,6 +720,7 @@ async fn the_admin_tab_escapes_a_receivers_answer_and_hides_the_button_from_a_re
                     submission,
                     mount: "/admin/webhooks",
                     access: None,
+                    principal: brocanth_admin::policy::Principal::anonymous(),
                 })
                 .await
                 .unwrap()

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use oauth2::basic::{BasicClient, BasicErrorResponse, BasicErrorResponseType, BasicTokenType};
@@ -45,9 +45,6 @@ use crate::{Authorized, Error, FlowError};
 
 /// How long a started connection may take, in seconds.
 pub(crate) const FLOW_SECONDS: i64 = 600;
-
-/// The first client installed in this process, for the admin tab.
-static INSTALLED: OnceLock<OauthClient> = OnceLock::new();
 
 /// An access token, and what came with it. Its `Debug` shows no token.
 #[derive(Clone, PartialEq, Eq)]
@@ -375,18 +372,6 @@ impl OauthClient {
             allow_http: false,
             expiry_delta: 10,
         }
-    }
-
-    /// Makes this the client [`OauthClient::installed`] answers. The first
-    /// call in a process wins.
-    pub fn install(&self) {
-        let _ = INSTALLED.set(self.clone());
-    }
-
-    /// The client the plugin installed, for code that runs outside a
-    /// request: the admin tab, a job.
-    pub fn installed() -> Option<OauthClient> {
-        INSTALLED.get().cloned()
     }
 
     /// The providers, by id.

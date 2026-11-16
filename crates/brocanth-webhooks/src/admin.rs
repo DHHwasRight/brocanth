@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts;
 
@@ -22,7 +23,7 @@ const PAGE: i64 = 50;
 
 /// The deliveries tab.
 pub struct DeliveriesPanel {
-    outgoing: Option<Outgoing>,
+    outgoing: Late<Outgoing>,
 }
 
 impl DeliveriesPanel {
@@ -30,19 +31,19 @@ impl DeliveriesPanel {
     /// builds its own.
     pub fn new(outgoing: Outgoing) -> Self {
         Self {
-            outgoing: Some(outgoing),
+            outgoing: Late::ready(outgoing),
         }
     }
 
-    /// A panel over the `Outgoing` the plugin installs. A generated admin
-    /// mounts its routes before any plugin starts, so the panel looks when
-    /// it renders.
-    pub fn installed() -> Self {
-        Self { outgoing: None }
+    /// A panel over an `Outgoing` that arrives later, in `cell`. A
+    /// generated admin mounts its routes before any plugin starts, and
+    /// fills the cell from the first request that carries the `Outgoing`.
+    pub fn late(cell: Late<Outgoing>) -> Self {
+        Self { outgoing: cell }
     }
 
     fn outgoing(&self) -> Option<Outgoing> {
-        self.outgoing.clone().or_else(Outgoing::installed)
+        self.outgoing.get().cloned()
     }
 }
 

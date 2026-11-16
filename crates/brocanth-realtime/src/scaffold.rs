@@ -29,7 +29,7 @@
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Contribution, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
 };
 
 /// The broker, as a choice on the `brocanth create` menu.
@@ -129,7 +129,13 @@ impl Module for Sse {
             "realtime-sse",
             "one long response per subscriber, frames written as they are made",
         )
-        .contributes::<AgentsSection>("how a page streams events over server-sent events")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "realtime-sse",
+                "how a page streams events over server-sent events",
+            ),
+            true,
+        )
         .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
@@ -526,7 +532,10 @@ impl Module for WebSocket {
             "realtime-websocket",
             "a duplex socket per subscriber, frames both ways",
         )
-        .contributes::<AgentsSection>("how a page talks over a WebSocket")
+        .contributes::<AgentsSection>(
+            Contribution::new("realtime-websocket", "how a page talks over a WebSocket"),
+            true,
+        )
         .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")

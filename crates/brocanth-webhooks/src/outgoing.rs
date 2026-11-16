@@ -68,7 +68,7 @@
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
@@ -85,10 +85,6 @@ use crate::sign::{decode_secret, new_message_id, new_secret, sign_standard};
 
 /// The queue the delivery jobs wait on.
 pub const QUEUE: &str = "webhooks";
-
-/// The first [`Outgoing`] the plugin built in this process, for the admin
-/// panel only. The job reads its own from its worker's state.
-static INSTALLED: OnceLock<Outgoing> = OnceLock::new();
 
 /// How many row changes a [`WebhookSink`] holds before it drops one.
 pub const SINK_CAPACITY: usize = 1024;
@@ -289,19 +285,6 @@ CREATE INDEX IF NOT EXISTS brocanth_webhook_deliveries_endpoint
                 allow_private: config.allow_private,
             }),
         })
-    }
-
-    /// The first `Outgoing` installed in this process: what the admin
-    /// panel uses. The delivery job does not: it reads the `Outgoing` its
-    /// worker was given.
-    pub fn installed() -> Option<Outgoing> {
-        INSTALLED.get().cloned()
-    }
-
-    /// Makes this the one [`Outgoing::installed`] answers. The first call
-    /// wins; the plugin makes it.
-    pub fn install(&self) {
-        let _ = INSTALLED.set(self.clone());
     }
 
     /// A worker for the delivery jobs on this queue, with this `Outgoing`
@@ -1130,7 +1113,6 @@ impl<G: ShutdownGrace> Plugin for OutgoingPlugin<G> {
         };
         let outgoing = Outgoing::on_queue(db, queue, &self.config)
             .map_err(|e| PluginError::new(format!("[webhooks_out] {e}")))?;
-        outgoing.install();
         if self.config.migrate {
             let probe = outgoing.clone();
             let migrated = Arc::new(tokio::sync::OnceCell::new());

@@ -26,7 +26,8 @@ use brocanth_scaffold::snippet::{
     configurable, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Contribution, Dep, Manifest, Module, MountRole, Opt, Project,
+    Scaffold, Setting, Slot,
 };
 
 /// The providers this module declares settings for, by catalog id.
@@ -46,7 +47,7 @@ impl Module for AuthOauth {
             "auth-oauth",
             "sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client",
         )
-        .contributes::<AgentsSection>("how provider sign-in is added, and what a callback must check")
+        .contributes::<AgentsSection>(Contribution::new("auth-oauth", "how provider sign-in is added, and what a callback must check"), true)
         .category(Category::Routes)
         .category(Category::Enhancer)
         .part_of_but_off("auth")
@@ -60,11 +61,16 @@ impl Module for AuthOauth {
             "middleware-csrf",
             "the button and the link forms carry the CSRF token",
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/oauth",
-            "Where the sign-in routes answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/oauth",
+                "Where the sign-in routes answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
+            )
+            // A provider calls the callback back: never crawled, counted
+            // or localised.
+            .role(MountRole::Machine),
+        )
         .krate(
             Dep::brocanth("brocanth-auth")
                 .feature("reqwest-client")

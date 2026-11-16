@@ -1,10 +1,10 @@
 //! [`Analytics`]: the plugin, its hook, and the task that writes.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
 use brocanth::plugin_hooks::{
     HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState, Response,
 };
@@ -15,10 +15,6 @@ use crate::classify::{clean_path, clean_query, country, is_bot, referrer_origin,
 use crate::config::AnalyticsConfig;
 use crate::recorder::{Clock, Pending, Recorder};
 use crate::store::{MemoryStore, Store};
-
-/// The first recorder built in this process, for a panel the admin mounts
-/// before it can be handed one. See [`Analytics::installed`].
-static INSTALLED: OnceLock<Recorder> = OnceLock::new();
 
 /// Counts page views of this application, first-party.
 ///
@@ -56,7 +52,6 @@ impl Analytics {
         let clock: Clock = Arc::new(clock);
         let recorder = Recorder::new(config.site.clone(), config.retention_days, clock);
         recorder.attach(store);
-        let _ = INSTALLED.set(recorder.clone());
         Self {
             config,
             recorder,
@@ -69,21 +64,13 @@ impl Analytics {
     pub fn recorder(&self) -> Recorder {
         self.recorder.clone()
     }
-
-    /// The recorder of the first `Analytics` built in this process.
-    ///
-    /// A generated admin mounts its routes before any plugin can hand it a
-    /// value, so its panel asks here, when it renders. A process builds one
-    /// application, so "the first" is "the one". A test that builds
-    /// several hands the panel a recorder instead.
-    pub fn installed() -> Option<Recorder> {
-        INSTALLED.get().cloned()
-    }
 }
 
 impl Plugin for Analytics {
     type Config = AnalyticsConfig;
-    type Provides = NoContext;
+    /// The recorder goes on the request context, so the admin's analytics
+    /// tab reads this application's numbers and no process-wide copy.
+    type Provides = ProvidesContext<Recorder>;
     /// Also the configuration section.
     const NAME: &'static str = "analytics";
     const INSTALLS_HOOKS: bool = true;
@@ -91,7 +78,6 @@ impl Plugin for Analytics {
     fn new(config: AnalyticsConfig) -> Self {
         let clock: Clock = Arc::new(SystemTime::now);
         let recorder = Recorder::new(config.site.clone(), config.retention_days, clock);
-        let _ = INSTALLED.set(recorder.clone());
         Self {
             config,
             recorder,
@@ -200,6 +186,10 @@ impl Plugin for Analytics {
                 )
             })
         })
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(self.recorder.clone());
     }
 }
 

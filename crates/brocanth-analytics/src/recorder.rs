@@ -61,6 +61,8 @@ pub struct Recorder {
     inner: Arc<Inner>,
 }
 
+impl brocanth::plugin_context::ContextItem for Recorder {}
+
 struct Inner {
     site: String,
     retention_days: u32,

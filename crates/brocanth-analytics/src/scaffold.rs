@@ -28,8 +28,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, module_ref, Hooking};
 use brocanth_scaffold::{
-    AgentsSection, Category, ConfigCheck, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold,
-    Setting, Slot,
+    AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, Hook, Manifest, Module,
+    Mount, MountRole, PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// First-party analytics, as a choice on the `brocanth create` menu.
@@ -51,8 +51,8 @@ impl Module for PageViews {
             "Count page views on the server: no cookie, no script, no third party",
         )
         .requires::<PgPool>("the views are rows in the database the `db` module opens; in memory they would vanish at every restart")
-        .contributes::<ConfigCheck>("`deploy/migrate` for `[analytics]`")
-        .contributes::<AgentsSection>("what is counted, and that nothing needs consent")
+        .contributes::<ConfigCheck>(Contribution::new("analytics", "`deploy/migrate` for `[analytics]`"), true)
+        .contributes::<AgentsSection>(Contribution::new("analytics", "what is counted, and that nothing needs consent"), true)
         .krate(
             Dep::brocanth("brocanth-analytics")
                 .feature_with("config", "config")
@@ -65,9 +65,12 @@ impl Module for PageViews {
             "accept beacons at `collector_path` from `collector_origins`",
             Hook::on().phase(brocanth_scaffold::Phase::Guard),
         )
-        .integration(
-            "admin",
-            "an `analytics` tab in the admin, with the page-view numbers",
+        .uses::<Mount>("every `Backoffice` mount, such as the admin, is never counted")
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "analytics",
+                "an `analytics` tab in the admin, with the page-view numbers",
+            ),
             true,
         )
         .absent(
@@ -77,6 +80,14 @@ impl Module for PageViews {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        // The backoffice is never counted. Each path is read from its
+        // module file, never copied into `exclude`: a moved admin needs no
+        // edit here (docs/module-config.md §9).
+        let backoffice = project.mounts_with(MountRole::Backoffice);
+        let exclude: String = backoffice
+            .iter()
+            .map(|(key, field)| format!(".exclude_path({})", module_ref(key, field)))
+            .collect();
         configurable_hooking(
             s,
             project,
@@ -85,21 +96,16 @@ impl Module for PageViews {
                 section: "analytics",
                 ty: "brocanth_analytics::Analytics",
                 config_ty: "brocanth_analytics::AnalyticsConfig",
-                prelude: if project.has("admin") {
-                    format!("{PRELUDE}{PRELUDE_ADMIN}")
-                } else {
+                prelude: if backoffice.is_empty() {
                     PRELUDE.to_string()
+                } else {
+                    format!("{PRELUDE}{PRELUDE_ADMIN}")
                 },
-                // The admin is never counted. Its path is read from its
-                // module file, never copied into `exclude`: a moved admin
-                // needs no edit here (docs/module-config.md §9).
-                adjust: project
-                    .has("admin")
-                    .then(|| format!(".exclude_path({})", module_ref("admin", "mount_at"))),
+                adjust: (!exclude.is_empty()).then_some(exclude),
             },
-            settings(project),
+            settings(!backoffice.is_empty(), project),
         );
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "analytics", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::ConfigChecks)
@@ -108,13 +114,14 @@ impl Module for PageViews {
     }
 }
 
-/// The analytics tab, with the `admin` module. The panel finds the plugin's
-/// recorder when it renders, because the admin's `mount` runs before a
-/// plugin could hand it one.
+/// The analytics tab, when the admin collects tabs. The admin's `mount`
+/// runs before a plugin could hand it the recorder, so the tab holds a cell
+/// the admin fills from the request context.
 const ADMIN_TAB: &str = "// The page views the analytics plugin counts, as a tab.
-config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());";
+let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));";
 
-fn settings(project: &Project) -> Vec<Setting> {
+fn settings(backoffice: bool, project: &Project) -> Vec<Setting> {
     vec![
         Setting::bool("enabled", false, "Count page views. Off installs no hook.").note(
             "False here because this file is the development one: your own visits\n\
@@ -131,7 +138,7 @@ fn settings(project: &Project) -> Vec<Setting> {
             &[],
             "Paths never counted, each with everything under it: \"/drafts\".",
         )
-        .note(if project.has("admin") {
+        .note(if backoffice {
             "The admin is never counted: src/plugins/mod.rs reads its path from\n\
              src/modules/admin.rs."
         } else {
@@ -204,7 +211,13 @@ impl Module for StaticBeacon {
             "beacon",
             "a few lines of script that report each page view to an analytics server; no cookie",
         )
-        .contributes::<AgentsSection>("how the beacon is sent, and that it sets no cookie")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "beacon",
+                "how the beacon is sent, and that it sets no cookie",
+            ),
+            true,
+        )
         .category(Category::Middleware)
         .adapts_to(
             "config",

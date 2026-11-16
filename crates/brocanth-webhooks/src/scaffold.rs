@@ -21,8 +21,8 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    AgentsSection, Category, ConfigCheck, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold,
-    Setting, Slot,
+    AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, Hook, Manifest, Module,
+    PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// The parent: the crate both directions are written in.
@@ -34,7 +34,10 @@ impl Module for Webhooks {
             "webhooks",
             "signed webhooks: verified deliveries in, signed events out; pick a direction below",
         )
-        .contributes::<AgentsSection>("the rule about webhook secrets")
+        .contributes::<AgentsSection>(
+            Contribution::new("webhooks", "the rule about webhook secrets"),
+            true,
+        )
         .category(Category::Enhancer)
         .asked_in(
             "doors",
@@ -83,8 +86,8 @@ impl Module for WebhooksIn {
             "its settings are read from the config file, not written as a literal",
         )
         .uses::<PgPool>("the idempotency keys are rows every instance shares; without it they are in memory")
-        .contributes::<ConfigCheck>("`deploy/migrate` for `[webhooks_in]`, while the keys are in Postgres")
-        .contributes::<AgentsSection>("how a source is verified, and what a handler must not do")
+        .contributes::<ConfigCheck>(Contribution::new("webhooks-in", "`deploy/migrate` for `[webhooks_in]`, while the keys are in Postgres"), true)
+        .contributes::<AgentsSection>(Contribution::new("webhooks-in", "how a source is verified, and what a handler must not do"), true)
         // The idempotency keys in the database, when there is one.
         .krate(krate().feature_with("db", "postgres"))
         // The example event derives `Deserialize`. The config plugin brings
@@ -502,8 +505,8 @@ impl Module for WebhooksOut {
         .part_of_but_off("webhooks")
         .because("it is the outgoing half of `brocanth-webhooks`, which the parent brings")
         .requires::<PgPool>("the endpoints and the delivery log are rows in the `db` module's database")
-        .contributes::<ConfigCheck>("`deploy/migrate` for `[webhooks_out]`")
-        .contributes::<AgentsSection>("how to emit an event inside the caller's transaction")
+        .contributes::<ConfigCheck>(Contribution::new("webhooks-out", "`deploy/migrate` for `[webhooks_out]`"), true)
+        .contributes::<AgentsSection>(Contribution::new("webhooks-out", "how to emit an event inside the caller's transaction"), true)
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -519,9 +522,11 @@ impl Module for WebhooksOut {
         )
         .after("jobs")
         .after("config")
-        .integration(
-            "admin",
-            "a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "webhooks",
+                "a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button",
+            ),
             true,
         )
         .absent(
@@ -543,7 +548,7 @@ impl Module for WebhooksOut {
         if !project.has("config") {
             s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "webhooks-out", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::ConfigChecks)
@@ -552,8 +557,12 @@ impl Module for WebhooksOut {
     }
 }
 
+/// The deliveries tab, when the admin collects tabs. The admin's `mount`
+/// runs before the plugin builds its `Outgoing`, so the tab holds a cell
+/// the admin fills from the request context.
 const ADMIN_TAB: &str = "// The outgoing deliveries, with a Send again button, as a tab.
-config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::installed());";
+let outgoing = late.cell(|ctx| ctx.provided::<brocanth_webhooks::Outgoing, _>().cloned());
+config = config.panel(brocanth_webhooks::admin::DeliveriesPanel::late(outgoing));";
 
 fn outgoing_settings() -> Vec<Setting> {
     vec![

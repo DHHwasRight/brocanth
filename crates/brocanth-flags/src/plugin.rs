@@ -1,7 +1,7 @@
 //! [`FlagsPlugin`] and [`FlagsConfig`]: the copy on the request context, and
 //! the task that keeps it fresh.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
@@ -10,10 +10,6 @@ use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::flags::Flags;
 use crate::store::MemoryStore;
-
-/// The first copy built in this process, for a panel the admin mounts
-/// before a plugin can hand it one. See [`FlagsPlugin::installed`].
-static INSTALLED: OnceLock<Flags> = OnceLock::new();
 
 /// The flag settings: `[flags]` in a config file.
 #[derive(Clone, Debug)]
@@ -59,15 +55,6 @@ impl FlagsPlugin {
     pub fn flags(&self) -> Flags {
         self.flags.clone()
     }
-
-    /// The copy of the first `FlagsPlugin` built in this process.
-    ///
-    /// A generated admin mounts its routes before any plugin can hand it a
-    /// value, so its panel asks here, when it renders. A process builds one
-    /// application, so "the first" is "the one".
-    pub fn installed() -> Option<Flags> {
-        INSTALLED.get().cloned()
-    }
 }
 
 impl Plugin for FlagsPlugin {
@@ -77,11 +64,9 @@ impl Plugin for FlagsPlugin {
     const NAME: &'static str = "flags";
 
     fn new(config: FlagsConfig) -> Self {
-        let flags = Flags::new();
-        let _ = INSTALLED.set(flags.clone());
         FlagsPlugin {
             config,
-            flags,
+            flags: Flags::new(),
             refresher: None,
         }
     }

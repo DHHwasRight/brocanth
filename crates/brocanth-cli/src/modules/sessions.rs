@@ -8,7 +8,8 @@
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    AgentsSection, Category, Manifest, Module, Project, Scaffold, SessionCookie, Setting, Slot,
+    AgentsSection, Category, Contribution, Manifest, Module, Project, Scaffold, SessionCookie,
+    Setting, Slot,
 };
 
 /// Cookie sessions.
@@ -34,7 +35,7 @@ impl Module for Sessions {
             "A session seam to build on (no store; signed sessions are `auth`)",
         )
         .provides::<SessionCookie>("a cookie name and an empty layer; nothing signs or reads it")
-        .contributes::<AgentsSection>("the seam is not a session; accounts are `auth`")
+        .contributes::<AgentsSection>(Contribution::new("sessions", "the seam is not a session; accounts are `auth`"), true)
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {

@@ -74,12 +74,17 @@ use std::sync::{Mutex, PoisonError};
 /// `adapts_to` is asked. The same two-way rule holds for Kinds: each
 /// `project.provider::<K>()` asked is declared with `uses` or `requires`,
 /// and each `uses` is asked. In the first run every Kind the module names
-/// is bound; in the second only what it requires. A contribution point
-/// keeps the rule too: a module that writes a contribution slot
+/// is bound; in the second only what it requires.
+///
+/// Contributions keep the rule too. For a Kind a module collects, each
+/// `project.collector::<K>()` asked is declared with `contributes`, and
+/// each contribution is asked. A module that adds a tab to the admin
+/// declares it, with a valid RBAC resource, and a declared tab is written
+/// when the admin collects tabs. For a Kind the generator collects
+/// ([`crate::kind::Kind::COLLECTED_BY`]), a module that writes its slot
 /// ([`crate::Slot::contribution`], such as `AGENTS.md` sections) declares
-/// `contributes` for its Kind, and a declared contribution is written in
-/// one of the two runs. Each returned line is one broken rule; empty means
-/// none.
+/// `contributes` for it, and a declared contribution is written in one of
+/// the two runs. Each returned line is one broken rule; empty means none.
 ///
 /// ```ignore
 /// let known: Vec<&str> = brocanth_cli::testing::modules()
@@ -132,7 +137,15 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
     let mut asked: Vec<String> = Vec::new();
     let mut asked_kinds: Vec<&str> = Vec::new();
     let mut contributed: Vec<&str> = Vec::new();
-    for (on, bound) in [(&everything, &all_bound), (&alone, &required)] {
+    let tabs = m
+        .contributions
+        .iter()
+        .filter(|(k, _, _)| k.name == <crate::AdminPanel as crate::kind::Kind>::NAME)
+        .count();
+    for (pass, (on, bound)) in [(&everything, &all_bound), (&alone, &required)]
+        .into_iter()
+        .enumerate()
+    {
         let project =
             crate::Project::new("my-blog", "My Blog", on, &everything).with_bindings(bound);
         let mut s = crate::Scaffold::new();
@@ -142,6 +155,24 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         wrong.extend(s.problems().iter().cloned());
         asked.extend(project.asked_keys());
         asked_kinds.extend(project.asked_kinds());
+        // A tab is declared, with its RBAC resource, by the module that
+        // writes it; and a declared tab is written when the admin is there.
+        let panels: String = s.slot(crate::Slot::AdminPanels).collect();
+        if panels.contains(".panel(") && tabs == 0 {
+            wrong.push(format!(
+                "`{}` adds a tab to the admin and declares none: add \
+                 `.contributes::<AdminPanel>(Tab::new(\"<resource>\", \"<what>\"), true)` \
+                 to its manifest",
+                m.key
+            ));
+        }
+        if pass == 0 && tabs > 0 && panels.is_empty() {
+            wrong.push(format!(
+                "`{}` declares a tab and writes nothing into `Slot::AdminPanels` \
+                 when the admin collects tabs",
+                m.key
+            ));
+        }
         for slot in crate::Slot::ALL {
             if let Some(kind) = slot.contribution() {
                 if s.slot_owners(slot).any(|owner| owner == m.key) {
@@ -156,13 +187,14 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         if !m.adds_to(kind) {
             wrong.push(format!(
                 "`{}` writes the slot of {kind} and does not declare it: \
-                 add `.contributes::<{kind}>(\"<what it adds>\")` to its manifest",
-                m.key
+                 add `.contributes::<{kind}>(Contribution::new(\"{}\", \"<what it adds>\"), true)` \
+                 to its manifest",
+                m.key, m.key
             ));
         }
     }
-    for (kind, _) in &m.contributes {
-        if !contributed.contains(&kind.name) {
+    for (kind, _, _) in &m.contributions {
+        if kind.collected_by.is_some() && !contributed.contains(&kind.name) {
             wrong.push(format!(
                 "`{}` declares `contributes::<{kind}>()` and never writes its slot",
                 m.key
@@ -177,6 +209,16 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
             wrong.push(format!(
                 "`{}` asks `project.provider::<{kind}>()` and does not declare it: \
                  add `.uses::<{kind}>(\"<what changes>\")` to its manifest",
+                m.key
+            ));
+        }
+    }
+    // A Kind the generator collects is held by its slot above; it has no
+    // collector to ask about.
+    for (kind, _, _) in &m.contributions {
+        if kind.collected_by.is_none() && !asked_kinds.contains(&kind.name) {
+            wrong.push(format!(
+                "`{}` contributes to {kind} and never asks `project.collector::<{kind}>()`",
                 m.key
             ));
         }
@@ -224,29 +266,17 @@ fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
         .iter()
         .map(|(k, why)| ("provides", *k, *why))
         .chain(m.requires.iter().map(|r| ("requires", r.kind, r.why)))
-        .chain(m.uses.iter().map(|(k, why)| ("uses", *k, *why)))
-        .chain(
-            m.contributes
-                .iter()
-                .map(|(k, why)| ("contributes", *k, *why)),
-        );
+        .chain(m.uses.iter().map(|(k, why)| ("uses", *k, *why)));
     for (how, kind_ref, why) in declared {
         let kind = kind_ref.name;
-        let many = kind_ref.cardinality == crate::kind::Cardinality::Many;
-        if many != (how == "contributes") {
-            wrong.push(if many {
-                format!(
-                    "`{}` declares `{how}::<{kind}>`, and {kind} takes many contributors: \
-                     use `contributes::<{kind}>`",
-                    m.key
-                )
-            } else {
-                format!(
-                    "`{}` declares `contributes::<{kind}>`, and {kind} takes one provider: \
-                     use `provides::<{kind}>`",
-                    m.key
-                )
-            });
+        // A reader of a contribution point declares `uses` (robots reads
+        // every `Mount`); only a provider of one is a mistake.
+        if kind_ref.cardinality == crate::kind::Cardinality::Many && how != "uses" {
+            wrong.push(format!(
+                "`{}` declares `{how}::<{kind}>`, and {kind} takes many contributors: \
+                 use `contributes::<{kind}>`",
+                m.key
+            ));
         }
         if why.is_empty() {
             wrong.push(format!(
@@ -261,6 +291,61 @@ fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
             ));
         }
         named.push((how, kind));
+    }
+    let mut items: Vec<(&str, &str)> = Vec::new();
+    for (kind, item, on) in &m.contributions {
+        if kind.cardinality != crate::kind::Cardinality::Many {
+            wrong.push(format!(
+                "`{}` declares `contributes::<{kind}>`, and {kind} takes one provider: \
+                 use `provides::<{kind}>`",
+                m.key
+            ));
+        }
+        if let Some((first, _)) = named.iter().find(|(_, k)| *k == kind.name) {
+            wrong.push(format!(
+                "`{}` declares `{first}::<{kind}>` and `contributes::<{kind}>`: keep one",
+                m.key
+            ));
+        }
+        if item.what.is_empty() {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind} and does not say what it is",
+                m.key, item.name
+            ));
+        }
+        if !crate::Contribution::valid_name(item.name) {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind}: a name (a tab's RBAC resource) is lower \
+                 case letters, digits, `-` and `_`, so `<resource>.<level>` reads one way",
+                m.key, item.name
+            ));
+        }
+        if kind.collected_by.is_some() {
+            // The generator collects it: one entry per module, its own,
+            // always on.
+            if item.name != m.key {
+                wrong.push(format!(
+                    "`{}` contributes `{}` to {kind}: name the entry after the module, \
+                     `Contribution::new(\"{}\", ..)`, since a module adds only its own",
+                    m.key, item.name, m.key
+                ));
+            }
+            if !on {
+                wrong.push(format!(
+                    "`{}` contributes to {kind} with its toggle off: {} collects it in \
+                     every project and the module file holds no toggle, so pass `true`",
+                    m.key,
+                    kind.collected_by.unwrap_or_default()
+                ));
+            }
+        }
+        if items.contains(&(kind.name, item.name)) {
+            wrong.push(format!(
+                "`{}` contributes `{}` to {kind} twice: each tab is one RBAC resource",
+                m.key, item.name
+            ));
+        }
+        items.push((kind.name, item.name));
     }
     let mut exported: Vec<&str> = Vec::new();
     for export in &m.exports {
@@ -673,7 +758,9 @@ mod tests {
             wrong[0].contains("writes the slot of AgentsSection and does not declare it"),
             "{wrong:?}"
         );
-        let declared = || base().contributes::<AgentsSection>("a rule");
+        let declared = || {
+            base().contributes::<AgentsSection>(crate::Contribution::new("thing", "a rule"), true)
+        };
         let wrong = check_module(
             &Writes {
                 manifest: declared,
@@ -691,13 +778,36 @@ mod tests {
         )
         .is_empty());
         // A Kind that takes one provider is not a contribution point.
-        let wrong = check(|| base().contributes::<PgPool>("a pool"), false);
+        let wrong = check(
+            || base().contributes::<PgPool>(crate::Contribution::new("pool", "a pool"), true),
+            false,
+        );
         assert!(
             wrong.iter().any(|w| w.contains("takes one provider")),
             "{wrong:?}"
         );
         let wrong = check(|| base().provides::<AgentsSection>("a rule"), false);
         assert!(wrong.iter().any(|w| w.contains("takes many")), "{wrong:?}");
+        // The generator collects it: the entry is the module's own, and on.
+        let wrong = check(
+            || {
+                base().contributes::<AgentsSection>(
+                    crate::Contribution::new("other", "a rule"),
+                    false,
+                )
+            },
+            false,
+        );
+        assert!(
+            wrong
+                .iter()
+                .any(|w| w.contains("name the entry after the module")),
+            "{wrong:?}"
+        );
+        assert!(
+            wrong.iter().any(|w| w.contains("with its toggle off")),
+            "{wrong:?}"
+        );
     }
 
     #[test]

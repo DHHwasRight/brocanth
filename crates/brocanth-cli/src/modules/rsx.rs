@@ -6,7 +6,7 @@
 //! each can be left out.
 
 use brocanth_scaffold::{
-    snippet, AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot,
+    snippet, AgentsSection, Category, Contribution, Dep, Manifest, Module, Project, Scaffold, Slot,
 };
 
 /// rsx lives in its own repository, so `--brocanth-path` does not reach it.
@@ -23,7 +23,10 @@ impl Module for Rsx {
             "rsx",
             "`.rsx` templates compiled into the binary; without it a page builds a String",
         )
-        .contributes::<AgentsSection>("how views, layouts and static files are written")
+        .contributes::<AgentsSection>(
+            Contribution::new("rsx", "how views, layouts and static files are written"),
+            true,
+        )
         .category(Category::Renderer)
         .adapts_to("rsx-tailwind", "the layout links the stylesheet")
         .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
@@ -105,7 +108,13 @@ impl Module for Tailwind {
             "rsx-tailwind",
             "a CSS build over the class names in your templates; needs node",
         )
-        .contributes::<AgentsSection>("where the CSS comes from, and how it is built")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "rsx-tailwind",
+                "where the CSS comes from, and how it is built",
+            ),
+            true,
+        )
         .category(Category::External)
         .category(Category::Enhancer)
         .outside_runtime()

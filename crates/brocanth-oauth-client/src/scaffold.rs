@@ -19,8 +19,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    AgentsSection, Category, ConfigCheck, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold,
-    Setting, Slot,
+    AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, Manifest, Module,
+    MountRole, Opt, PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// The built-in providers this module declares settings for.
@@ -35,7 +35,10 @@ impl Module for Oauth {
             "oauth",
             "an OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below",
         )
-        .contributes::<AgentsSection>("how a third-party API is called")
+        .contributes::<AgentsSection>(
+            Contribution::new("oauth", "how a third-party API is called"),
+            true,
+        )
         .category(Category::Enhancer)
         .asked_in(
             "doors",
@@ -84,8 +87,8 @@ impl Module for OauthClient {
             "a connection belongs to a signed-in account, and `auth` holds the sessions",
         )
         .requires::<PgPool>("the tokens are rows in the `db` module's database; a restart must not drop them")
-        .contributes::<ConfigCheck>("`deploy/migrate` for `[oauth_client]`, while the tokens are in Postgres")
-        .contributes::<AgentsSection>("how to connect an account and call its API without reading a token")
+        .contributes::<ConfigCheck>(Contribution::new("oauth-client", "`deploy/migrate` for `[oauth_client]`, while the tokens are in Postgres"), true)
+        .contributes::<AgentsSection>(Contribution::new("oauth-client", "how to connect an account and call its API without reading a token"), true)
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -98,16 +101,23 @@ impl Module for OauthClient {
             "oauth-client-memory",
             "the tokens are kept in memory, and [oauth_client] has no migrate",
         )
-        .integration(
-            "admin",
-            "a tab at /admin/connections: every connection without its tokens, and a Revoke button",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "connections",
+                "a tab at /admin/connections: every connection without its tokens, and a Revoke button",
+            ),
             true,
         )
-        .option(Opt::mount(
-            "mount_at",
-            "/connections",
-            "Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
-        ))
+        .option(
+            Opt::mount(
+                "mount_at",
+                "/connections",
+                "Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback.",
+            )
+            // A provider calls the callback back: never crawled, counted
+            // or localised.
+            .role(MountRole::Machine),
+        )
         .krate(
             Dep::brocanth("brocanth-oauth-client")
                 .feature_unless("oauth-client-memory", "postgres")
@@ -152,7 +162,7 @@ impl Module for OauthClient {
             .line(format!("{mount_at}.to_string()"));
         s.at(Slot::PagesRoutes)
             .line(format!("{mount_at}.to_owned() + \"/{{*rest}}\""));
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "oauth-client", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         if !project.has("oauth-client-memory") {
@@ -164,8 +174,15 @@ impl Module for OauthClient {
     }
 }
 
+/// The connections tab, when the admin collects tabs. The admin's `mount`
+/// runs before the plugin builds its client, so the tab holds a cell the
+/// admin fills from the request context.
 const ADMIN_TAB: &str = "// Every connection, without its tokens, with a Revoke button, as a tab.
-config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::installed());";
+let client = late.cell(|ctx| {
+    ctx.provided::<brocanth_oauth_client::OauthClient, _>()
+        .cloned()
+});
+config = config.panel(brocanth_oauth_client::admin::ConnectionsPanel::late(client));";
 
 const CLIENT_AGENTS: &str = "\n\
     ## Connected accounts\n\
@@ -196,7 +213,7 @@ impl Module for OauthClientMemory {
             "oauth-client-memory",
             "the connected accounts in this process's memory; for tests and development, gone at restart",
         )
-        .contributes::<AgentsSection>("the tokens are lost at restart; remove it before production")
+        .contributes::<AgentsSection>(Contribution::new("oauth-client-memory", "the tokens are lost at restart; remove it before production"), true)
         .category(Category::Enhancer)
         .asked_in("doors", "")
         .part_of_but_off("oauth")
@@ -646,7 +663,6 @@ impl Plugin for OauthClientPlugin {
         let client = builder
             .build()
             .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
-        client.install();
         let secure = base.starts_with("https://");
         let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
         self.client = Some(client);

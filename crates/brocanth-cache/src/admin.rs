@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::view::render;
 
@@ -79,8 +80,9 @@ pub struct CachePanel {
 enum Source {
     /// Handed over at build time.
     Given(Arc<dyn Cache>),
-    /// [`CacheHandle::installed`], read when the panel renders.
-    Installed,
+    /// A cell the application fills at start, read when the panel
+    /// renders.
+    Late(Late<CacheHandle>),
 }
 
 impl CachePanel {
@@ -89,15 +91,15 @@ impl CachePanel {
         Self::from_source(Source::Given(cache))
     }
 
-    /// The panel over the cache the process installed
-    /// ([`CacheHandle::install`]), read each time it renders.
+    /// The panel over a cache that arrives later, in `cell`.
     ///
     /// For an admin built before the cache opens: a generated project
     /// builds its admin with the route table, and its cache plugin opens
-    /// the cache at `before_start`, after that. Before any cache is
-    /// installed, the tab says so.
-    pub fn installed() -> Self {
-        Self::from_source(Source::Installed)
+    /// the cache at `before_start`, after that. The admin fills the cell
+    /// from the first request that carries the [`CacheHandle`]. Until then
+    /// the tab says so.
+    pub fn late(cell: Late<CacheHandle>) -> Self {
+        Self::from_source(Source::Late(cell))
     }
 
     fn from_source(source: Source) -> Self {
@@ -158,14 +160,9 @@ impl CachePanel {
     fn cache(&self) -> Result<Arc<dyn Cache>, AdminError> {
         match &self.source {
             Source::Given(cache) => Ok(Arc::clone(cache)),
-            Source::Installed => CacheHandle::installed()
-                .map(|handle| Arc::clone(handle.inner()))
-                .ok_or_else(|| {
-                    AdminError::Render(rsx::Error::custom(
-                        "no cache is installed in this process\n\
-                         help: register the cache plugin; it installs its cache at startup",
-                    ))
-                }),
+            Source::Late(cell) => cell
+                .require("cache")
+                .map(|handle| Arc::clone(handle.inner())),
         }
     }
 

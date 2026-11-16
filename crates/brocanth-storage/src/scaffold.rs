@@ -40,8 +40,8 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Hook, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting,
-    Slot,
+    AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, MountRole, Opt, PgPool,
+    Project, Scaffold, Setting, Slot,
 };
 
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
@@ -533,7 +533,7 @@ impl Module for StorageRoutes {
             "storage-routes",
             "POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token",
         )
-        .contributes::<AgentsSection>("which file routes exist, and how a file is served")
+        .contributes::<AgentsSection>(Contribution::new("storage-routes", "which file routes exist, and how a file is served"), true)
         .category(Category::Middleware)
         .part_of_but_off("storage")
         .because("it is the HTTP edge of `brocanth-storage`, which the parent brings")
@@ -570,11 +570,15 @@ impl Module for StorageRoutes {
             "copy an upload form's CSRF field into the header the CSRF check reads",
             Hook::on().phase(brocanth_scaffold::Phase::Guard),
         )
-        .option(Opt::mount(
-            "path",
-            "/files",
-            "Where the routes answer: uploads at {path}, files at {path}/{address}.",
-        ))
+        .option(
+            Opt::mount(
+                "path",
+                "/files",
+                "Where the routes answer: uploads at {path}, files at {path}/{address}.",
+            )
+            // Uploads and downloads, not pages.
+            .role(MountRole::Machine),
+        )
         .option(Opt::bool(
             "public",
             false,

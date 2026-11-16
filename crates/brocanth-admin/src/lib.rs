@@ -85,6 +85,8 @@ pub mod inline;
 #[cfg(feature = "runtime")]
 pub mod journal;
 #[cfg(feature = "runtime")]
+pub mod late;
+#[cfg(feature = "runtime")]
 pub mod model;
 #[cfg(feature = "runtime")]
 pub mod paging;
@@ -131,6 +133,8 @@ mod templates {
 
 #[cfg(feature = "runtime")]
 pub use admin::{Admin, AdminError, Response, Route};
+#[cfg(feature = "runtime")]
+pub use late::{Late, LateCells};
 
 /// The one inline script of the admin layout that is not dp-swap's own
 /// partial script. A Content-Security-Policy allows it by its hash:
@@ -214,7 +218,7 @@ pub use paging::Page;
 #[cfg(feature = "runtime")]
 pub use plugin::{AdminPlugin, AdminSetup};
 #[cfg(feature = "runtime")]
-pub use policy::{policy_fn, Action, DenyAll, Policy, Principal};
+pub use policy::{policy_fn, Action, DenyAll, Level, Policy, Principal};
 #[cfg(feature = "runtime")]
 pub use query::{Direction, ListQuery, Sort};
 #[cfg(feature = "runtime")]

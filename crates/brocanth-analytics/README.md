@@ -130,13 +130,15 @@ use std::sync::Arc;
 
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_body::Body;
-use brocanth::plugin_context::Base;
+use brocanth::plugin_context::{Base, With};
 use brocanth::plugin_routes::{Handler, RouteCx};
 use brocanth::routing::{Router, Verb};
 use brocanth_analytics::{Analytics, AnalyticsConfig, MemoryStore};
 use brocanth_test::{TestClient, TestRequest};
 
-let page: Handler<Base> = Box::new(|_cx: &mut RouteCx<'_, Base>| {
+// The plugin puts its recorder on the request context.
+type Cx = With<brocanth_analytics::Recorder, Base>;
+let page: Handler<Cx> = Box::new(|_cx: &mut RouteCx<'_, Cx>| {
     Ok(http::Response::builder()
         .header("content-type", "text/html; charset=utf-8")
         .body(Body::from(b"<h1>Hello</h1>".to_vec()))

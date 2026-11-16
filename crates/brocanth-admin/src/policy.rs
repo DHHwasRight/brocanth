@@ -92,6 +92,78 @@ impl Action {
     }
 }
 
+impl Action {
+    /// The access level the action needs on its subject's RBAC resource, or
+    /// `None` for [`Action::ViewIndex`], which has no subject.
+    ///
+    /// Reading is [`Level::Read`]; every button and every write is
+    /// [`Level::Edit`]. Nothing asks for [`Level::Owner`]: an owner gives
+    /// and takes the other two, in the roles tab.
+    ///
+    /// ```
+    /// use brocanth_admin::policy::{Action, Level};
+    ///
+    /// assert_eq!(Action::ViewList.level(), Some(Level::Read));
+    /// assert_eq!(Action::ActOnPanel.level(), Some(Level::Edit));
+    /// assert_eq!(Action::ViewIndex.level(), None);
+    /// ```
+    pub fn level(self) -> Option<Level> {
+        match self {
+            Action::ViewIndex => None,
+            Action::ViewList | Action::ViewDetail | Action::ViewPanel => Some(Level::Read),
+            Action::Create | Action::Update | Action::Delete | Action::ActOnPanel => {
+                Some(Level::Edit)
+            }
+        }
+    }
+}
+
+/// How much a role may do on one RBAC resource: a tab, or a model.
+///
+/// A role stores a level as the permission string `<resource>.<level>`:
+/// `jobs.read`, `post.edit`, `cache.owner`. Each level includes the ones
+/// below it. See `docs/module-capabilities.md` §5.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Level {
+    /// See the tab or the model's screens.
+    Read,
+    /// [`Level::Read`], plus every button and write.
+    Edit,
+    /// [`Level::Edit`], plus give or take `read` and `edit` on this
+    /// resource to other staff. Only a superuser gives `owner`.
+    Owner,
+}
+
+impl Level {
+    /// Every level, lowest first.
+    pub const ALL: [Level; 3] = [Level::Read, Level::Edit, Level::Owner];
+
+    /// The word in a permission string: `read`, `edit`, `owner`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Read => "read",
+            Level::Edit => "edit",
+            Level::Owner => "owner",
+        }
+    }
+
+    /// The level a word names.
+    pub fn parse(word: &str) -> Option<Level> {
+        Level::ALL.into_iter().find(|l| l.as_str() == word)
+    }
+
+    /// The permission string for this level on `resource`: `jobs.edit`.
+    pub fn on(self, resource: &str) -> String {
+        format!("{resource}.{}", self.as_str())
+    }
+}
+
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

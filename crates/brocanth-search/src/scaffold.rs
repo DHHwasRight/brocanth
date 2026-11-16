@@ -21,7 +21,8 @@
 
 use brocanth_scaffold::snippet::module_ref;
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Slot,
+    AgentsSection, Category, Contribution, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold,
+    Slot,
 };
 
 /// Site search, as a choice on the `brocanth create` menu.
@@ -33,7 +34,7 @@ impl Module for Search {
             "search",
             "Postgres full-text and trigram search: a site index, its migration, a page at /search",
         )
-        .contributes::<AgentsSection>("how a model is searched")
+        .contributes::<AgentsSection>(Contribution::new("search", "how a model is searched"), true)
         .category(Category::Routes)
         .requires::<PgPool>("the index is a table and the page queries it through the `db` pool")
         .needs(

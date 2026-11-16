@@ -57,6 +57,7 @@ use async_trait::async_trait;
 use crate::admin::AdminError;
 use crate::form::Submission;
 use crate::model::{PrimaryKey, Row};
+use crate::policy::Principal;
 
 /// A tab contributed by another crate.
 #[async_trait]
@@ -141,6 +142,14 @@ pub struct PanelRequest<'a> {
     /// sets it; `None` is a request built by hand, such as a test, and a
     /// panel then shows no record's values.
     pub access: Option<&'a dyn RecordAccess>,
+    /// Who is asking, as the application spells it: the value the policy
+    /// was given. Opaque here, as it is to the admin.
+    ///
+    /// For a tab whose buttons depend on who presses them, past the
+    /// policy's yes: the roles tab lets an owner of `jobs` give
+    /// `jobs.read`, and nothing else. The admin has already asked the
+    /// policy about this tab; a panel narrows that answer, never widens it.
+    pub principal: Principal<'a>,
 }
 
 impl std::fmt::Debug for PanelRequest<'_> {
@@ -153,6 +162,7 @@ impl std::fmt::Debug for PanelRequest<'_> {
             .field("submission", &self.submission)
             .field("mount", &self.mount)
             .field("access", &self.access.is_some())
+            .field("principal", &self.principal)
             .finish()
     }
 }

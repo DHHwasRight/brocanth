@@ -16,11 +16,11 @@
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
+use brocanth_admin::late::Late;
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts;
 
 use crate::day::Day;
-use crate::plugin::Analytics;
 use crate::recorder::Recorder;
 use crate::store::{Dimension, Line, Report};
 
@@ -29,35 +29,26 @@ const RANGES: [u32; 3] = [7, 30, 90];
 
 /// The analytics tab.
 pub struct AnalyticsPanel {
-    source: Source,
-}
-
-enum Source {
-    Recorder(Recorder),
-    Installed,
+    recorder: Late<Recorder>,
 }
 
 impl AnalyticsPanel {
     /// A tab over this recorder.
     pub fn new(recorder: Recorder) -> Self {
         Self {
-            source: Source::Recorder(recorder),
+            recorder: Late::ready(recorder),
         }
     }
 
-    /// A tab over [`Analytics::installed`], resolved when it renders: for a
-    /// generated admin, which mounts before the plugin is built.
-    pub fn installed() -> Self {
-        Self {
-            source: Source::Installed,
-        }
+    /// A tab over a recorder that arrives later, in `cell`: for a generated
+    /// admin, which mounts before the plugin is built. The admin fills the
+    /// cell from the first request that carries the [`Recorder`].
+    pub fn late(cell: Late<Recorder>) -> Self {
+        Self { recorder: cell }
     }
 
     fn recorder(&self) -> Option<Recorder> {
-        match &self.source {
-            Source::Recorder(r) => Some(r.clone()),
-            Source::Installed => Analytics::installed(),
-        }
+        self.recorder.get().cloned()
     }
 }
 

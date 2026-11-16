@@ -60,6 +60,6 @@ fn with_the_admin_the_document_has_a_tab_and_hides_the_admin() {
         plugin.contains(".hide_under(crate::modules::admin::MODULE.mount_at)"),
         "{plugin}"
     );
-    assert!(plugin.contains("served.install();"), "{plugin}");
-    assert!(file("src/plugins/mod.rs").contains("ApiPanel::installed()"));
+    assert!(plugin.contains("document: served.shared(),"), "{plugin}");
+    assert!(file("src/plugins/mod.rs").contains("ApiPanel::late(document)"));
 }

@@ -32,7 +32,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, Mount, MountRole, Project, Scaffold, Setting, Slot,
+};
 
 /// The base URL a new project starts with: the address `serve` listens on.
 pub(crate) const DEFAULT_BASE: &str = "http://localhost:3000";
@@ -52,9 +54,8 @@ impl Module for Sitemap {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "admin",
-            "the admin is excluded, at the path src/modules/admin.rs mounts it",
+        .uses::<Mount>(
+            "every `Backoffice` mount, such as the admin, is excluded, at the path its module file mounts it",
         )
         .adapts_to("jt", "the JSON page /status is excluded")
         .adapts_to("realtime-sse", "the event stream /realtime/events is excluded")
@@ -147,37 +148,41 @@ fn settings(project: &Project) -> Vec<Setting> {
             &excluded(project),
             "Path prefixes kept out of the sitemap: \"/drafts\".",
         )
-        .note(if project.has("admin") {
+        .note(if project.mounts_with(MountRole::Backoffice).is_empty() {
+            ""
+        } else {
             "The admin is never listed: src/plugins/sitemap/mod.rs reads its path from\n\
              src/modules/admin.rs."
-        } else {
-            ""
         }),
     ]
 }
 
-/// The plugin's `new`. With `admin`, it adds the admin's path to `exclude`,
-/// read from src/modules/admin.rs and never copied into the setting: a
-/// moved admin needs no edit, and a file that sets `exclude` cannot list
-/// the admin (docs/module-config.md §9).
+/// The plugin's `new`. With a `Backoffice` mount (the admin), it adds each
+/// path to `exclude`, read from the mount's module file and never copied
+/// into the setting: a moved admin needs no edit, and a file that sets
+/// `exclude` cannot list the admin (docs/module-config.md §9).
 fn admin_exclusion(project: &Project) -> String {
-    if !project.has("admin") {
+    let backoffice = project.mounts_with(MountRole::Backoffice);
+    if backoffice.is_empty() {
         return "    fn new(config: Settings) -> Self {\n        \
                 Self { settings: config }\n    }\n"
             .to_string();
     }
-    format!(
-        "    fn new(mut config: Settings) -> Self {{\n\
-         \x20       // The admin, where src/modules/admin.rs mounts it: no page a\n\
-         \x20       // visitor reads.\n\
-         \x20       let admin = {}.to_string();\n\
-         \x20       if !config.exclude.contains(&admin) {{\n\
-         \x20           config.exclude.push(admin);\n\
-         \x20       }}\n\
-         \x20       Self {{ settings: config }}\n\
-         \x20   }}\n",
-        module_ref("admin", "mount_at")
-    )
+    let mut out = "    fn new(mut config: Settings) -> Self {\n\
+                   \x20       // The backoffice, where its module file mounts it: no page a\n\
+                   \x20       // visitor reads.\n"
+        .to_string();
+    for (key, field) in backoffice {
+        out.push_str(&format!(
+            "        let admin = {}.to_string();\n\
+             \x20       if !config.exclude.contains(&admin) {{\n\
+             \x20           config.exclude.push(admin);\n\
+             \x20       }}\n",
+            module_ref(key, field)
+        ));
+    }
+    out.push_str("        Self { settings: config }\n    }\n");
+    out
 }
 
 /// `src/pages/sitemap.xml.rs`, with its test. With `admin`, the test checks
@@ -191,13 +196,18 @@ fn page_rs(project: &Project) -> String {
         "        // The index page, at the base URL of the development file.\n        \
          assert!(xml.contains(\"/</loc>\"), \"{xml}\");\n"
     };
-    let admin = if project.has("admin") {
-        "        // The admin, wherever src/modules/admin.rs mounts it.\n        \
-         let admin = format!(\"{}</loc>\", crate::modules::admin::MODULE.mount_at);\n        \
-         assert!(!xml.contains(&admin), \"{xml}\");\n"
-    } else {
-        ""
-    };
+    let admin: String = project
+        .mounts_with(MountRole::Backoffice)
+        .into_iter()
+        .map(|(key, field)| {
+            format!(
+                "        // The backoffice, wherever its module file mounts it.\n        \
+                 let admin = format!(\"{{}}</loc>\", {});\n        \
+                 assert!(!xml.contains(&admin), \"{{xml}}\");\n",
+                module_ref(key, field)
+            )
+        })
+        .collect();
     format!(
         r#"{PAGE_RS}
 #[cfg(test)]

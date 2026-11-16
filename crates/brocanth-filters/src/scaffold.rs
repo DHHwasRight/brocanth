@@ -15,7 +15,9 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Contribution, Dep, Manifest, Module, Project, Scaffold, Slot,
+};
 
 /// Typed list filters, as a choice on the `brocanth create` menu.
 pub struct Filters;
@@ -26,7 +28,7 @@ impl Module for Filters {
             "filters",
             "typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE",
         )
-        .contributes::<AgentsSection>("how a list is filtered")
+        .contributes::<AgentsSection>(Contribution::new("filters", "how a list is filtered"), true)
         .category(Category::Renderer)
         .outside_runtime()
         .needs(

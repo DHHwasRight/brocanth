@@ -1593,7 +1593,14 @@ pub fn layer(name: &str) -> Option<Layer> {
 
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    _late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     // "Delete selected" on every model that allows a delete, after a
     // confirmation page. A model leaves it off with
     // `m.without_action("delete_selected")` in src/plugins/admin/mod.rs.
@@ -2109,7 +2116,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 0900f3401f8ccaf3
+// brocanth-digest: 893982816033c598
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2650,7 +2657,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -2733,14 +2740,19 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         config = config.stylesheet(href);
     }
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     // Built by the first request, over the ORM: see `OverOrm`.
     let admin = Arc::new(OverOrm::new(config));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -2808,11 +2820,15 @@ impl OverOrm {
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<OverOrm>) -> Handler {
+fn screen(admin: Arc<OverOrm>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             let admin = admin.for_request(ctx)?;
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {

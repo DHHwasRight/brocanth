@@ -558,6 +558,7 @@ async fn the_admin_tab_lists_connections_without_tokens_and_hides_the_button_fro
                         submission,
                         mount: "/admin/connections",
                         access: None,
+                        principal: brocanth_admin::policy::Principal::anonymous(),
                     })
                     .await
                     .unwrap()

@@ -14,7 +14,7 @@ The wizard calls it: *Send signed webhooks, retried through jobs*.
 | Needs | [`jobs`](jobs.md): a delivery is a job, and its retries, backoff and dead letter are the queue's |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | [`jobs`](jobs.md), [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-webhooks` (feature `out`; `config` and `admin` with those modules), `serde_json` |

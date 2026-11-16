@@ -57,7 +57,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, Project, Scaffold, Setting,
+    Slot,
 };
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
@@ -73,7 +74,13 @@ impl Module for Middleware {
             "middleware",
             "proxy headers, method override, canonical host, content types, CORS",
         )
-        .contributes::<AgentsSection>("which edge middleware is registered, and where")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "middleware",
+                "which edge middleware is registered, and where",
+            ),
+            true,
+        )
         .category(Category::Middleware)
         .asked_in("doors", "The edge hooks: proxies, CORS, a canonical host")
         .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
@@ -187,7 +194,10 @@ impl Module for Csrf {
             "middleware-csrf",
             "a double-submit cookie, checked on every verb that is not a read",
         )
-        .contributes::<AgentsSection>("every form carries the CSRF token")
+        .contributes::<AgentsSection>(
+            Contribution::new("middleware-csrf", "every form carries the CSRF token"),
+            true,
+        )
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -315,7 +325,7 @@ impl Module for SecurityHeaders {
             "middleware-security-headers",
             "HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash",
         )
-        .contributes::<AgentsSection>("how to inline a script under the Content-Security-Policy")
+        .contributes::<AgentsSection>(Contribution::new("middleware-security-headers", "how to inline a script under the Content-Security-Policy"), true)
         .category(Category::Middleware)
         .adapts_to("admin", "the CSP allows the admin's inline script by hash")
         .adapts_to(
@@ -473,7 +483,7 @@ impl Module for RateLimit {
             "middleware-rate-limit",
             "a fixed window per address, session or user, per group of routes; 429 with Retry-After",
         )
-        .contributes::<AgentsSection>("the example rule, and that a limit is asked for, not invented")
+        .contributes::<AgentsSection>(Contribution::new("middleware-rate-limit", "the example rule, and that a limit is asked for, not invented"), true)
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -712,7 +722,7 @@ impl Module for ConditionalGet {
             "middleware-conditional-get",
             "a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since",
         )
-        .contributes::<AgentsSection>("how a page sets an ETag or Last-Modified")
+        .contributes::<AgentsSection>(Contribution::new("middleware-conditional-get", "how a page sets an ETag or Last-Modified"), true)
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -805,7 +815,13 @@ impl Module for Compression {
             "middleware-compression",
             "gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream",
         )
-        .contributes::<AgentsSection>("what is compressed, and what is left alone")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "middleware-compression",
+                "what is compressed, and what is left alone",
+            ),
+            true,
+        )
         .category(Category::Middleware)
         .krate(
             Dep::brocanth("brocanth-middleware")
@@ -929,7 +945,10 @@ impl Module for Flash {
             "flash",
             "one-shot messages across a redirect, in a signed cookie, drawn into the layout",
         )
-        .contributes::<AgentsSection>("how a page sets a message for the next page")
+        .contributes::<AgentsSection>(
+            Contribution::new("flash", "how a page sets a message for the next page"),
+            true,
+        )
         .category(Category::Middleware)
         .adapts_to(
             "config",

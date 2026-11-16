@@ -23,7 +23,8 @@
 
 use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AdminPanel, AgentsSection, Category, Contribution, Dep, Manifest, Module, PgPool, Project,
+    Scaffold, Setting, Slot, Tab,
 };
 
 use super::uses_postgres;
@@ -37,7 +38,7 @@ impl Module for Superuser {
             "superuser",
             "operator accounts that pass every admin check, and a createsuperuser command",
         )
-        .contributes::<AgentsSection>("how a superuser is made, and that none is made in code")
+        .contributes::<AgentsSection>(Contribution::new("superuser", "how a superuser is made, and that none is made in code"), true)
         .category(Category::Enhancer)
         .needs(
             "auth",
@@ -165,14 +166,12 @@ const SUPERUSER_RS: &str = r##"//! Superusers: operator accounts that pass every
 //! };
 //! ```
 
-use std::sync::{Arc, LazyLock, OnceLock};
-
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_auth::{ensure_superuser, Staff, SuperuserOutcome};
 
 use crate::pages::{Ctx, Error};
-use crate::plugins::auth::{Services, Store};
+use crate::plugins::auth::Services;
 
 /// The superuser the server makes at start: `[superuser]` in the config
 /// file, or `$<APP>_SUPERUSER__<KEY>`.
@@ -194,17 +193,6 @@ impl Default for Settings {
             password_env: "@VAR@".to_string(),
         }
     }
-}
-
-/// The accounts store, once the auth plugin has built it. The admin's
-/// roles tab reads it: the admin is built with the route table, before any
-/// plugin starts.
-static STORE: LazyLock<Arc<OnceLock<Arc<Store>>>> = LazyLock::new(Default::default);
-
-/// The cell [`STORE`] fills at startup.
-#[allow(dead_code)] // read by the roles tab, with `roles`
-pub fn store() -> Arc<OnceLock<Arc<Store>>> {
-    Arc::clone(&STORE)
 }
 
 /// The signed-in member of staff, or `None`: no session, a pre-login one,
@@ -261,8 +249,9 @@ impl Plugin for Superuser {
     }
 
     fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        let services = lc.require_service::<Services>()?;
-        let _ = STORE.set(Arc::clone(services.store()));
+        // The auth plugin publishes its services first, or the start stops
+        // here with a `help:` line rather than at the first sign-in.
+        lc.require_service::<Services>()?;
         Ok(())
     }
 
@@ -418,15 +407,17 @@ impl Module for Roles {
             "roles",
             "roles that grant permissions, stored with the accounts, for staff and the admin",
         )
-        .contributes::<AgentsSection>("how roles grant staff access, and who may change them")
+        .contributes::<AgentsSection>(Contribution::new("roles", "how roles grant staff access, and who may change them"), true)
         .category(Category::Enhancer)
         .needs(
             "superuser",
             "only a superuser gives a role, and `superuser` reads the signed-in member of staff",
         )
-        .integration(
-            "admin",
-            "a Roles tab where a superuser defines roles and gives them to accounts",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "roles",
+                "a Roles tab where a superuser defines roles and gives them to accounts, and the owner of a tab gives read or edit on it",
+            ),
             true,
         )
         .asked_in("doors", "Roles and permissions for staff")
@@ -445,7 +436,7 @@ impl Module for Roles {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/roles/mod.rs", ROLES_RS.to_string());
         s.at(Slot::PluginsMod).line("pub mod roles;");
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "roles", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         s.at(Slot::AgentsSections).block(ROLES_AGENTS.to_string());
@@ -453,23 +444,30 @@ impl Module for Roles {
 }
 
 /// The roles tab, behind `integrate.admin`.
-const ADMIN_TAB: &str = "// Roles: a superuser defines them and gives them to accounts.
-let roles = brocanth_auth::admin::RolesPanel::late(crate::plugins::superuser::store());
-config = config.panel(roles);";
+const ADMIN_TAB: &str = "// Roles: a superuser defines them and gives them to accounts; the owner
+// of a tab gives `read` or `edit` on it.
+let store = late.cell(|ctx| {
+    let auth = ctx.provided::<crate::plugins::auth::Services, _>()?;
+    Some(std::sync::Arc::clone(auth.store()))
+});
+config = config.panel(brocanth_auth::admin::RolesPanel::late(store));";
 
 const ROLES_RS: &str = r##"//! Roles: named sets of permissions, given to accounts.
 //!
 //! Written once by `brocanth create`. This file is yours.
 //!
-//! A permission is a string. The admin asks for `<model>.view`, `.add`,
-//! `.change` and `.delete` for a model, and `<panel>.view` and `.act` for a
-//! tab. A page of yours may ask for any other. A superuser holds every
-//! permission. Only a superuser changes roles, in the admin's Roles tab.
+//! A permission is a string. The admin asks for a level on a resource:
+//! `<resource>.read` to see a tab or a model's screens, `<resource>.edit`
+//! for its buttons and writes. `<resource>.owner` holds both, and lets its
+//! holder give `read` or `edit` on that resource in the admin's Roles tab.
+//! A page of yours may ask for any other permission. A superuser holds
+//! every permission. Only a superuser defines roles, gives them to
+//! accounts, and gives `owner`.
 //!
 //! Who may see a page is a role question:
 //!
 //! ```ignore
-//! let staff = crate::plugins::roles::require(ctx, "report.view").await?;
+//! let staff = crate::plugins::roles::require(ctx, "report.read").await?;
 //! ```
 //!
 //! Which rows is a row question, and it goes into the query through
@@ -479,7 +477,7 @@ const ROLES_RS: &str = r##"//! Roles: named sets of permissions, given to accoun
 //! ```ignore
 //! fn update(&self, who: &Visitor) -> EntityPred<Post> {
 //!     // Editors change every post; everybody else changes their own.
-//!     who.staff.gate("post.change").or(Pred::eq(PostColumn::AuthorId, who.id))
+//!     who.staff.gate("post.edit").or(Pred::eq(PostColumn::AuthorId, who.id))
 //! }
 //! ```
 

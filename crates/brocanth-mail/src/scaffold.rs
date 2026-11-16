@@ -44,8 +44,8 @@
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    AgentsSection, Category, Dep, JobQueue, Manifest, Module, PgPool, Project, Scaffold, Setting,
-    Slot,
+    AgentsSection, Category, Contribution, Dep, JobQueue, Manifest, Module, PgPool, Project,
+    Scaffold, Setting, Slot,
 };
 
 /// Mail, as a choice on the `brocanth create` menu.
@@ -67,7 +67,13 @@ impl Module for Mail {
         )
         .uses::<PgPool>("the application opens Postgres, so the test that starts it is left out")
         .asked_in("behaviour", "Send mail")
-        .contributes::<AgentsSection>("how a page sends mail, and never through `Smtp` itself")
+        .contributes::<AgentsSection>(
+            Contribution::new(
+                "mail",
+                "how a page sends mail, and never through `Smtp` itself",
+            ),
+            true,
+        )
         .krate(
             Dep::brocanth("brocanth-mail")
                 .feature("smtp")

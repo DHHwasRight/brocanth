@@ -31,8 +31,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    CacheStore, Category, ConfigCheck, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting,
-    Slot,
+    AdminPanel, CacheStore, Category, ConfigCheck, Contribution, Dep, Manifest, Module, PgPool,
+    Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// The cache, as a choice on the `brocanth create` menu.
@@ -61,7 +61,7 @@ impl Module for Cache {
             "the cache is an unlogged table on the project's pool; without a child backend there is nowhere else to keep it",
         )
         .provides::<CacheStore>("the cache, on an unlogged Postgres table; a child backend replaces the table")
-        .contributes::<ConfigCheck>("`deploy/migrate` for `[cache]`, while the cache is on Postgres")
+        .contributes::<ConfigCheck>(Contribution::new("cache", "`deploy/migrate` for `[cache]`, while the cache is on Postgres"), true)
         .adapts_to(
             "cache-memory",
             "`cache-memory` writes the plugin file, over this process's memory",
@@ -70,9 +70,11 @@ impl Module for Cache {
             "cache-redis",
             "`cache-redis` writes the plugin file, over a Redis or Valkey server",
         )
-        .integration(
-            "admin",
-            "a `cache` tab in the admin: purge expired entries, clear a namespace you name",
+        .contributes::<AdminPanel>(
+            Tab::new(
+                "cache",
+                "a `cache` tab in the admin: purge expired entries, clear a namespace you name",
+            ),
             true,
         )
         .asked_in("data", "A cache, in the database you already have")
@@ -101,7 +103,7 @@ impl Module for Cache {
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         // The tab reads the cache the plugin installs, whatever the backend,
         // so the parent writes it and no child does.
-        if project.has("admin") {
+        if project.collector::<AdminPanel>().is_some() {
             integration(s, "cache", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
         // The child that replaces Postgres writes the plugin file instead.
@@ -117,12 +119,13 @@ impl Module for Cache {
     }
 }
 
-/// The cache tab, with the `admin` module. The panel finds the plugin's
-/// cache when it renders, because the admin's `mount` runs before the
-/// plugin opens the cache at `before_start`.
+/// The cache tab, when the admin collects tabs. The admin's `mount` runs
+/// before the plugin opens the cache at `before_start`, so the tab holds a
+/// cell the admin fills from the request context.
 const ADMIN_TAB: &str = "// The cache, as a tab: Purge expired, and Clear for each namespace you
 // name with `.namespace(..)`.
-config = config.panel(brocanth_cache::admin::CachePanel::installed());";
+let cache = late.cell(|ctx| ctx.provided::<brocanth_cache::CacheHandle, _>().cloned());
+config = config.panel(brocanth_cache::admin::CachePanel::late(cache));";
 
 /// `cache-memory`: the cache in the process's memory.
 pub struct CacheMemory;
@@ -494,11 +497,7 @@ impl Plugin for Cache {
     }
 @CONFIGURE@
     fn before_start(&mut self, @LC@: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-@OPEN@@READY@        let handle = CacheHandle::new(cache);
-        // The first cache this process opens is the one the admin's cache
-        // tab reads: the admin is built before any plugin starts.
-        handle.install();
-        self.handle = Some(handle);
+@OPEN@@READY@        self.handle = Some(CacheHandle::new(cache));
         Ok(())
     }
 @SWEEP@

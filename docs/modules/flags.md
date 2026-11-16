@@ -14,7 +14,7 @@ The wizard calls it: *Feature flags: turn code on for some users without a deplo
 | Needs | none |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | none |
-| Adapts to | [`config`](config.md), [`auth`](auth.md), [`admin`](admin.md) |
+| Adapts to | [`config`](config.md), [`auth`](auth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-flags` (feature `config` with `config`, `admin` with `admin`) |
