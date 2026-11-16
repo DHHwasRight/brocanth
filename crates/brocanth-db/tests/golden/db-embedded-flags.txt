@@ -1440,6 +1440,7 @@ macro_rules! register {
         let builder = builder.plugin(crate::plugins::db_embedded::DbEmbedded::new(
             crate::plugins::db_embedded_settings(&given)?,
         ));
+        // PgPool <- db (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::db::Database::new(
             crate::plugins::db_settings(&given)?,
         ));
@@ -2122,7 +2123,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 7704b0a392005d8d
+// brocanth-digest: 9598d3ebbe20963e
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2959,6 +2960,9 @@ title = "My Blog"
 [modules]
 enabled = ["db", "db-embedded"]
 
+[bindings]
+PgPool = { provider = "db", why = "chosen" }
+
 [modules.db]
 version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
@@ -2975,4 +2979,4 @@ config = ["db_embedded"]
 crates = ["brocanth-db"]
 adapted_to = []
 
-# brocanth-digest: dd6c722afc79a88b
+# brocanth-digest: c4bb1b0aa8c4c7ae
