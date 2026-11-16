@@ -1529,8 +1529,15 @@ pub fn layer(name: &str) -> Option<Layer> {
 /// The tabs other modules add to the admin. Each one is behind the module
 /// file of the module that adds it: `integrate.admin` in src/modules/.
 ///
+/// A tab reads what a plugin builds at start through a cell from `late`,
+/// which the admin fills from each request's context. No tab reads a
+/// process-wide global, so a tab can move to a backoffice service.
+///
 /// No module in this project adds one.
-pub fn admin_panels(config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+pub fn admin_panels(
+    config: brocanth_admin::AdminConfig,
+    _late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     config
 }
 
@@ -2217,7 +2224,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 5bb3a411246564f7
+// brocanth-digest: b2213fde14aa0f1c
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2583,7 +2590,7 @@ mod tests {
         // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{'), "{xml}");
         assert!(!xml.contains("sitemap.xml"), "{xml}");
-        // The admin, wherever src/modules/admin.rs mounts it.
+        // The backoffice, wherever its module file mounts it.
         let admin = format!("{}</loc>", crate::modules::admin::MODULE.mount_at);
         assert!(!xml.contains(&admin), "{xml}");
     }
@@ -2616,7 +2623,7 @@ use brocanth::plugin_api::Plugin;
 use brocanth::plugin_context::NoContext;
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -2698,8 +2705,11 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         config = config.stylesheet(href);
     }
     // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`.
-    config = crate::plugins::admin_panels(config);
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
     let admin = Arc::new(Admin::new(
         // An empty in-memory source: no models, so no rows to read. Put
         // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
@@ -2707,10 +2717,12 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
         Arc::new(Fixture::new()),
         config,
     ));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, screen(Arc::clone(&admin)))?;
-        routes.route(pattern, Verb::Post, screen(Arc::clone(&admin)))?;
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
     }
     Ok(())
 }
@@ -2719,11 +2731,15 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>) -> Handler {
+fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
+        let late = Arc::clone(&late);
         Box::pin(async move {
             let ctx = &*ctx;
+            // Each tab's handle, from the context the plugins put on this
+            // request, the first time it is there.
+            late.fill(ctx);
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -2904,7 +2920,7 @@ impl Plugin for Sitemap {
     const NAME: &'static str = "sitemap";
 
     fn new(mut config: Settings) -> Self {
-        // The admin, where src/modules/admin.rs mounts it: no page a
+        // The backoffice, where its module file mounts it: no page a
         // visitor reads.
         let admin = crate::modules::admin::MODULE.mount_at.to_string();
         if !config.exclude.contains(&admin) {
@@ -3112,6 +3128,6 @@ kind = ["routes"]
 files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
-adapted_to = ["admin"]
+adapted_to = []
 
-# brocanth-digest: b81169d3a2a7f568
+# brocanth-digest: 0e9436e9459c2ff9

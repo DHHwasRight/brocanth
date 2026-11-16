@@ -14,7 +14,7 @@ The wizard calls it: *A cache, in the database you already have*.
 | Needs | none |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so; not with [`cache-memory`](cache-memory.md) or [`cache-redis`](cache-redis.md) |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md) |
+| Adapts to | [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-cache` (no default features; `postgres` without a backend child, `admin` with `admin`) |
