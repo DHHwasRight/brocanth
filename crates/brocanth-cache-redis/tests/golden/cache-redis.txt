@@ -1771,7 +1771,7 @@ pub const SETTINGS: &[Setting] = &[
         help: "The Redis or Valkey URL the cache lives in.",
         flag: false,
         file: "src/modules/cache_redis.rs",
-        flags: crate::modules::cache_redis::MODULE.flags,
+        flags: Flags::Project,
         none_as: None,
         text: true,
         list: false,
@@ -2255,7 +2255,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ae8d48b0adf9d92b
+// brocanth-digest: f88df7e5176513c0
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

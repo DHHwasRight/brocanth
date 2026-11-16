@@ -4877,8 +4877,14 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     }
     let owners: Vec<&str> = built.settings().map(|(by, _, _)| by).collect();
     for ((section, setting), by) in declared.iter().zip(owners) {
-        // The module file that renames this flag and turns it on or off.
-        let flags = if by == FRAMEWORK {
+        // The module file that renames this flag and turns it on or off. A
+        // module whose settings are all secrets has no `flags` field in its
+        // file (`Shape::has_flags`): its `_file` and `_env` flags follow the
+        // project rule.
+        let has_flags = built
+            .settings()
+            .any(|(owner, _, setting)| owner == by && setting.flag);
+        let flags = if by == FRAMEWORK || !has_flags {
             "Flags::Project".to_string()
         } else {
             brocanth_scaffold::snippet::module_ref(by, "flags")
