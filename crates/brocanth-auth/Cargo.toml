@@ -90,7 +90,13 @@ chrono = { version = "0.4", default-features = false, features = [
 # `ReqwestClient` sends through `brocanth-oauth-client`'s `Http`: reqwest
 # 0.13 with rustls, no redirects and a size cap on an answer. One setup for
 # the sign-in and the connected accounts, and one reqwest in the tree.
-brocanth-oauth-client = { workspace = true, optional = true }
+#
+# Not optional, and without its default features: with none on, that crate is
+# its `wellknown` module alone (provider URLs as `&str`, no dependency), and
+# the sign-in catalog reads its endpoints from there. `reqwest-client` turns
+# on its `runtime`. A path, like the CLI's: a workspace entry keeps the
+# default features on.
+brocanth-oauth-client = { path = "../brocanth-oauth-client", version = "0.1.0", default-features = false }
 
 # `src/postgres.rs` is `PgStore`: every storage trait in `src/storage.rs`,
 # over Postgres, so accounts and sessions survive a restart.
@@ -189,10 +195,6 @@ brocanth-test.workspace = true
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 
-# `tests/catalog_parity.rs`: the sign-in catalog and the connect client hold
-# the same OAuth endpoints, and the test fails when they drift.
-brocanth-oauth-client.workspace = true
-
 [features]
 # `runtime` by default: accounts, sessions and tokens, and no HTTP client.
 # The §8 rule: the plan puts sessions, cookies and argon2id in v1 and cuts
@@ -225,7 +227,7 @@ runtime = [
     "dep:async-trait",
     "dep:chrono",
 ]
-reqwest-client = ["runtime", "dep:brocanth-oauth-client"]
+reqwest-client = ["runtime", "brocanth-oauth-client/runtime"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's

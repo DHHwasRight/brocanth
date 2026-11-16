@@ -5,9 +5,14 @@
 //! module exists to make good on.
 //!
 //! Endpoint URLs are the ones each provider documents at the time of writing.
-//! A provider that moves an endpoint moves a string here.
+//! A provider that moves an endpoint moves a string here. The authorize and
+//! token URLs of Google, GitHub, GitLab and Microsoft come from
+//! `brocanth_oauth_client::wellknown`, the one list the connect flow reads
+//! too; that module needs no feature, so it links no HTTP client.
 
 use std::borrow::Cow;
+
+use brocanth_oauth_client::wellknown;
 
 use super::{AuthStyle, IssuerCheck, ProfileMap, Provider, ProviderKind, Quirk, VerifiedEmail};
 
@@ -33,8 +38,8 @@ pub const GOOGLE: Provider = Provider {
         issuer: IssuerCheck::Exact(s("https://accounts.google.com")),
         jwks_url: s("https://www.googleapis.com/oauth2/v3/certs"),
     },
-    authorize_url: s("https://accounts.google.com/o/oauth2/v2/auth"),
-    token_url: s("https://oauth2.googleapis.com/token"),
+    authorize_url: s(wellknown::GOOGLE_AUTHORIZE),
+    token_url: s(wellknown::GOOGLE_TOKEN),
     userinfo_url: Some(s("https://openidconnect.googleapis.com/v1/userinfo")),
     default_scopes: &["openid", "email", "profile"],
     auth_style: AuthStyle::ClientSecretPost,
@@ -71,8 +76,8 @@ pub const GITHUB: Provider = Provider {
     id: s("github"),
     display_name: s("GitHub"),
     kind: ProviderKind::OAuth2,
-    authorize_url: s("https://github.com/login/oauth/authorize"),
-    token_url: s("https://github.com/login/oauth/access_token"),
+    authorize_url: s(wellknown::GITHUB_AUTHORIZE),
+    token_url: s(wellknown::GITHUB_TOKEN),
     userinfo_url: Some(s("https://api.github.com/user")),
     default_scopes: &["read:user", "user:email"],
     auth_style: AuthStyle::ClientSecretPost,
@@ -104,8 +109,8 @@ pub const GITLAB: Provider = Provider {
         issuer: IssuerCheck::Exact(s("https://gitlab.com")),
         jwks_url: s("https://gitlab.com/oauth/discovery/keys"),
     },
-    authorize_url: s("https://gitlab.com/oauth/authorize"),
-    token_url: s("https://gitlab.com/oauth/token"),
+    authorize_url: s(wellknown::GITLAB_AUTHORIZE),
+    token_url: s(wellknown::GITLAB_TOKEN),
     userinfo_url: Some(s("https://gitlab.com/oauth/userinfo")),
     default_scopes: &["openid", "email", "profile"],
     auth_style: AuthStyle::ClientSecretPost,
@@ -133,8 +138,8 @@ pub fn gitlab_self_hosted(base_url: &str) -> Provider {
             issuer: IssuerCheck::Exact(Cow::Owned(base.to_string())),
             jwks_url: Cow::Owned(format!("{base}/oauth/discovery/keys")),
         },
-        authorize_url: Cow::Owned(format!("{base}/oauth/authorize")),
-        token_url: Cow::Owned(format!("{base}/oauth/token")),
+        authorize_url: Cow::Owned(wellknown::gitlab_authorize(base)),
+        token_url: Cow::Owned(wellknown::gitlab_token(base)),
         userinfo_url: Some(Cow::Owned(format!("{base}/oauth/userinfo"))),
         ..GITLAB
     }
@@ -169,8 +174,8 @@ pub const MICROSOFT: Provider = Provider {
         },
         jwks_url: s("https://login.microsoftonline.com/common/discovery/v2.0/keys"),
     },
-    authorize_url: s("https://login.microsoftonline.com/common/oauth2/v2.0/authorize"),
-    token_url: s("https://login.microsoftonline.com/common/oauth2/v2.0/token"),
+    authorize_url: s(wellknown::MICROSOFT_AUTHORIZE),
+    token_url: s(wellknown::MICROSOFT_TOKEN),
     userinfo_url: Some(s("https://graph.microsoft.com/oidc/userinfo")),
     default_scopes: &["openid", "email", "profile", "offline_access"],
     auth_style: AuthStyle::ClientSecretPost,
@@ -200,12 +205,8 @@ pub fn microsoft_tenant(tenant: &str) -> Provider {
                 "https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
             )),
         },
-        authorize_url: Cow::Owned(format!(
-            "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
-        )),
-        token_url: Cow::Owned(format!(
-            "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-        )),
+        authorize_url: Cow::Owned(wellknown::microsoft_authorize(tenant)),
+        token_url: Cow::Owned(wellknown::microsoft_token(tenant)),
         ..MICROSOFT
     }
 }
