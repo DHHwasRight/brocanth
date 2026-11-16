@@ -46,16 +46,13 @@ impl ReadyReport {
     }
 
     /// The probe body: `{"status":"ready","checks":[{"name":..,"status":"ok",
-    /// "latency_ms":..}]}`. `status` is `ready`, `unready` or `draining`; a
-    /// failed check adds `error`.
+    /// "latency_ms":..}]}`. `status` is `ready`, `unready` or `draining`;
+    /// each check is `ok` or `fail`.
+    ///
+    /// A failed check's reason is never in the body, on any listener: an
+    /// error can name a host, a table or a driver message, and a probe
+    /// answers whoever reaches it. The reason goes to the log instead.
     pub fn to_json(&self) -> String {
-        self.body(true)
-    }
-
-    /// The body, with each failed check's `error` or without it. The main
-    /// listener answers anybody, and an error can name a host, a table or a
-    /// driver message, so there it is left out.
-    fn body(&self, errors: bool) -> String {
         let mut out = String::from("{\"status\":");
         let status = if self.draining {
             "draining"
@@ -76,21 +73,16 @@ impl ReadyReport {
             json_string(&mut out, if check.outcome.is_ok() { "ok" } else { "fail" });
             out.push_str(",\"latency_ms\":");
             json_f64(&mut out, millis(check.latency));
-            if let (true, Err(error)) = (errors, &check.outcome) {
-                out.push_str(",\"error\":");
-                json_string(&mut out, error);
-            }
             out.push('}');
         }
         out.push_str("]}");
         out
     }
 
-    /// The probe answer. `errors`: the side listener, which only an
-    /// operator reaches, says why a check failed.
-    pub(crate) fn into_response(self, errors: bool) -> Response {
+    /// The probe answer: [`ReadyReport::to_json`], 200 or 503.
+    pub(crate) fn into_response(self) -> Response {
         let status = if self.is_ready() { 200 } else { 503 };
-        no_store(Response::json(status, self.body(errors)))
+        no_store(Response::json(status, self.to_json()))
     }
 }
 
@@ -153,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_body_lists_each_check_with_its_latency_and_error() {
+    fn the_body_lists_each_check_with_its_latency_and_no_error_text() {
         let report = ReadyReport {
             draining: false,
             checks: vec![
@@ -172,10 +164,6 @@ mod tests {
         assert!(!report.is_ready());
         assert_eq!(
             report.to_json(),
-            r#"{"status":"unready","checks":[{"name":"jobs","status":"ok","latency_ms":1.5},{"name":"cache","status":"fail","latency_ms":2,"error":"connection \"refused\""}]}"#
-        );
-        assert_eq!(
-            report.body(false),
             r#"{"status":"unready","checks":[{"name":"jobs","status":"ok","latency_ms":1.5},{"name":"cache","status":"fail","latency_ms":2}]}"#
         );
     }

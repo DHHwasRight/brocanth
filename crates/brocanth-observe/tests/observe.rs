@@ -257,7 +257,7 @@ fn readyz_reports_each_plugin_check_and_fails_when_one_fails() {
         text.contains(r#""name":"database","status":"fail""#),
         "{text}"
     );
-    // The main listener answers anybody: the reason is not in the body.
+    // No listener puts the reason in the body: it goes to the log.
     assert!(!text.contains("connection refused"), "{text}");
     let report = with_logs(&observer, observer.ready()).0;
     assert_eq!(
