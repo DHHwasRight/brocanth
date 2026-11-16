@@ -657,9 +657,9 @@ key>)` 6 -> 0; ADR 11 records the phases.
 contribution point; exports for `auth-screens`. Exit: no caller names a
 provider type; each module's AGENTS.md section comes from its
 contribution; `MIGRATES`, the `sessions || auth`
-line and `SCREEN_PATHS` are gone. The count of `has` on another crate's
-key is measured and recorded; it has no numeric target (the owner sets
-the rule that replaces it).
+line and `SCREEN_PATHS` are gone. The rule in §13, decision 8, replaces
+the former numeric target for `has` on another crate's key: the count is
+reported for information and has no target.
 
 **Stage 5: done (2026-11-16).** Measured as in stage 1: a grep of
 non-test code under `crates/*/src`. "Another crate's key" is a key that
@@ -767,3 +767,12 @@ No question is open.
    on its own tab only** (§5.2). **Reason:** this keeps the rule "only a
    superuser changes roles" and limits delegation to one tab, so no
    owner can raise itself or reach past its tab.
+8. **When two or more modules can fill the same role, the role is a Kind
+   and callers ask for the Kind. A module may name another module's key
+   only for a presentation choice (e.g. rsx or jt templates) or for a
+   real one-to-one link where no second provider exists. The count of
+   `has` on another crate's key is reported for information; it has no
+   target.** (Owner, 2026-11-16, replacing the stage 5 target "159 ->
+   ≤ 30".) **Reason:** the count mixes renderer branches, needs and
+   one-to-one adaptations with real couplings, so a number cannot say
+   which `has` is wrong; the rule can.
