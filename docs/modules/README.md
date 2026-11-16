@@ -9,11 +9,11 @@ Each page has the same parts:
 
 | Part | Source |
 |---|---|
-| Gist, wizard question, part of, needs, after, crates, blocked | The module's `Manifest` |
+| Gist, wizard question, part of, crates, blocked | The module's `Manifest` |
 | Categories | `Manifest::category`. The first is the main one, in bold. |
 | Default, presets | `DEFAULT` in `commands/create.rs`, `PRESETS` in `wizard.rs` |
-| Adapts to | `Manifest::adapts_to`: each module whose presence changes what this one writes |
 | Conflicts | `Manifest::conflicts` on either side, and the `static` rule (`outside_runtime`), both read by `brocanth_scaffold::clash` |
+| Capabilities | Generated from the `Manifest` between `<!-- generated: capabilities -->` markers: needs, after, provides, requires, uses, adapts to, contributes, collects, exports, hooks (phase, required), options (build time) and settings (run time). `brocanth explain` prints the same facts for a project. |
 | What it writes | The files and slots its `contribute` writes in a project with `config` |
 | Settings | The `Setting` declarations. The file value is what `config/<env>.toml` starts with; the plugin's `Default` can differ. |
 
@@ -29,11 +29,11 @@ Run it with:
 cargo test -p brocanth-cli --bin brocanth -- docs_check
 ```
 
-The check also compares each page's `Categories`, `Adapts to` and
-`Conflicts` rows with the manifest. To rewrite those three rows from the
-manifests, run it with `BROCANTH_BLESS=1` and read the diff. The rest of a
-page is not checked: when you change a manifest or a `Setting`, update the
-page by hand.
+The check also compares each page's `Categories` and `Conflicts` rows and
+its generated `Capabilities` table with the manifest, so a manifest edit
+without a re-bless fails it. To rewrite the rows and the table from the
+manifests, run it with `BROCANTH_BLESS=1` and read the diff. The prose is
+not checked: when you change what a module writes, update it by hand.
 
 ## Settings, in short
 

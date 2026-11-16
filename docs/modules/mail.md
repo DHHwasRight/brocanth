@@ -11,14 +11,32 @@ The wizard calls it: *Send mail*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| Uses | `PgPool`: the application opens Postgres, so the test that starts it is left out |
-| After | [`config`](config.md), [`jobs`](jobs.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-mail` (features `smtp`, `serde`) |
 | Without it | no mail; a password reset or a verification link cannot leave the server |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/mail.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `JobQueue` (a job queue): `deliver_later` puts the message on the `mail` queue and a worker sends it; `PgPool` (a Postgres pool): the application opens Postgres, so the test that starts it is left out |
+| Adapts to | none |
+| Contributes | `AgentsSection` `mail`: how a page sends mail, and never through `Smtp` itself |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[mail]`: `transport`, `from`, `from_name`, `folder`, `smtp_host`, `smtp_port`, `smtp_security`, `smtp_username`, `smtp_password` (secret) |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

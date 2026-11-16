@@ -11,13 +11,32 @@ The wizard calls it: *Limit how often one caller may hit a route*.
 | Default | off |
 | Presets | none |
 | Part of | [`middleware`](middleware.md), off until you tick it |
-| Needs | none |
-| After | [`middleware-security-headers`](middleware-security-headers.md) |
-| Adapts to | [`auth-screens`](auth-screens.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |
 | Without it | no rate limit; a password guesser gets as many tries as the server answers |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/middleware_rate_limit.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `ConfigSource` (settings read from a file): the rules are records: in the file when there is one, else code beside the registration |
+| Adapts to | [`auth-screens`](auth-screens.md): the example rule covers the paths `auth-screens` exports as `sign_in_posts`; without it the rule is written commented out |
+| Contributes | `AgentsSection` `middleware-rate-limit`: the example rule, and that a limit is asked for, not invented |
+| Collects | none |
+| Exports | none |
+| Hooks | `count` (Guard, required): count each request against its rule, and answer 429 past the limit; `headers` (Encode, on by default): send the RateLimit headers on each response a rule covers |
+| Options (build time) | none |
+| Settings (run time) | `[rate_limit]`: `ip_header`, `session_cookie`, `fail_open` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

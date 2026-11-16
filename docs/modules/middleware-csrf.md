@@ -11,13 +11,32 @@ The wizard calls it: *Refuse a form post this application did not hand out*.
 | Default | off |
 | Presets | none |
 | Part of | [`middleware`](middleware.md), ticked with its parent |
-| Needs | none |
-| After | [`middleware`](middleware.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |
 | Without it | no CSRF check; any page on any site can post a form here and the browser sends the cookies with it |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/middleware_csrf.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `middleware-csrf`: every form carries the CSRF token |
+| Collects | none |
+| Exports | none |
+| Hooks | `check` (Guard, required): refuse an unsafe request that does not send the token back; `mint` (Guard, required): set the token cookie on a response |
+| Options (build time) | none |
+| Settings (run time) | `[csrf]`: `cookie`, `field`, `header`, `exempt`, `secure` |
+<!-- end generated: capabilities -->
 
 Hooks: `csrf.check` and `csrf.mint`. Both are required, so
 `src/modules/middleware_csrf.rs` has no `hooks` field. Its header names them.

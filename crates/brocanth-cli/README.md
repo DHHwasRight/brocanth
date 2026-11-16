@@ -224,6 +224,20 @@ loader.
 Each finding has an id, a location and a `help:` line. The exit code is 1
 when an error remains. See [docs/tooling.md](../../docs/tooling.md).
 
+### `brocanth explain`
+
+Says why the project is made the way it is, in plain text, one section
+per question: why each module is in (chosen, part of a parent, needed by
+another, or added because a module requires a Kind), the provider of each
+Kind and why, each contribution and the module that collects it, each
+hook with its phase and whether it is required, and each setting with its
+layers, lowest first. It reads `brocanth.toml` (`[modules]` and
+`[bindings]`) and the modules this CLI was built with. It builds nothing
+and connects to nothing. The table on each `docs/modules/*.md` page comes
+from the same data. See
+[docs/module-capabilities.md](../../docs/module-capabilities.md) §12,
+stage 6.
+
 ### Project commands: `dbshell`, `migrate`, `settings`
 
 These are commands of the generated project, and `brocanth <name>` hands

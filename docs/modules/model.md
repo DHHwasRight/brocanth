@@ -11,14 +11,32 @@ The wizard calls it: *An ORM with validations and migrations*.
 | Default | off |
 | Presets | HTML application, JSON API, Something that does work |
 | Part of | nothing |
-| Needs | none |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | none |
-| Adapts to | [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-model` (features `db`, `plugin`), `brocanth-migrate` (the `migrate` tool) |
 | Without it | no ORM, no sea-orm anywhere in the lock file |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/model.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the ORM runs over the pool the `db` plugin opens, and without `db` there is none; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | [`commands`](commands.md): a `migrate` subcommand is written |
+| Contributes | none |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

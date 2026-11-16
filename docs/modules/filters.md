@@ -11,13 +11,32 @@ The wizard calls it: *Filters and a sort read from the query string*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`policy`](policy.md): a filter is a `Pred` over a policy entity's columns, ANDed with its list rule |
-| After | [`policy`](policy.md) |
-| Adapts to | [`pagination`](pagination.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-filters` |
 | Without it | no typed filters; a list that filters parses its own query string |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/filters.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`policy`](policy.md): a filter is a `Pred` over a policy entity's columns, ANDed with its list rule |
+| After | [`policy`](policy.md) |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`pagination`](pagination.md): the rules name `ctx.links()`, whose page links keep the filters |
+| Contributes | `AgentsSection` `filters`: how a list is filtered |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

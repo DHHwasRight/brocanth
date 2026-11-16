@@ -15,6 +15,7 @@
 
 mod choices;
 mod commands;
+mod explain;
 mod modules;
 mod owned;
 mod questions;

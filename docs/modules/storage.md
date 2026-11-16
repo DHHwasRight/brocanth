@@ -11,14 +11,32 @@ The wizard calls it: *Uploads on disk or in Postgres, addressed by content hash*
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| Uses | `PgPool`: the objects live in the `db` database, on its pool, and not on one machine's disk |
-| After | [`config`](config.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-storage` (feature `postgres` with [`db`](db.md)) |
 | Without it | no file storage; an upload has nowhere to go and no address to be read back from |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/storage.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `PgPool` (a Postgres pool): the objects live in the `db` database, on its pool, and not on one machine's disk |
+| Adapts to | none |
+| Contributes | none |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[storage]`: `root`, `secret` (secret), `token_ttl` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

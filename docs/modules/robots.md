@@ -11,13 +11,32 @@ The wizard calls it: *A robots.txt that says what crawlers may read*.
 | Default | off |
 | Presets | Static site |
 | Part of | nothing |
-| Needs | none |
-| After | [`config`](config.md) |
-| Adapts to | [`sitemap`](sitemap.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-robots` |
 | Without it | no robots.txt; every crawler reads every page, and so does every staging server's |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/robots.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`i18n`](i18n.md) |
+| Provides | none |
+| Requires | none |
+| Uses | `ConfigSource` (settings read from a file): the per-crawler groups are records, written to the file; the development file opens the site; `Mount` (a mounted path): every `Backoffice` mount, such as the admin, is disallowed, at the path its module file mounts it |
+| Adapts to | [`sitemap`](sitemap.md): the Sitemap: line names /sitemap.xml at the sitemap's base URL, unless `sitemap` is set; [`static`](static.md): the file says index = true, because the export is what gets published; [`i18n-routing`](i18n-routing.md): each rule path is also written under each locale segment: /drafts and /fr/drafts |
+| Contributes | none |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | `disallow_backoffice` = `true`: Disallow every Backoffice mount, such as the admin. The rule also tells every reader of robots.txt where the backoffice is. |
+| Settings (run time) | `[robots]`: `index`, `disallow`, `allow`, `sitemap` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

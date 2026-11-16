@@ -11,13 +11,32 @@ The wizard calls it: *One URL per language: /fr/about*.
 | Default | off |
 | Presets | none |
 | Part of | [`i18n`](i18n.md), off until you tick it |
-| Needs | none |
-| After | none |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none: the hook is `brocanth-i18n`'s |
 | Without it | the locale comes from the query, a cookie or Accept-Language; a search engine indexes one language |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/i18n_routing.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `i18n-routing`: how a link keeps the locale in its path |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

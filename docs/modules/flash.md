@@ -11,13 +11,32 @@ The wizard calls it: *Show "Saved" on the page a form redirects to*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | [`middleware-rate-limit`](middleware-rate-limit.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-middleware` (feature `config` with `config`) |
 | Without it | no flash; a page a form redirects to cannot say what the form did |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/flash.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `flash`: how a page sets a message for the next page |
+| Collects | none |
+| Exports | none |
+| Hooks | `read` (Identify, required): read the messages the last response left in the cookie; `write` (Identify, required): draw the messages into `<div id="flash">` and set or clear the cookie |
+| Options (build time) | none |
+| Settings (run time) | `[flash]`: `cookie`, `key_env`, `secure` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

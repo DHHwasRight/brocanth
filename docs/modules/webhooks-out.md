@@ -11,14 +11,32 @@ The wizard calls it: *Send signed webhooks, retried through jobs*.
 | Default | off |
 | Presets | none |
 | Part of | [`webhooks`](webhooks.md), off until you tick it |
-| Needs | [`jobs`](jobs.md): a delivery is a job, and its retries, backoff and dead letter are the queue's |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | [`jobs`](jobs.md), [`config`](config.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-webhooks` (feature `out`; `config` and `admin` with those modules), `serde_json` |
 | Without it | no outgoing webhooks; a partner polls for what changed |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/webhooks_out.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`jobs`](jobs.md) |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the endpoints and the delivery log are rows in the `db` module's database; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `ConfigCheck` `webhooks-out`: `deploy/migrate` for `[webhooks_out]`; `AgentsSection` `webhooks-out`: how to emit an event inside the caller's transaction; `AdminPanel` `webhooks`, on: a `webhooks` tab in the admin, with the endpoints, the deliveries and a Send again button |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[webhooks_out]`: `migrate`, `worker`, `concurrency`, `timeout_secs`, `allow_private`, `keep_days` |
+<!-- end generated: capabilities -->
 
 ## What it does
 

@@ -36,7 +36,9 @@ pub const MARKER: &str = "brocanth.toml";
 /// when it needs the project: `check` after its module checks, `admin
 /// eject` never (the project's `admin eject` calls this tool). A test in
 /// `main.rs` compares this list with the parser's, so they cannot drift.
-pub const BUILT_IN: &[&str] = &["create", "new", "add", "remove", "check", "admin"];
+pub const BUILT_IN: &[&str] = &[
+    "create", "new", "add", "remove", "check", "admin", "explain",
+];
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: Vec<OsString>) -> Outcome {
     let start = match dir {

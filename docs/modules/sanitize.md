@@ -11,13 +11,32 @@ The wizard calls it: *Show HTML that users write, cleaned*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | none |
-| Adapts to | [`rsx`](rsx.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-sanitize` (feature `rsx` with [`rsx`](rsx.md)) |
 | Without it | no sanitizer; HTML a user wrote can only be shown escaped, as text |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/sanitize.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`rsx`](rsx.md): `SafeHtml` is an rsx template, so a page writes it with `{! value }` |
+| Contributes | `AgentsSection` `sanitize`: how HTML from users is cleaned before it is shown |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

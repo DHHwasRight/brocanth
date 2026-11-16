@@ -11,13 +11,32 @@ The wizard calls it: *An OpenAPI document, derived from your routes*.
 | Default | off |
 | Presets | JSON API |
 | Part of | nothing |
-| Needs | none |
-| After | [`config`](config.md) |
-| Adapts to | [`input`](input.md), [`auth-oauth`](auth-oauth.md), [`oauth-client`](oauth-client.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-openapi` (feature `zod`; `admin` with that module) |
 | Without it | no document; a client learns this API by reading the handlers |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/openapi.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `Mount` (a mounted path): every `Backoffice` mount, such as the admin, is hidden from the document |
+| Adapts to | [`input`](input.md): the document lists the declared bodies; [`auth-oauth`](auth-oauth.md): the sign-in routes it mounts are hidden from the document; [`oauth-client`](oauth-client.md): the connection routes it mounts are hidden from the document |
+| Contributes | `AdminPanel` `api`, on: an `API` tab in the admin, with every operation |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[openapi]`: `title`, `version` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

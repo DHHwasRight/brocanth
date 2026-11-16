@@ -10,14 +10,32 @@ command.
 | Default | off |
 | Presets | none |
 | Part of | none |
-| Needs | [`auth`](auth.md): a superuser is an account with a flag, and `auth` holds the accounts |
-| Uses | `PgPool`: `createsuperuser` opens the accounts in Postgres, on the `[db]` database |
-| After | [`auth`](auth.md) |
-| Adapts to | [`commands`](commands.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth`, feature `admin` with `admin` |
 | Without it | no operator account; the admin opens only for a policy you write |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/superuser.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`auth`](auth.md): a superuser is an account with a flag, and `auth` holds the accounts |
+| After | [`auth`](auth.md), [`auth`](auth.md) |
+| Provides | none |
+| Requires | none |
+| Uses | `PgPool` (a Postgres pool): `createsuperuser` opens the accounts in Postgres, on the `[db]` database |
+| Adapts to | [`commands`](commands.md): the binary gets `createsuperuser`, when the accounts are in Postgres; [`admin`](admin.md): the admin's policy is StaffPolicy: a superuser passes every check, a role holder what its roles grant |
+| Contributes | `AgentsSection` `superuser`: how a superuser is made, and that none is made in code |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[superuser]`: `email`, `password_env` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

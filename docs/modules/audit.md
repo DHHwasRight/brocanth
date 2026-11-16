@@ -11,14 +11,32 @@ The wizard calls it: *Change history: who changed which row, and when*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`model`](model.md): it records the changes the model layer publishes |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | none |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-audit` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no change history; who changed a row is not recorded |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/audit.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`model`](model.md): it records the changes the model layer publishes, and without `model` there are none |
+| After | [`model`](model.md) |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the history is rows in the database the `db` module opens; in memory a restart would lose it; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `ConfigCheck` `audit`: `deploy/migrate` for `[audit]`; `AgentsSection` `audit`: how a change is recorded, and what never to record; `AdminPanel` `history`, on: a History tab in the admin, a History link on every record, and every admin write recorded with its values |
+| Collects | none |
+| Exports | none |
+| Hooks | `record` (no phase, on by default): record each change the model layer publishes through `HookSink` |
+| Options (build time) | none |
+| Settings (run time) | `[audit]`: `retention_days`, `flush_secs`, `migrate` |
+<!-- end generated: capabilities -->
 
 With [`admin`](admin.md): a History tab at `/admin/history`, a History link
 on every record's detail screen, and every admin write recorded with the

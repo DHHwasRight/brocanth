@@ -4,8 +4,9 @@ Status: accepted (2026-11-16)
 
 The owner's answers and corrections are in §4, §5, §6 and §13. Stage 1
 (one pool, the resolver), stage 2 (backoffice: mounts, tabs, RBAC), stage 3
-(settings layers, `ConfigSource`), stage 4 (hook phases) and stage 5
-(capability Kinds, exports) are built; see the notes under §12. Base:
+(settings layers, `ConfigSource`), stage 4 (hook phases), stage 5
+(capability Kinds, exports) and stage 6 (`brocanth explain`, generated
+docs tables) are built; see the notes under §12. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -939,6 +940,50 @@ each hook with phase and "required", and each setting with its layer. The
 same data writes a table on each `docs/modules/*.md` page, and
 `docs_check` compares it. Exit: 77 of 77 pages carry a generated table; a
 manifest edit without a re-bless fails `docs_check`.
+
+**Stage 6: done (2026-11-16).** Measured on the stage 6 branch:
+
+| Measure | Before (`4d1b59e2`) | After |
+|---|---|---|
+| module pages in `docs/modules/` (without `README.md`) | 77 | 77 |
+| pages with a generated `Capabilities` table | 0 | 77 |
+| hand-written `Needs`, `After`, `Provides`, `Requires`, `Uses`, `Adapts to` rows | 250 | 0 |
+| a manifest edit without a bless | passed (only three rows compared) | fails (`a_manifest_change_without_a_bless_fails`) |
+
+What was built, and the choices made on the way:
+
+- `crates/brocanth-cli/src/explain.rs` is the one source. `rows` turns a
+  manifest into the table rows: needs, after, provides, requires (with
+  the providers and the `unless` keys), uses, adapts to, contributes (with
+  the toggle default), collects, exports, hooks (phase, and required / on /
+  off by default), options (build time) and settings (run time).
+  `settings_alone` runs the module's `contribute` in memory, alone with its
+  parent and needs, because a setting is declared there and not in the
+  manifest.
+- **The page table.** Between `<!-- generated: capabilities -->` and
+  `<!-- end generated: capabilities -->`, under the page's first table.
+  The six hand rows it replaced are gone, and `docs_check` refuses them if
+  they come back. The `Categories` and `Conflicts` rows stay in the first
+  table and stay checked. The bless
+  (`BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`)
+  rewrites the rows and the table and leaves the prose alone. Several
+  stale rows went with it: `jobs`, `mail` and others still listed
+  `config` under `Adapts to` and `After` after stage 3.
+- **`brocanth explain`.** It reads `brocanth.toml` (`[modules] enabled`
+  and `[bindings]`) and the registry, and runs the generator in memory for
+  the settings. No build, no network. Plain text, one section per
+  question, in a stable order: modules and why each is in (chosen, part of
+  a parent, needed by another, or added for a Kind); each Kind of
+  cardinality one, its provider, why, and its readers; each contribution
+  and its collector; each hook with phase and required; each setting with
+  its layers, lowest first, and each option with its module file. A
+  `brocanth.toml` with no `[bindings]` table, or one that disagrees with
+  the modules, gets a `!` line that says to run `add` or `remove` once.
+  No `--json`: nothing reads it yet.
+- `read_record` errors now carry a `help:` line.
+
+Left: the settings layer that wins in one deployment (that needs the
+loader, which the CLI does not link); `explain <Kind>` for one Kind.
 
 Total: 15-21 days (first draft: 10-13). Stage 1b is new; stages 2 and 3
 grew with RBAC and the settings layers.

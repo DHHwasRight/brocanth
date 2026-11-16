@@ -11,13 +11,32 @@ The wizard calls it: *Upload and download routes, behind a guard and file tokens
 | Default | off |
 | Presets | none |
 | Part of | [`storage`](storage.md), off until you tick it |
-| Needs | [`middleware-csrf`](middleware-csrf.md): an upload is a form post, and the routes read the check's field and header |
-| After | [`storage`](storage.md), [`config`](config.md) |
-| Adapts to | [`storage-thumbnails`](storage-thumbnails.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-storage` (feature `routes`; `variants` with [`storage-thumbnails`](storage-thumbnails.md)) |
 | Without it | no upload or download route; a handler stores and serves each file itself |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/storage_routes.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`middleware-csrf`](middleware-csrf.md): an upload is a form post: without the CSRF check any site posts files here with the visitor's cookies, and the routes read its field and header |
+| After | [`middleware-csrf`](middleware-csrf.md), [`storage`](storage.md) |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`storage-thumbnails`](storage-thumbnails.md): `?thumb=WxH` answers in the sizes `thumb_sizes` lists |
+| Contributes | `AgentsSection` `storage-routes`: which file routes exist, and how a file is served |
+| Collects | none |
+| Exports | none |
+| Hooks | `answer` (Cache, required): answer POST {path} and GET {path}/{address}; `lift` (Guard, on by default): copy an upload form's CSRF field into the header the CSRF check reads |
+| Options (build time) | `path` = `"/files"`, mount, Machine: Where the routes answer: uploads at {path}, files at {path}/{address}.; `public` = `false`: Serve a file to a request with no token. Off, every download needs a token. |
+| Settings (run time) | `[storage_routes]`: `max_bytes`, `dedupe` |
+<!-- end generated: capabilities -->
 
 ## What it does
 

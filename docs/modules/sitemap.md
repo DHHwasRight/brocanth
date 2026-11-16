@@ -11,13 +11,32 @@ The wizard calls it: *A sitemap.xml that lists every page*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | [`config`](config.md) |
-| Adapts to | [`jt`](jt.md), [`realtime-sse`](realtime-sse.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md), [`meta`](meta.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-robots` |
 | Without it | no sitemap.xml; a crawler finds only the pages a link reaches |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/sitemap.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`i18n`](i18n.md) |
+| Provides | none |
+| Requires | none |
+| Uses | `Mount` (a mounted path): every `Backoffice` mount, such as the admin, is excluded, at the path its module file mounts it |
+| Adapts to | [`jt`](jt.md): the JSON page /status is excluded; [`realtime-sse`](realtime-sse.md): the event stream /realtime/events is excluded; [`static`](static.md): the note says the export publishes this file, so the base URL must be the published one; [`i18n-routing`](i18n-routing.md): each page is listed once per locale (/fr/about), never at the path that redirects; [`meta`](meta.md): the note says to keep the base URL equal to `[meta] base_url` |
+| Contributes | none |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[sitemap]`: `base_url`, `extra`, `exclude` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

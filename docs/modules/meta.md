@@ -11,13 +11,32 @@ The wizard calls it: *A title, a description and share tags for each page*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | none |
-| Adapts to | [`i18n`](i18n.md), [`i18n-routing`](i18n-routing.md), [`rsx`](rsx.md), [`sitemap`](sitemap.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the static export renders every page through the layouts |
 | Crates | `brocanth-meta` |
 | Without it | every page has the title `pages::TITLE`, and no description, canonical URL or share tags |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/meta.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`i18n`](i18n.md): `<html lang>` and `og:locale` follow the request's locale; [`i18n-routing`](i18n-routing.md): a page lists its other locales with hreflang, and its canonical URL keeps the locale segment; [`rsx`](rsx.md): a test reads the tags the root layout writes on the home page; [`sitemap`](sitemap.md): an unset `base_url` is `[sitemap] base_url`, so the two never disagree |
+| Contributes | `AgentsSection` `meta`: how a page sets its title and metadata |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[meta]`: `name`, `title_template`, `base_url`, `description`, `image`, `twitter` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

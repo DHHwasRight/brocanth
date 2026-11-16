@@ -12,14 +12,33 @@ The wizard shows it under the database, in the Data question:
 | Default | off |
 | Presets | none |
 | Part of | [`db`](db.md), off until you tick it |
-| Needs | none |
-| After | none; [`db`](db.md) waits for it |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Development only | yes: `brocanth check --deploy` reports `deploy/development-only` |
 | Crates | `brocanth-db` (feature `embedded`: `postgresql_embedded`, no `bundled`) |
 | Without it | the pool opens on `[db] url`, a server you run |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/db_embedded.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `db-embedded`: the database runs in the binary, for development only |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[db_embedded]`: `dir`, `port`, `database`, `timeout` |
+<!-- end generated: capabilities -->
 
 `brocanth create my-app --with db,db-embedded`, then `cargo run`: the
 application starts its own Postgres and serves, with no Postgres and no

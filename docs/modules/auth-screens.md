@@ -11,14 +11,32 @@ The wizard calls it: *Sign-up, sign-in and reset pages*.
 | Default | off |
 | Presets | none |
 | Part of | [`auth`](auth.md), off until you tick it |
-| Needs | [`rsx`](rsx.md), [`input`](input.md), [`middleware-csrf`](middleware-csrf.md), [`mail`](mail.md), [`flash`](flash.md) |
-| Uses | `PgPool`: accounts are in Postgres, so the generated end-to-end test is left out |
-| After | [`auth`](auth.md), [`flash`](flash.md), [`mail`](mail.md), [`auth-lockout`](auth-lockout.md) |
-| Adapts to | [`auth-lockout`](auth-lockout.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` (through `auth`) |
 | Without it | no account pages; the auth services are there and nothing calls them |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/auth_screens.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`rsx`](rsx.md): the screens are `.rsx` components inside the layout; [`input`](input.md): each form is read with `ctx.read`, which `input` writes; [`middleware-csrf`](middleware-csrf.md): every form posts, and a post without the CSRF check is a post any site can make; [`mail`](mail.md): the verification and reset links leave by mail; [`flash`](flash.md): a screen says what happened on the page it redirects to |
+| After | [`rsx`](rsx.md), [`input`](input.md), [`middleware-csrf`](middleware-csrf.md), [`mail`](mail.md), [`flash`](flash.md), [`auth`](auth.md), [`flash`](flash.md), [`mail`](mail.md), [`auth-lockout`](auth-lockout.md) |
+| Provides | none |
+| Requires | none |
+| Uses | `PgPool` (a Postgres pool): accounts are in Postgres, so the generated end-to-end test is left out |
+| Adapts to | [`auth-lockout`](auth-lockout.md): sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock |
+| Contributes | `AgentsSection` `auth-screens`: which pages the account screens own, and how they are changed |
+| Collects | none |
+| Exports | `sign_in_posts` (`/account/signin`, `/account/code`, `/account/elevate`): the POST paths that check a password or a code: the sign-in form first, then the second factor and the password check before a sensitive change |
+| Hooks | none |
+| Options (build time) | `after_sign_in` = `"/"`: Where a person lands after signing in.; `pending_secs` = `300`: How long a sign-in waits for its second factor, in seconds. |
+| Settings (run time) | `[auth_screens]`: `base_url`, `issuer` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

@@ -11,14 +11,32 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Default | off |
 | Presets | HTML application, JSON API, Something that does work |
 | Part of | nothing |
-| Needs | none |
-| Provides | `PgPool`: the project's one Postgres pool, published as `brocanth_db::Db`. No other module opens a pool |
-| After | [`config`](config.md) |
-| Adapts to | [`commands`](commands.md), [`model`](model.md), [`db-embedded`](db-embedded.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-db` (feature `plugin`) |
 | Without it | no database pool; a page that needs SQL has nowhere to send it |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/db.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`db-embedded`](db-embedded.md) |
+| Provides | `PgPool` (a Postgres pool): the project's one Postgres pool, published as `brocanth_db::Db` |
+| Requires | none |
+| Uses | `ConfigSource` (settings read from a file): the development URL is in the development file, so the default is empty and each environment names its own |
+| Adapts to | [`commands`](commands.md): a `dbshell` command opens psql on `[db] url`, and a `migrate` command applies the SQL files in migrations/; [`model`](model.md): no SQL `migrate` command: `model` writes its own, over SeaORM; [`db-embedded`](db-embedded.md): `configure` opens the pool on the embedded server's URL, not on `[db] url` |
+| Contributes | `AgentsSection` `db`: how a page reads the pool, and how a migration is written |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[db]`: `url` (secret), `max_connections`, `min_connections`, `acquire_timeout`, `idle_timeout`, `statement_timeout`, `search_path`, `read_only`, `application_name`, `ca_file` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

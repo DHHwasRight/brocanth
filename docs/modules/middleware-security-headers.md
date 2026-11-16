@@ -11,13 +11,32 @@ The wizard calls it: *Send the headers a browser reads as policy*.
 | Default | on in a non-interactive `create` |
 | Presets | none |
 | Part of | [`middleware`](middleware.md), ticked with its parent |
-| Needs | none |
-| After | [`middleware-csrf`](middleware-csrf.md) |
-| Adapts to | [`admin`](admin.md), [`gtag`](gtag.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |
 | Without it | no security headers; a browser sniffs types, frames the pages and runs any inline script |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/middleware_security_headers.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`admin`](admin.md): the CSP allows the admin's inline script by hash; [`gtag`](gtag.md): the CSP allows the consent script by hash and Google's origins |
+| Contributes | `AgentsSection` `middleware-security-headers`: how to inline a script under the Content-Security-Policy |
+| Collects | none |
+| Exports | none |
+| Hooks | `set` (Encode, required): send the policy headers on each response |
+| Options (build time) | none |
+| Settings (run time) | `[security_headers]`: `behind_tls`, `nosniff`, `referrer_policy`, `permissions_policy`, `hsts.enabled`, `hsts.max_age`, `hsts.include_subdomains`, `hsts.preload`, `csp.enabled`, `csp.report_only`, `csp.report_uri` |
+<!-- end generated: capabilities -->
 
 Hooks: `security_headers.set`, required, so
 `src/modules/middleware_security_headers.rs` has no `hooks` field.

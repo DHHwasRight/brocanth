@@ -11,13 +11,32 @@ The wizard calls it: *A backoffice at /admin, locked until you open it*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | none |
-| Adapts to | [`middleware-csrf`](middleware-csrf.md), [`superuser`](superuser.md), [`admin-model`](admin-model.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-admin` (no default features) |
 | Without it | no backoffice; a row is changed through a page somebody wrote, or SQL |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/admin.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`middleware-csrf`](middleware-csrf.md): every form carries the CSRF token; [`superuser`](superuser.md): the principal is the signed-in member of staff, read from the session; [`admin-model`](admin-model.md): the rows are read through the ORM, from `src/plugins/admin/models.rs`; [`commands`](commands.md): the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project |
+| Contributes | `AgentsSection` `admin`: how a model gets an admin screen |
+| Collects | `AdminPanel`: each tab in the sidebar, behind its RBAC resource; `plugins::admin_panels` lists them |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | `mount_at` = `"/admin"`, mount, Backoffice: Where the backoffice answers. A page of yours under this path is a build error, not a race. Every environment serves the same routes, so this is a constant and not a setting. |
+| Settings (run time) | `[admin]`: `title`, `header`, `index_title`, `site_url`, `stylesheet` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 
