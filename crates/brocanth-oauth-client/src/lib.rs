@@ -4,7 +4,8 @@
 //!
 //! * [`provider`]: a provider is data. Four are written down
 //!   ([`endpoints`]), and a custom one is a [`provider::Endpoint`] with three
-//!   URLs.
+//!   URLs. [`wellknown`] holds their URLs as plain data, with no feature,
+//!   so `brocanth-auth` reads the same strings.
 //! * [`OauthClient`]: the connect flow, the token source and the
 //!   authenticated HTTP client. It holds the store, the key and the
 //!   providers.
@@ -38,6 +39,7 @@ pub mod provider;
 pub mod store;
 #[cfg(feature = "runtime")]
 pub mod web;
+pub mod wellknown;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;

@@ -28,7 +28,7 @@ An option is set at build time in `src/modules/mail.rs`. A setting is read at ru
 | After | none |
 | Provides | none |
 | Requires | none |
-| Uses | `JobQueue` (a job queue): `deliver_later` puts the message on the `mail` queue and a worker sends it; `PgPool` (a Postgres pool): the application opens Postgres, so the test that starts it is left out |
+| Uses | `JobQueue` (a job queue): `deliver_later` puts the message on the `mail` queue and a worker sends it; `PgPool` (a Postgres pool): a queued message waits in a Postgres table; the test that starts the application is left out |
 | Adapts to | none |
 | Contributes | `AgentsSection` `mail`: how a page sends mail, and never through `Smtp` itself |
 | Collects | none |
@@ -43,9 +43,10 @@ An option is set at build time in `src/modules/mail.rs`. A setting is read at ru
 Files:
 
 - `src/plugins/mail/mod.rs`: the plugin, and the `Outbox` a page sends
-  through. With `jobs`, also the `DeliverMail` job and a worker for the
-  `mail` queue. Its tests start the plugin with the default settings and
-  with each transport and security, so a default that cannot start fails
+  through. With `jobs`, also the `DeliverMail` job (its payload is the
+  id of a pending message) and a worker for the `mail` queue. Its tests
+  start the plugin with the default settings and with each transport and
+  security, so a default that cannot start fails
   `cargo test`, not a deploy. Without `jobs`, a test also builds the whole
   application.
 
@@ -71,9 +72,9 @@ let message = outbox
 outbox.deliver_later(message).await?;
 ```
 
-`deliver_later` with `jobs` puts the message on the `mail` queue and
-returns. Without `jobs` it sends at once. The page is the same in both
-shapes.
+`deliver_later` with `jobs` keeps the message in a pending store, puts
+its id on the `mail` queue and returns. Without `jobs` it sends at once.
+The page is the same in both shapes.
 
 ## Settings
 
@@ -105,6 +106,25 @@ Section `[mail]`. Environment variable: `$<APP>_MAIL__<KEY>`. Flag: `--mail.<key
   into another module's file. So the jobs plugin publishes its `Queue` in
   the services, and the mail plugin starts a second worker on the `mail`
   queue. A slow relay then holds up no other job.
+- **A queued job carries an id, not the message.** A message can hold a
+  secret: the password reset link carries its token. A job payload waits
+  in the jobs table while the job waits and retries, the jobs tab shows
+  it, and a backup keeps it. So `deliver_later` writes the message to a
+  `Pending` store (`brocanth_mail::pending`) and enqueues its random id.
+  Each attempt reads the row again, so a retry still sends. The worker
+  deletes the row after the send and after the last attempt, and every
+  row expires after one hour (`DEFAULT_TTL`), so a lost job leaves no
+  link behind for longer. The five attempts of the default backoff take
+  less than three minutes. With a database the store is the
+  `brocanth_mail_pending` table (`PgPending`, created on first use), so a
+  queued message survives a restart as its job does. With a queue in
+  memory the store is in memory too (`MemoryPending`).
+  Rejected: rendering from a template name in the worker. The message is
+  free text that a page builds, and the reset token exists only as a hash
+  after the request; the worker cannot build the link again. Also
+  rejected: keeping the message in the payload and deleting it after the
+  last attempt. The link would still wait in the jobs table for every
+  retry, with no bound.
 - **`deliver_later` exists without `jobs`, and sends at once.** Adding
   `jobs` later moves the send off the request with no change to a page.
 

@@ -41,6 +41,14 @@ thiserror = { version = "2", optional = true }
 # validated newtype hands the attacker back the constructor we took away.
 serde = { version = "1", features = ["derive"], optional = true }
 
+# A pending message is a JSON row (`src/pending.rs`): the job payload holds
+# its id, not the message. Behind `serde`, like the derives.
+serde_json = { version = "1", optional = true }
+
+# `PgPending`: pending messages in the database the `db` module opened.
+# Behind `postgres`, off.
+brocanth-db = { workspace = true, optional = true }
+
 # The SMTP wire, behind a feature that is off. §8.2 asks that a feature which
 # is off means the code is absent, and this is the clearest case in the crate:
 # `lettre` with a TLS stack, a connection pool and a Tokio reactor is three
@@ -67,6 +75,9 @@ lettre = { version = "0.11", default-features = false, features = [
 brocanth-scaffold = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `tests/pending_postgres.rs`: sqlx needs a Tokio runtime, which the
+# twenty-line executor in `src/rt.rs` is not.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # `tests/scaffold.rs`: the module, generated into a project by the CLI's own
 # generator and checked with `brocanth_scaffold::testing`. A cycle through
 # dev-dependencies, which cargo allows.
@@ -107,7 +118,10 @@ scaffold = ["dep:brocanth-scaffold"]
 smtp = ["runtime", "dep:lettre"]
 
 # `Message`, `Address` and `Subject` on the wire.
-serde = ["runtime", "dep:serde"]
+serde = ["runtime", "dep:serde", "dep:serde_json"]
+
+# `PgPending`: a queued message waits in Postgres, not in the job payload.
+postgres = ["serde", "dep:brocanth-db"]
 
 [lints.rust]
 missing_docs = "warn"

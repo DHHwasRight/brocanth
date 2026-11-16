@@ -2,7 +2,8 @@
 //! registration (client id, secret, scopes).
 //!
 //! [`endpoints`] is the small table golang.org/x/oauth2 keeps per
-//! provider: GitHub, Google, Microsoft and GitLab. A custom provider is an
+//! provider: GitHub, Google, Microsoft and GitLab. Their URLs come from
+//! [`crate::wellknown`], which `brocanth-auth` reads too. A custom provider is an
 //! [`Endpoint`] written by hand.
 
 /// How the client id and secret reach the token endpoint.
@@ -69,27 +70,22 @@ impl Endpoint {
 /// The endpoints of well-known providers, like `golang.org/x/oauth2/<provider>`.
 pub mod endpoints {
     use super::Endpoint;
+    use crate::wellknown;
 
     /// GitHub OAuth apps. GitHub has no RFC 7009 endpoint, so a disconnect
     /// only deletes the row; revoke the grant in GitHub's settings.
     pub fn github() -> Endpoint {
-        Endpoint::new(
-            "https://github.com/login/oauth/authorize",
-            "https://github.com/login/oauth/access_token",
-        )
+        Endpoint::new(wellknown::GITHUB_AUTHORIZE, wellknown::GITHUB_TOKEN)
     }
 
     /// Google. `access_type=offline` asks for a refresh token, and
     /// `prompt=consent` asks for one again on a second connect: without it,
     /// Google gives a refresh token only the first time.
     pub fn google() -> Endpoint {
-        Endpoint::new(
-            "https://accounts.google.com/o/oauth2/v2/auth",
-            "https://oauth2.googleapis.com/token",
-        )
-        .revoke_url("https://oauth2.googleapis.com/revoke")
-        .auth_param("access_type", "offline")
-        .auth_param("prompt", "consent")
+        Endpoint::new(wellknown::GOOGLE_AUTHORIZE, wellknown::GOOGLE_TOKEN)
+            .revoke_url(wellknown::GOOGLE_REVOKE)
+            .auth_param("access_type", "offline")
+            .auth_param("prompt", "consent")
     }
 
     /// Microsoft identity platform, for the `common` tenant. Ask for the
@@ -102,24 +98,23 @@ pub mod endpoints {
     /// `organizations`, `consumers` or a tenant id.
     pub fn microsoft_tenant(tenant: &str) -> Endpoint {
         Endpoint::new(
-            format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"),
-            format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"),
+            wellknown::microsoft_authorize(tenant),
+            wellknown::microsoft_token(tenant),
         )
     }
 
     /// GitLab.com.
     pub fn gitlab() -> Endpoint {
-        gitlab_at("https://gitlab.com")
+        gitlab_at(wellknown::GITLAB_BASE)
     }
 
     /// A self-managed GitLab, by its base URL.
     pub fn gitlab_at(base: &str) -> Endpoint {
-        let base = base.trim_end_matches('/');
         Endpoint::new(
-            format!("{base}/oauth/authorize"),
-            format!("{base}/oauth/token"),
+            wellknown::gitlab_authorize(base),
+            wellknown::gitlab_token(base),
         )
-        .revoke_url(format!("{base}/oauth/revoke"))
+        .revoke_url(wellknown::gitlab_revoke(base))
     }
 }
 

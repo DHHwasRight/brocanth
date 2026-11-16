@@ -1151,12 +1151,14 @@ dependencies = [
  "base64 0.23.1",
  "brocanth",
  "brocanth-cli",
+ "brocanth-db",
  "brocanth-scaffold",
  "getrandom 0.4.3",
  "lettre",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
