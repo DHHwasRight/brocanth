@@ -41,6 +41,7 @@ impl Module for PageViews {
             "analytics",
             "page views counted on the server: no cookie, no script, no third party; rows in your Postgres",
         )
+        .tables(&["brocanth_analytics_views", "brocanth_analytics_sites", "brocanth_analytics_salts"])
         .category(Category::Middleware)
         .asked_in(
             "operations",

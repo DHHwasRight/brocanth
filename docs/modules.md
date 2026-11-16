@@ -899,6 +899,19 @@ rule, and the reason for it:
 - **`migrations/` stays.** It is the history of a database that still has
   the tables. `remove model` does not delete it, and `add model` writes
   around the list the `migrate` tool has rewritten since.
+- **The tables stay.** `remove` drops no data. A module declares the
+  tables it alone creates (`Manifest::tables`), and `remove` prints one
+  `DROP TABLE IF EXISTS` statement for them, with a `help:` line. In a
+  project with `model`, it also writes the statement into
+  `migrations/m<UTC>_drop_<key>_tables.rs`, commented out. That migration
+  is not in `migrations/mod.rs`, so `migrate up` refuses to run until the
+  developer runs `migrate sync` or deletes the file; once listed, its `up`
+  fails while the statement is still commented out. Decision (2026-11):
+  never drop. Reason: a dropped table cannot come back, a remove is often
+  followed by an add, and the rows may be the only copy (audit history,
+  consent, accounts). Dropping is the developer's act, made on purpose.
+  Shared tables (the `queue_*` tables of `jobs` and `webhooks-out`) are
+  not listed: another module may still use them.
 
 ### Module versions — which code wrote the project
 

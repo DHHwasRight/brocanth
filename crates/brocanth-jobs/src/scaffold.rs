@@ -74,6 +74,7 @@ impl Module for Jobs {
             "jobs",
             "a queue in Postgres with retries and a dead letter; a worker in this process",
         )
+        .tables(&["brocanth_job_schedules"])
         .category(Category::Enhancer)
         .requires_unless::<PgPool>(
             &["jobs-memory"],

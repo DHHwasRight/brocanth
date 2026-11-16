@@ -40,6 +40,13 @@
 //!   gone. `add admin` installs them again.
 //! * **Migrations.** `migrations/` is the history of a database that still
 //!   has the tables. Nothing deletes it, and `add` writes around it.
+//! * **The tables.** `remove` drops no data. It prints one `DROP TABLE`
+//!   statement for the tables the module declares
+//!   ([`brocanth_scaffold::Manifest::tables`]), with a help line. In a
+//!   project with `model`, it also writes the statement into a new
+//!   migration under `migrations/`, commented out: the migration fails
+//!   until the developer uncomments it or deletes the file. A dropped
+//!   table cannot come back, and a re-add finds the rows again.
 //!
 //! # When it refuses
 //!
@@ -362,6 +369,33 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
             crate::ui::paint(DIM, format!("kept {path}: {why}"))
         ));
     }
+    let drops = drop_statements(&removing);
+    if !drops.is_empty() {
+        let migration =
+            if after_picks.contains(&"model") && root.join("migrations/mod.rs").is_file() {
+                let (path, text) = drop_migration(&brocanth_db::stamp::now(), &removing, &drops);
+                let full = root.join(&path);
+                std::fs::write(&full, text).map_err(|e| write_error(&full, &e))?;
+                Some(path)
+            } else {
+                None
+            };
+        ui.gap();
+        ui.warn("the tables stay: `remove` drops no data");
+        for (_, sql) in &drops {
+            ui.note(format!("    {}", crate::ui::paint(ACCENT, sql)));
+        }
+        let help = match &migration {
+            Some(path) => format!(
+                "help: to drop them, uncomment the statement in {path}, then run \
+                 `migrate sync` and `migrate up`; to keep them, delete {path}"
+            ),
+            None => "help: to drop them, back up the rows you need, then run the statement \
+                     in `brocanth dbshell`"
+                .to_string(),
+        };
+        ui.note(format!("  {}", crate::ui::paint(DIM, help)));
+    }
 
     ui.gap();
     let mut contents = Table::new().indent(4);
@@ -388,6 +422,95 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     ]);
     ui.table_note(&next);
     Ok(ExitCode::SUCCESS)
+}
+
+/// One `DROP TABLE` statement per leaving module that declares tables. One
+/// statement for all of a module's tables, so Postgres drops them together
+/// whatever the foreign keys between them.
+fn drop_statements(removing: &[&'static str]) -> Vec<(&'static str, String)> {
+    removing
+        .iter()
+        .filter_map(|key| {
+            let tables = create::about(key).tables;
+            (!tables.is_empty()).then(|| {
+                let names: Vec<String> = tables.iter().map(|t| format!("\"{t}\"")).collect();
+                (*key, format!("DROP TABLE IF EXISTS {};", names.join(", ")))
+            })
+        })
+        .collect()
+}
+
+/// The migration that drops the leaving modules' tables, with every
+/// statement commented out: `(path, text)`. Its `up` fails while no
+/// statement is left, so `migrate up` cannot record it as done by mistake.
+fn drop_migration(
+    stamp: &str,
+    removing: &[&'static str],
+    drops: &[(&'static str, String)],
+) -> (String, String) {
+    let keys: Vec<String> = removing.iter().map(|k| k.replace('-', "_")).collect();
+    let name = format!("m{stamp}_drop_{}_tables", keys.join("_"));
+    let statements: String = drops
+        .iter()
+        .map(|(key, sql)| format!("-- The tables of `{key}`.\n-- {sql}\n"))
+        .collect();
+    let text = format!(
+        r##"//! Drops the tables of {modules}, which `brocanth remove` took out.
+//!
+//! Written by `brocanth remove`. It drops nothing yet: every statement is
+//! commented out, and `up` fails while none is left. A dropped table does
+//! not come back, so this is the developer's decision.
+//!
+//! To drop the tables: back up the rows you need, uncomment the statements
+//! below, then run `migrate sync` and `migrate up`. To keep them: delete
+//! this file.
+
+use brocanth_model::sea_orm_migration::prelude::*;
+
+pub struct Migration;
+
+impl MigrationName for Migration {{
+    fn name(&self) -> &str {{
+        "{name}"
+    }}
+}}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {{
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {{
+        let commented = UP
+            .lines()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with("--"));
+        if commented {{
+            return Err(DbErr::Custom(
+                "{name} drops nothing: its statements are commented out\n\
+                 help: uncomment them to drop the tables, or delete the file to keep them"
+                    .into(),
+            ));
+        }}
+        manager.get_connection().execute_unprepared(UP).await?;
+        Ok(())
+    }}
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {{
+        Err(DbErr::Custom(
+            "{name} cannot be undone: the dropped rows are gone\n\
+             help: restore them from the backup you made before `migrate up`"
+                .into(),
+        ))
+    }}
+}}
+
+const UP: &str = r#"
+{statements}"#;
+"##,
+        modules = removing
+            .iter()
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    (format!("migrations/{name}.rs"), text)
 }
 
 fn shown(root: &Path, full: &Path) -> String {
@@ -1213,6 +1336,52 @@ mod tests {
             panic!("{}", said(&e));
         }
         assert_eq!(read(&root, "migrations/mod.rs"), list);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removing_a_module_with_tables_drops_none_and_writes_the_statement_commented_out() {
+        let root = project("rmflags", &["config", "db", "model", "flags"]);
+        if let Err(e) = remove(&root, &["flags"]) {
+            panic!("{}", said(&e));
+        }
+        let written: Vec<String> = std::fs::read_dir(root.join("migrations"))
+            .expect("migrations/")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("_drop_flags_tables"))
+            .collect();
+        assert_eq!(written.len(), 1, "{written:?}");
+        let text = read(&root, &format!("migrations/{}", written[0]));
+        assert!(
+            text.contains("-- DROP TABLE IF EXISTS \"brocanth_flags\";"),
+            "{text}"
+        );
+        assert!(
+            !text.lines().any(|l| l.starts_with("DROP")),
+            "a statement is live: {text}"
+        );
+        assert!(text.contains(&format!("\"{}\"", written[0].trim_end_matches(".rs"))));
+        // The list is the `migrate` tool's: `remove` does not add to it.
+        assert!(!read(&root, "migrations/mod.rs").contains("drop_flags"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn without_model_the_statement_is_printed_and_no_file_is_written() {
+        assert_eq!(
+            drop_statements(&["webhooks-out", "sessions"]),
+            vec![(
+                "webhooks-out",
+                "DROP TABLE IF EXISTS \"brocanth_webhook_deliveries\", \"brocanth_webhook_endpoints\";"
+                    .to_string()
+            )]
+        );
+        let root = project("rmflagsdb", &["config", "db", "flags"]);
+        if let Err(e) = remove(&root, &["flags"]) {
+            panic!("{}", said(&e));
+        }
+        assert_as_created(&root, "rmflagsdb", &["config", "db"], &[]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

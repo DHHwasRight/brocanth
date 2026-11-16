@@ -77,6 +77,7 @@ impl Module for OauthClient {
             "oauth-client",
             "connect pages at /connections; tokens sealed in Postgres, refreshed once, sent as a bearer",
         )
+        .tables(&["brocanth_oauth_tokens"])
         .category(Category::Routes)
         .category(Category::Enhancer)
         .asked_in("doors", "Connect accounts and call their APIs")

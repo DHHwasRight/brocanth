@@ -156,6 +156,11 @@ path is open to anyone who can send a request, so give `/__consent` a
 rule in the rate limiter. Past 16 MiB the file is rotated to `<file>.1`,
 which replaces an older one, so a flood cannot fill the disk.
 
+A line stays for `consent_log_retention_days`, 395 by default (about 13
+months). The writer thread drops older lines at the start and once a day,
+from the file and from `<file>.1`. It writes the kept lines to a new file
+and renames it over the old one, so a crash never leaves half a file.
+
 The file is per instance. Each server writes its own, and a container
 loses it when it stops, unless the path is on a volume that outlives it.
 With `i18n-routing`, `/__consent` keeps no locale segment.
@@ -218,6 +223,7 @@ module writes the policy. The `gtag` module needs nothing from it.
 | `exclude` | `[]` | The project's own paths. The admin is added in code, from its module file: the backoffice is staff, not visitors. |
 | `cookie_domain` | none | The domain Google's cookies live on, such as `example.co.uk`. Without it, the tag picks the domain, and withdrawal removes `_ga` cookies from the host and every parent domain (a browser ignores a public suffix such as `co.uk`). |
 | `consent_log` | none | A file for the consent log above. A server only. |
+| `consent_log_retention_days` | `395` | About 13 months, a common retention for consent records. It outlives the six-month choice and its renewal. |
 | `banner.*` | English | Every string is a setting. With `i18n`, the catalogs override them per locale. |
 
 `allow_params` and `exclude` are lists, so they live in the file only.
@@ -293,8 +299,16 @@ EU law that is personal data, which is why consent is needed at all.
 1. **Another provider.** The banner and the scrubber do not depend on
    Google. A self-hosted counter that sets cookies (Matomo with cookies,
    for example) would reuse them with a different loader.
-2. **Retention of the consent log.** The module appends and never deletes.
-   Should it rotate the file, or leave that to the deployment?
+
+## Decisions
+
+- **The consent log rotates by age.** Decided 2026-11: the module drops
+  the lines older than `consent_log_retention_days` (default 395, about
+  13 months), at the start and once a day. Reason: a consent record must
+  outlive the choice it proves, but a record kept with no end is personal
+  data with no purpose (GDPR Article 5(1)(e)). A deployment tool does not
+  know the line format, so the module does it. The size rotation at
+  16 MiB stays, as the guard against a flood.
 
 ## Sources
 

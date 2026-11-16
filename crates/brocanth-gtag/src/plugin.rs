@@ -10,6 +10,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_body::Body;
@@ -55,7 +56,10 @@ impl Plugin for Gtag {
     fn before_start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if let Some(path) = &self.config.consent_log {
             if self.log.get().is_none() {
-                let log = ConsentLog::open(PathBuf::from(path), CONSENT_LOG_MAX_BYTES)?;
+                let retention = Duration::from_secs(
+                    u64::from(self.config.consent_log_retention_days) * 24 * 60 * 60,
+                );
+                let log = ConsentLog::open(PathBuf::from(path), CONSENT_LOG_MAX_BYTES, retention)?;
                 let _ = self.log.set(log);
             }
         }
@@ -200,9 +204,13 @@ impl RequestHook for Record {
 /// with a 503 rather than held in memory.
 const CONSENT_QUEUE: usize = 1_024;
 
+/// How often the writer drops the lines older than the retention.
+const SWEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The consent log: a thread appends each line, so a request never waits
 /// on the disk. It rotates the file past a size, so a flood of reports
-/// cannot fill the disk.
+/// cannot fill the disk. It drops the lines older than the retention at
+/// the start and once a day, so the log keeps no record past its use.
 struct ConsentLog {
     sender: mpsc::SyncSender<String>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -212,7 +220,7 @@ struct ConsentLog {
 impl ConsentLog {
     /// Opens the file now, so a path this process cannot write stops the
     /// start, not the first visitor's click.
-    fn open(path: PathBuf, max_bytes: u64) -> Result<Self, PluginError> {
+    fn open(path: PathBuf, max_bytes: u64, retention: Duration) -> Result<Self, PluginError> {
         let shown = path.display().to_string();
         let failed = |e: std::io::Error| {
             PluginError::new(format!(
@@ -224,7 +232,7 @@ impl ConsentLog {
         let (sender, receiver) = mpsc::sync_channel::<String>(CONSENT_QUEUE);
         let writer = std::thread::Builder::new()
             .name("gtag-consent-log".into())
-            .spawn(move || write_lines(&path, file, max_bytes, &receiver))
+            .spawn(move || write_lines(&path, file, max_bytes, retention, &receiver))
             .map_err(failed)?;
         Ok(Self { sender, writer })
     }
@@ -259,20 +267,32 @@ fn write_lines(
     path: &Path,
     mut file: std::fs::File,
     max_bytes: u64,
+    retention: Duration,
     lines: &mpsc::Receiver<String>,
 ) {
-    let mut size = file.metadata().map_or(0, |m| m.len());
     let mut rotated = path.as_os_str().to_owned();
     rotated.push(".1");
-    for line in lines {
+    let rotated = PathBuf::from(rotated);
+    let mut next_sweep = Instant::now();
+    loop {
+        if Instant::now() >= next_sweep {
+            if let Some(fresh) = sweep(path, &rotated, retention) {
+                file = fresh;
+            }
+            next_sweep = Instant::now() + SWEEP_EVERY;
+        }
+        let wait = next_sweep.saturating_duration_since(Instant::now());
+        let line = match lines.recv_timeout(wait) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
         let len = line.len() as u64;
+        let size = file.metadata().map_or(0, |m| m.len());
         if size > 0 && size + len > max_bytes {
             let next = std::fs::rename(path, &rotated).and_then(|()| append_to(path));
             match next {
-                Ok(fresh) => {
-                    file = fresh;
-                    size = 0;
-                }
+                Ok(fresh) => file = fresh,
                 Err(e) => eprintln!(
                     "[gtag] consent log {}: cannot rotate: {e}\n\
                      help: check that the directory is writable; the log grows until it is",
@@ -280,15 +300,78 @@ fn write_lines(
                 ),
             }
         }
-        match file.write_all(line.as_bytes()) {
-            Ok(()) => size += len,
-            Err(e) => eprintln!(
+        if let Err(e) = file.write_all(line.as_bytes()) {
+            eprintln!(
                 "[gtag] consent log {}: a choice was not recorded: {e}\n\
                  help: check the disk and the file's permissions",
                 path.display()
-            ),
+            );
         }
     }
+}
+
+/// Drops the lines older than `retention` from the log and from its
+/// rotated file. Returns the log reopened when it was rewritten.
+fn sweep(path: &Path, rotated: &Path, retention: Duration) -> Option<std::fs::File> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let cutoff = now.saturating_sub(retention.as_secs());
+    let report = |file: &Path, e: std::io::Error| {
+        eprintln!(
+            "[gtag] consent log {}: cannot drop the old lines: {e}\n\
+             help: check that the directory is writable; the old lines stay until it is",
+            file.display()
+        );
+    };
+    if let Err(e) = keep_since(rotated, cutoff, true) {
+        report(rotated, e);
+    }
+    match keep_since(path, cutoff, false) {
+        Ok(true) => append_to(path).map_err(|e| report(path, e)).ok(),
+        Ok(false) => None,
+        Err(e) => {
+            report(path, e);
+            None
+        }
+    }
+}
+
+/// Rewrites `file` with only the lines recorded at or after `cutoff` (Unix
+/// seconds). A line with no time is kept: it is not this log's to judge.
+/// With `remove_empty`, a file left with no line is removed. `Ok(true)`
+/// when the file changed.
+fn keep_since(file: &Path, cutoff: u64, remove_empty: bool) -> std::io::Result<bool> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let kept: String = text
+        .split_inclusive('\n')
+        .filter(|line| recorded_at(line).is_none_or(|at| at >= cutoff))
+        .collect();
+    if kept.len() == text.len() {
+        return Ok(false);
+    }
+    if kept.is_empty() && remove_empty {
+        std::fs::remove_file(file)?;
+        return Ok(true);
+    }
+    // A new file, then a rename: a crash leaves the old file or the new
+    // one, never half of one.
+    let mut fresh = file.as_os_str().to_owned();
+    fresh.push(".sweep");
+    std::fs::write(&fresh, kept.as_bytes())?;
+    std::fs::rename(&fresh, file)?;
+    Ok(true)
+}
+
+/// The `"at"` of a log line, in Unix seconds.
+fn recorded_at(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix("{\"at\":")?;
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..end].parse().ok()
 }
 
 /// The hook, with its markup built once at startup.
@@ -404,7 +487,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brocanth-gtag-rotate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("consent.jsonl");
-        let log = ConsentLog::open(path.clone(), 100).expect("a log");
+        let log = ConsentLog::open(path.clone(), 100, Duration::from_secs(3600)).expect("a log");
         for n in 0..5 {
             assert!(log.push(format!("{n}{}\n", "x".repeat(38))));
         }
@@ -419,10 +502,50 @@ mod tests {
     }
 
     #[test]
+    fn the_lines_past_the_retention_are_dropped_at_the_start() {
+        let dir = std::env::temp_dir().join(format!("brocanth-gtag-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let day = 24 * 60 * 60;
+        let line =
+            |at: u64, id: &str| format!("{{\"at\":{at},\"choice\":\"granted\",\"id\":\"{id}\"}}\n");
+        let path = dir.join("consent.jsonl");
+        std::fs::write(&path, line(now - 10 * day, "old") + &line(now - day, "new")).unwrap();
+        std::fs::write(dir.join("consent.jsonl.1"), line(now - 20 * day, "older")).unwrap();
+        let log =
+            ConsentLog::open(path.clone(), 1_000, Duration::from_secs(5 * day)).expect("a log");
+        assert!(log.push(line(now, "now")));
+        log.close();
+        let kept = std::fs::read_to_string(&path).expect("the log");
+        assert!(!kept.contains("\"old\""), "{kept}");
+        assert!(
+            kept.contains("\"new\"") && kept.contains("\"now\""),
+            "{kept}"
+        );
+        assert!(
+            !dir.join("consent.jsonl.1").exists(),
+            "the emptied rotated file is removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_with_no_time_is_kept() {
+        assert_eq!(recorded_at("{\"at\":12,\"choice\":\"denied\"}\n"), Some(12));
+        assert_eq!(recorded_at("not json\n"), None);
+    }
+
+    #[test]
     fn a_log_this_process_cannot_create_stops_the_start() {
         let file = std::env::temp_dir().join(format!("brocanth-gtag-file-{}", std::process::id()));
         std::fs::write(&file, "a file, not a directory").unwrap();
-        let Err(error) = ConsentLog::open(file.join("consent.jsonl"), 100) else {
+        let Err(error) =
+            ConsentLog::open(file.join("consent.jsonl"), 100, Duration::from_secs(3600))
+        else {
             panic!("a path under a file was accepted");
         };
         assert!(error.to_string().contains("help:"), "{error}");

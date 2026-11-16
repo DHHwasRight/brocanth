@@ -98,6 +98,21 @@ impl Module for Auth {
             "auth",
             "argon2id accounts and signed sessions; no provider, so no HTTP client",
         )
+        .tables(&[
+            "brocanth_auth_account_roles",
+            "brocanth_auth_accounts",
+            "brocanth_auth_failed_logins",
+            "brocanth_auth_otp_challenges",
+            "brocanth_auth_provider_links",
+            "brocanth_auth_recovery_codes",
+            "brocanth_auth_roles",
+            "brocanth_auth_second_factor_failures",
+            "brocanth_auth_sessions",
+            "brocanth_auth_sign_in_locations",
+            "brocanth_auth_superusers",
+            "brocanth_auth_tokens",
+            "brocanth_auth_totp_secrets",
+        ])
         .category(Category::Middleware)
         .category(Category::Enhancer)
         .uses::<PgPool>("accounts and sessions are rows on the project's pool, not in memory")

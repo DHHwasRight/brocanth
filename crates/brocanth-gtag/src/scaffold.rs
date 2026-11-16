@@ -168,6 +168,12 @@ impl Module for Gtag {
                      unless the path is on a volume that outlives it.",
                 )
                 .optional(),
+                Setting::integer(
+                    "consent_log_retention_days",
+                    395,
+                    "How long a line stays in the consent log, in days.",
+                )
+                .note("About 13 months. The server drops older lines at the start and once a day."),
                 Setting::text(
                     "banner.text",
                     "We would like to measure visits with Google Analytics. It sets cookies only if you accept.",

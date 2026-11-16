@@ -60,6 +60,7 @@ impl Module for FileStorage {
             "storage",
             "uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3",
         )
+        .tables(&["brocanth_object_variants", "brocanth_objects"])
         .category(Category::Enhancer)
         .category(Category::Middleware)
         .uses::<PgPool>(

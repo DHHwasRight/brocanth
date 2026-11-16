@@ -1621,6 +1621,15 @@ pub const SETTINGS: &[Setting] = &[
         env: "MY_BLOG_GTAG__CONSENT_LOG",
     },
     Setting {
+        path: "gtag.consent_log_retention_days",
+        help: "How long a line stays in the consent log, in days.",
+        flag: true,
+        file: "src/modules/gtag.rs",
+        flags: crate::modules::gtag::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_GTAG__CONSENT_LOG_RETENTION_DAYS",
+    },
+    Setting {
         path: "gtag.banner.text",
         help: "The sentence the banner asks with.",
         flag: true,
@@ -2020,6 +2029,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("gtag.exclude", format!("{:?}", gtag.exclude)),
         ("gtag.cookie_domain", format!("{:?}", gtag.cookie_domain)),
         ("gtag.consent_log", format!("{:?}", gtag.consent_log)),
+        (
+            "gtag.consent_log_retention_days",
+            format!("{:?}", gtag.consent_log_retention_days),
+        ),
         ("gtag.banner.text", format!("{:?}", gtag.banner.text)),
         ("gtag.banner.accept", format!("{:?}", gtag.banner.accept)),
         ("gtag.banner.refuse", format!("{:?}", gtag.banner.refuse)),
@@ -2101,6 +2114,9 @@ pub fn gtag_settings(given: &[Given]) -> Result<brocanth_gtag::GtagConfig, Strin
             "gtag.exclude" => settings.exclude = listed(given)?,
             "gtag.cookie_domain" => settings.cookie_domain = optional(given)?,
             "gtag.consent_log" => settings.consent_log = optional(given)?,
+            "gtag.consent_log_retention_days" => {
+                settings.consent_log_retention_days = parsed(given)?
+            }
             "gtag.banner.text" => settings.banner.text = parsed(given)?,
             "gtag.banner.accept" => settings.banner.accept = parsed(given)?,
             "gtag.banner.refuse" => settings.banner.refuse = parsed(given)?,
@@ -2142,6 +2158,10 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
         ("gtag.exclude", format!("{:?}", gtag.exclude)),
         ("gtag.cookie_domain", format!("{:?}", gtag.cookie_domain)),
         ("gtag.consent_log", format!("{:?}", gtag.consent_log)),
+        (
+            "gtag.consent_log_retention_days",
+            format!("{:?}", gtag.consent_log_retention_days),
+        ),
         ("gtag.banner.text", format!("{:?}", gtag.banner.text)),
         ("gtag.banner.accept", format!("{:?}", gtag.banner.accept)),
         ("gtag.banner.refuse", format!("{:?}", gtag.banner.refuse)),
@@ -2298,7 +2318,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 36cee3273f00257f
+// brocanth-digest: 3b37487c02a746ae
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2406,6 +2426,7 @@ pub mod gtag {
         Exclude,
         CookieDomain,
         ConsentLog,
+        ConsentLogRetentionDays,
         BannerText,
         BannerAccept,
         BannerRefuse,
@@ -2428,6 +2449,7 @@ pub mod gtag {
                 Key::Exclude => "gtag.exclude",
                 Key::CookieDomain => "gtag.cookie_domain",
                 Key::ConsentLog => "gtag.consent_log",
+                Key::ConsentLogRetentionDays => "gtag.consent_log_retention_days",
                 Key::BannerText => "gtag.banner.text",
                 Key::BannerAccept => "gtag.banner.accept",
                 Key::BannerRefuse => "gtag.banner.refuse",
@@ -2475,7 +2497,7 @@ pub mod gtag {
     }
 }
 
-// brocanth-digest: 0f76fa0484c9d674
+// brocanth-digest: ee1207aa8fa340cd
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.

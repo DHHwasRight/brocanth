@@ -34,6 +34,7 @@ impl Module for Audit {
             "audit",
             "change history: who changed which row, when, and what; rows in your Postgres",
         )
+        .tables(&["brocanth_audit"])
         // Middleware first: the plugin installs a hook (a model hook), and
         // the hook record is a middleware's slot.
         .category(Category::Middleware)

@@ -52,6 +52,7 @@ are not counted:
 | `exclude` | `[]` (a generated project adds the admin's path) | file only | by index, with `config` |
 | `cookie_domain` | none | `--gtag.cookie_domain` | `$<APP>_GTAG__COOKIE_DOMAIN` |
 | `consent_log` | none | `--gtag.consent_log` | `$<APP>_GTAG__CONSENT_LOG` |
+| `consent_log_retention_days` | `395` | `--gtag.consent_log_retention_days` | `$<APP>_GTAG__CONSENT_LOG_RETENTION_DAYS` |
 | `banner.text`, `banner.accept`, `banner.refuse`, `banner.manage`, `banner.policy_url` | English | `--gtag.banner.*` | `$<APP>_GTAG__BANNER__*` |
 
 With the `config` module, the settings live under `[gtag]` in
@@ -79,6 +80,15 @@ site's own pages, and it rotates the file past 16 MiB, but anyone can send
 it a request: give `/__consent` a rule in the rate limiter. The file is per
 instance, and a container loses it when it stops, unless the path is on a
 volume that outlives it.
+
+The log keeps a line for `consent_log_retention_days`, 395 by default
+(about 13 months). The writer drops older lines at the start and once a
+day, from the file and from `<file>.1`. Decision: the log rotates by age
+as well as by size. A consent record must outlive the choice it proves
+(`consent_days`, six months by default) and its renewal, but a record
+kept with no end is personal data with no purpose. Thirteen months is a
+common retention for consent records. Set a longer value when your
+regulator or your counsel asks for one.
 
 ```rust
 use brocanth_gtag::{parse_choice, GtagConfig};

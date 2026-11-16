@@ -49,6 +49,7 @@ impl Module for Cache {
             "cache",
             "a cache on an unlogged Postgres table, not Redis; without it no cache at all",
         )
+        .tables(&["brocanth_cache_tags", "brocanth_cache"])
         .category(Category::Enhancer)
         .requires_unless::<PgPool>(
             &BACKENDS,

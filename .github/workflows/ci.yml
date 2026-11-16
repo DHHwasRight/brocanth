@@ -1,0 +1,172 @@
+# The project gate (CLAUDE.md "Commands"), on GitHub Actions.
+#
+# Every push to main and every pull request runs lint, test, scaffold and
+# database. `generated` builds and tests generated projects; it takes many
+# minutes, so it runs on a push to main, every night and on demand, not on
+# each pull request. The nightly run also starts the embedded Postgres
+# tests, which download a Postgres archive.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      # No database is set, so the Postgres tests skip; the `database` job
+      # runs them.
+      - run: cargo test --workspace --locked --no-fail-fast
+
+  scaffold:
+    name: scaffold side of each module
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scaffold
+      - run: mise run scaffold
+
+  database:
+    name: Postgres and Redis tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: brocanth
+          POSTGRES_PASSWORD: brocanth
+          POSTGRES_DB: brocanth
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U brocanth"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      queue:
+        image: postgres:16
+        env:
+          POSTGRES_USER: brocanth
+          POSTGRES_PASSWORD: brocanth
+          POSTGRES_DB: queue
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U brocanth"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      BROCANTH_TEST_DATABASE_URL: postgres://brocanth:brocanth@localhost:5432/brocanth
+      # A database of its own: its tests clear the shared `queue_*` tables
+      # under a lock that only one process holds.
+      BROCANTH_QUEUE_TEST_DATABASE_URL: postgres://brocanth:brocanth@localhost:5433/queue
+      BROCANTH_QUEUE_REQUIRE_POSTGRES: "1"
+      BROCANTH_CACHE_TEST_REDIS: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: database
+      # The crates whose tests read the variables above, each with every
+      # feature (the `postgres` tests of cache and storage sit behind
+      # one). One process at a time: two processes on one database touch
+      # each other's jobs rows (CLAUDE.md "Tests"). The embedded Postgres
+      # tests skip without BROCANTH_EMBEDDED_TEST; the nightly job runs
+      # them.
+      - name: database tests
+        shell: bash
+        run: |
+          failed=""
+          for c in brocanth-admin-model brocanth-analytics brocanth-audit \
+                   brocanth-auth brocanth-cache brocanth-cache-redis brocanth-db \
+                   brocanth-filters brocanth-flags brocanth-jobs brocanth-middleware \
+                   brocanth-migrate brocanth-model brocanth-oauth-client \
+                   brocanth-pagination brocanth-policy brocanth-policy-macros \
+                   brocanth-queue-postgres brocanth-resource brocanth-rls \
+                   brocanth-search brocanth-storage brocanth-webhooks; do
+            echo "::group::$c"
+            cargo test -p "$c" --all-features --locked --no-fail-fast || failed="$failed $c"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "these crates failed:$failed" >&2
+            exit 1
+          fi
+
+  generated:
+    name: generated projects
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: generated
+          # The generated projects share target/generated.
+          workspaces: |
+            . -> target
+            . -> target/generated
+      - run: mise run generated
+
+  embedded:
+    name: embedded Postgres
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: embedded
+      # Downloads the Postgres archive on its first run
+      # (docs/modules/db-embedded.md).
+      - run: mise run embedded

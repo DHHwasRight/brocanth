@@ -313,6 +313,13 @@ pub struct Manifest {
     /// The contract between two modules: a reader names the export, not a
     /// copy of the value, so the owner can move it and no reader changes.
     pub exports: Vec<Export>,
+    /// The database tables this module alone creates. Set with
+    /// [`Manifest::tables`].
+    ///
+    /// `brocanth remove` drops none of them: it prints the `DROP TABLE`
+    /// statements, so the developer drops the data on purpose or keeps it.
+    /// A table another module shares (the `queue_*` tables) is not listed.
+    pub tables: Vec<&'static str>,
 }
 
 /// A fact a module gives other modules to read: a name, the values and what
@@ -360,6 +367,7 @@ impl Manifest {
             contributions: Vec::new(),
             collects: Vec::new(),
             exports: Vec::new(),
+            tables: Vec::new(),
         }
     }
 
@@ -527,6 +535,13 @@ impl Manifest {
     /// crate takes the workspace version, which is the CLI's.
     pub fn version(mut self, version: &'static str) -> Self {
         self.version = Some(version);
+        self
+    }
+
+    /// The database tables this module alone creates. `brocanth remove`
+    /// prints the statements that drop them and runs none.
+    pub fn tables(mut self, names: &[&'static str]) -> Self {
+        self.tables.extend_from_slice(names);
         self
     }
 
