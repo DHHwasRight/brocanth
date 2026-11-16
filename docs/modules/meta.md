@@ -13,7 +13,7 @@ The wizard calls it: *A title, a description and share tags for each page*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md), [`i18n`](i18n.md), [`i18n-routing`](i18n-routing.md), [`rsx`](rsx.md), [`sitemap`](sitemap.md) |
+| Adapts to | [`i18n`](i18n.md), [`i18n-routing`](i18n-routing.md), [`rsx`](rsx.md), [`sitemap`](sitemap.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the static export renders every page through the layouts |
 | Crates | `brocanth-meta` |

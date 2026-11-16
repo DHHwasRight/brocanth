@@ -14,7 +14,7 @@ The wizard calls it: *An ORM with validations and migrations*.
 | Needs | none |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | none |
-| Adapts to | [`config`](config.md), [`commands`](commands.md) |
+| Adapts to | [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-model` (features `db`, `plugin`), `brocanth-migrate` (the `migrate` tool) |

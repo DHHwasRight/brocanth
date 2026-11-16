@@ -13,7 +13,7 @@ The wizard calls it: *Refuse a form post this application did not hand out*.
 | Part of | [`middleware`](middleware.md), ticked with its parent |
 | Needs | none |
 | After | [`middleware`](middleware.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

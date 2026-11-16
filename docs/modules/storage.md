@@ -14,7 +14,7 @@ The wizard calls it: *Uploads on disk or in Postgres, addressed by content hash*
 | Needs | none |
 | Uses | `PgPool`: the objects live in the `db` database, on its pool, and not on one machine's disk |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-storage` (feature `postgres` with [`db`](db.md)) |

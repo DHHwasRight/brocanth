@@ -14,7 +14,7 @@ The wizard calls it: *Accounts and passwords. No OAuth provider*.
 | Needs | none |
 | Uses | `PgPool`: accounts and sessions are rows on the project's pool, not in memory |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`auth-oauth`](auth-oauth.md) |
+| Adapts to | [`auth-oauth`](auth-oauth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` |

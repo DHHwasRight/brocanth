@@ -14,7 +14,7 @@ The wizard calls it: *Background jobs, with retries and a dead letter*.
 | Needs | none |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so; not with [`jobs-memory`](jobs-memory.md) |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`jobs-memory`](jobs-memory.md), [`observability`](observability.md), [`observability-metrics`](observability-metrics.md), [`admin`](admin.md) |
+| Adapts to | [`jobs-memory`](jobs-memory.md), [`observability`](observability.md), [`observability-metrics`](observability-metrics.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-jobs` (feature `admin` with `admin`), `serde` (features `derive`) |

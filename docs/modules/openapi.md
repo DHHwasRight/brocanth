@@ -13,7 +13,7 @@ The wizard calls it: *An OpenAPI document, derived from your routes*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`input`](input.md), [`auth-oauth`](auth-oauth.md), [`oauth-client`](oauth-client.md), [`admin`](admin.md) |
+| Adapts to | [`input`](input.md), [`auth-oauth`](auth-oauth.md), [`oauth-client`](oauth-client.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-openapi` (feature `zod`; `admin` with that module) |

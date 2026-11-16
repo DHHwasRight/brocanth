@@ -1481,27 +1481,38 @@ macro_rules! register {
     ($builder:expr) => {{
         use brocanth_config::AppBuilderConfigExt;
 
-        // The files, the environment and, where src/modules/ turns them
-        // on, the flags: `brocanth-config` layers them and types each
-        // section, and it is the only reason a TOML parser is in the tree.
-        let config = crate::plugins::config()?;
-        let builder = $builder.with_config(config);
-        let builder = builder
-            .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
-            .map_err(|e| e.to_string())?;
+        // Every settings layer: the module files, the config files, the
+        // environment and the flags. `brocanth-config` layers them and
+        // types each section, and it is the only reason a TOML parser is
+        // in the tree.
+        let layers = crate::plugins::layers()?;
+        let builder = $builder.with_config(layers.clone());
+        let builder = builder.plugin(
+            <crate::plugins::admin::AdminSettings as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::admin_settings(&layers)?,
+            ),
+        );
         // PgPool <- db (cache requires PgPool). `brocanth.toml` [bindings] records it.
-        let builder = builder
-            .plugin_from_config::<crate::plugins::db::Database>("db")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::cache::Cache>("cache")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::superuser::Superuser>("superuser")
-            .map_err(|e| e.to_string())?;
+        let builder = builder.plugin(
+            <crate::plugins::db::Database as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::db_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
+            <crate::plugins::cache::Cache as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::cache_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
+            <crate::plugins::auth::Auth as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::auth_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
+            <crate::plugins::superuser::Superuser as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::superuser_settings(&layers)?,
+            ),
+        );
         builder
     }};
 }
@@ -1630,10 +1641,12 @@ pub struct Setting {
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
-    /// Whether a flag may set it. A secret has none: every user on the host
-    /// can read a process's arguments.
+    /// Whether a flag may carry its value. A secret has none, because every
+    /// user on the host can read a process's arguments: its flags
+    /// `<path>_file` and `<path>_env` point at the value instead.
     pub flag: bool,
-    /// The module file that renames its flag and turns the flags on or off.
+    /// The module file that renames its flag, turns the flags off, or sets
+    /// a value in code.
     pub file: &'static str,
     /// Whether its module reads flags, from that file.
     pub flags: Flags,
@@ -1641,6 +1654,8 @@ pub struct Setting {
     pub none_as: Option<&'static str>,
     /// Whether a flag's value stays a string whatever it looks like.
     pub text: bool,
+    /// Whether it is a list: the items joined by commas.
+    pub list: bool,
 }
 
 /// Every setting the framework and the modules declared. `brocanth add`
@@ -1654,6 +1669,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "admin.header",
@@ -1663,6 +1679,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "admin.index_title",
@@ -1672,6 +1689,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "admin.site_url",
@@ -1681,6 +1699,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "admin.stylesheet",
@@ -1690,15 +1709,17 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::admin::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "db.url",
         help: "The Postgres URL: postgres://user:password@host:5432/database.",
         flag: false,
         file: "src/modules/db.rs",
-        flags: Flags::Off,
+        flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "db.max_connections",
@@ -1708,6 +1729,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "db.min_connections",
@@ -1717,6 +1739,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "db.acquire_timeout",
@@ -1726,6 +1749,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "db.idle_timeout",
@@ -1735,6 +1759,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "db.statement_timeout",
@@ -1744,6 +1769,17 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
+    },
+    Setting {
+        path: "db.search_path",
+        help: "The schemas for a table name with no schema. Empty is the server's default.",
+        flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
     },
     Setting {
         path: "db.read_only",
@@ -1753,6 +1789,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "db.application_name",
@@ -1762,6 +1799,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "db.ca_file",
@@ -1771,6 +1809,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "cache.migrate",
@@ -1780,6 +1819,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::cache::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "cache.sweep_every",
@@ -1789,6 +1829,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::cache::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "auth.signing_key_env",
@@ -1798,6 +1839,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "auth.totp_key_env",
@@ -1807,6 +1849,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "auth.cookie_name",
@@ -1816,6 +1859,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "auth.secure",
@@ -1825,6 +1869,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "auth.idle_timeout",
@@ -1834,6 +1879,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "auth.absolute_timeout",
@@ -1843,6 +1889,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth::MODULE.flags,
         none_as: None,
         text: false,
+        list: false,
     },
     Setting {
         path: "superuser.email",
@@ -1852,6 +1899,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::superuser::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "superuser.password_env",
@@ -1861,6 +1909,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::superuser::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
     },
     Setting {
         path: "server.shutdown_grace_secs",
@@ -1870,6 +1919,7 @@ pub const SETTINGS: &[Setting] = &[
         flags: Flags::Project,
         none_as: None,
         text: false,
+        list: false,
     },
 ];
 
@@ -1877,52 +1927,106 @@ pub const SETTINGS: &[Setting] = &[
 pub struct Given {
     /// What it sets.
     pub setting: &'static Setting,
-    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    /// Where it came from: `src/modules/sessions.rs`, `$MY_APP_SESSIONS__COOKIE`,
+    /// `--cookie`, or a pointer such as `--db.url_file=/run/secrets/db`.
     pub from: String,
-    /// The value, as typed. Empty is `None` for an `Option` setting.
+    /// The value. Empty is `None` for an `Option` setting.
     pub value: String,
 }
 
+/// What a flag's value is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    /// The value itself: `--sessions.cookie=x`.
+    Value,
+    /// A secret, read from the file at this path: `--db.url_file=/run/secrets/db`.
+    File,
+    /// A secret, read from the variable of this name: `--db.url_env=DATABASE_URL`.
+    Env,
+}
+
+/// One flag: its name after the renames in src/modules/, and what it reads.
+pub struct Name {
+    /// What it sets.
+    pub setting: &'static Setting,
+    /// The name, without `--`.
+    pub name: String,
+    /// What its value is.
+    pub read: Read,
+}
+
+impl Name {
+    /// What `--help` says of it, and the placeholder of its value.
+    pub fn help(&self) -> (String, &'static str) {
+        match self.read {
+            Read::Value => (self.setting.help.to_string(), "VALUE"),
+            Read::File => (
+                format!("Read `{}` from the file at PATH.", self.setting.path),
+                "PATH",
+            ),
+            Read::Env => (
+                format!("Read `{}` from the variable VAR.", self.setting.path),
+                "VAR",
+            ),
+        }
+    }
+}
+
 /// The name each flag answers to after the renames in src/modules/, whether
-/// the flags are read or not.
+/// the flags are read or not. A secret has two pointer flags, `<path>_file`
+/// and `<path>_env`, which no file renames.
 ///
 /// A name that is not spelled as a flag, and two flags under one name, each
 /// stop the binary: each would otherwise be a flag that does nothing, or does
 /// something else. A rename of a key no flag sets does not compile: `Key` has
 /// no variant for it.
-fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+fn names() -> Result<Vec<Name>, String> {
     let renames = renames();
-    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
-    for setting in SETTINGS.iter().filter(|setting| setting.flag) {
-        let name = renames
-            .iter()
-            .find(|(path, _)| *path == setting.path)
-            .map_or(setting.path, |(_, flag)| flag.name());
-        if name.is_empty() {
-            continue;
+    let mut names: Vec<Name> = Vec::new();
+    for setting in SETTINGS {
+        let wanted = if setting.flag {
+            let name = renames
+                .iter()
+                .find(|(path, _)| *path == setting.path)
+                .map_or(setting.path, |(_, flag)| flag.name());
+            vec![(name.to_string(), Read::Value)]
+        } else {
+            vec![
+                (format!("{}_file", setting.path), Read::File),
+                (format!("{}_env", setting.path), Read::Env),
+            ]
+        };
+        for (name, read) in wanted {
+            if name.is_empty() {
+                continue;
+            }
+            let spelled = name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+            let taken = ["help", "version", "settings"].contains(&name.as_str());
+            if !spelled || name.starts_with(['-', '.', '_']) || taken {
+                return Err(format!(
+                    "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
+                    setting.file
+                ));
+            }
+            if let Some(other) = names.iter().find(|other| other.name == name) {
+                let files = if other.setting.file == setting.file {
+                    other.setting.file.to_string()
+                } else {
+                    format!("{} or {}", other.setting.file, setting.file)
+                };
+                return Err(format!(
+                    "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
+                    other.setting.path, setting.path
+                ));
+            }
+            names.push(Name {
+                setting,
+                name,
+                read,
+            });
         }
-        let spelled = name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
-        let taken = ["help", "version", "settings"].contains(&name);
-        if !spelled || name.starts_with(['-', '.', '_']) || taken {
-            return Err(format!(
-                "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
-                setting.file
-            ));
-        }
-        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
-            let files = if other.file == setting.file {
-                other.file.to_string()
-            } else {
-                format!("{} or {}", other.file, setting.file)
-            };
-            return Err(format!(
-                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
-                other.path, setting.path
-            ));
-        }
-        names.push((setting, name));
     }
     Ok(names)
 }
@@ -1951,29 +2055,50 @@ fn renames() -> Vec<(&'static str, Flag)> {
     renames
 }
 
-/// Whether a module's flags are read: its file says `Flags::On` or
-/// `Flags::Off`, or follows the project rule. With a config file, the file is
-/// the source until src/modules/brocanth.rs turns the flags on.
-fn flags_on(rule: Flags) -> bool {
-    match rule {
-        Flags::On => true,
-        Flags::Off => false,
-        Flags::Project => crate::modules::brocanth::MODULE.flags_with_config,
+/// The values src/modules/ sets in code, as `(path, value, file)`: the
+/// layer over the defaults and under every other.
+fn code() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut code = Vec::new();
+    for (key, value) in crate::modules::brocanth::MODULE.set {
+        code.push((key.path(), *value, "src/modules/brocanth.rs"));
     }
+    for (key, value) in crate::modules::db::MODULE.set {
+        code.push((key.path(), *value, "src/modules/db.rs"));
+    }
+    for (key, value) in crate::modules::cache::MODULE.set {
+        code.push((key.path(), *value, "src/modules/cache.rs"));
+    }
+    for (key, value) in crate::modules::admin::MODULE.set {
+        code.push((key.path(), *value, "src/modules/admin.rs"));
+    }
+    for (key, value) in crate::modules::auth::MODULE.set {
+        code.push((key.path(), *value, "src/modules/auth.rs"));
+    }
+    for (key, value) in crate::modules::superuser::MODULE.set {
+        code.push((key.path(), *value, "src/modules/superuser.rs"));
+    }
+    code
 }
 
-/// The flags this run reads: each module file decides, and
-/// src/modules/brocanth.rs holds the project rule. Every name is checked
-/// first, read or not.
-pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+/// Whether a module's flags are read: on, unless its file says
+/// `Flags::Off`. A config file does not turn them off: it is one more layer,
+/// under the environment and the flags.
+fn flags_on(rule: Flags) -> bool {
+    !matches!(rule, Flags::Off)
+}
+
+/// The flags this run reads: each module file decides. Every name is
+/// checked first, read or not.
+pub fn flag_names() -> Result<Vec<Name>, String> {
     Ok(names()?
         .into_iter()
-        .filter(|(setting, _)| flags_on(setting.flags))
+        .filter(|name| flags_on(name.setting.flags))
         .collect())
 }
 
-/// A flag given while the flags are off, refused by name with what to do
-/// instead. Silently ignoring it would run with a value nobody chose.
+/// A flag given while its module's flags are off, refused by name with
+/// what to do instead. Silently ignoring it would run with a value nobody
+/// chose.
 pub fn refuse_off_flags() -> Result<(), String> {
     let names = names()?;
     for arg in std::env::args_os().skip(1) {
@@ -1985,34 +2110,42 @@ pub fn refuse_off_flags() -> Result<(), String> {
             continue;
         };
         let name = written.split_once('=').map_or(written, |(name, _)| name);
-        let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) else {
+        let Some(found) = names.iter().find(|known| known.name == name) else {
             continue;
         };
-        if flags_on(setting.flags) {
+        if flags_on(found.setting.flags) {
             continue;
         }
-        let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
-        let fix = if setting.file.ends_with("/brocanth.rs") {
-            "flags_with_config: true"
-        } else {
-            "flags: Flags::On"
-        };
         return Err(format!(
-            "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set `{fix}` in {}, or set `{key}` under [{section}] in config/<env>.toml",
-            setting.file
+            "`--{name}` is off: {} turns the flags of its module off\nhelp: set `flags: Flags::On` in {}, or set `{}` in the environment",
+            found.setting.file, found.setting.file, found.setting.path
         ));
     }
     Ok(())
 }
 
-/// The flags this run was given, in the order typed. The environment is not
-/// here: `brocanth-config` reads it, under the file and over the flags.
+/// What this run was given above the defaults, lowest first: each value
+/// src/modules/ sets in code, each variable that is set when there is no
+/// config file, then each flag in the order typed. A later value for one
+/// key replaces an earlier one. With a config file, `brocanth-config` reads
+/// the files and the variables, between the code and the flags.
 ///
-/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
-/// is a command's, and the command line's own parser has already refused what
+/// `--name=VALUE` and `--name VALUE`. A secret's `_file` flag reads the file
+/// at its path and its `_env` flag the variable it names, so the value
+/// never enters the command line. Every other argument is left alone: it is
+/// a command's, and the command line's own parser has already refused what
 /// nobody declared.
 pub fn given() -> Result<Vec<Given>, String> {
     let mut given = Vec::new();
+    for (path, value, file) in code() {
+        if let Some(setting) = SETTINGS.iter().find(|setting| setting.path == path) {
+            given.push(Given {
+                setting,
+                from: file.to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
     let names = flag_names()?;
     let args: Vec<String> = std::env::args_os()
         .skip(1)
@@ -2030,28 +2163,48 @@ pub fn given() -> Result<Vec<Given>, String> {
             Some((name, value)) => (name, Some(value.to_string())),
             None => (written, None),
         };
-        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+        let Some(found) = names.iter().find(|known| known.name == name) else {
             continue;
         };
-        let value = match inline {
+        let raw = match inline {
             Some(value) => value,
             None => rest
                 .next()
                 .cloned()
                 .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
         };
+        let (from, value) = match found.read {
+            Read::Value => (format!("--{name}"), raw),
+            Read::File => {
+                let text = std::fs::read_to_string(&raw).map_err(|e| {
+                    format!("--{name}={raw}: {e}\nhelp: point it at a file that holds the value")
+                })?;
+                let value = text.trim_end_matches(['\n', '\r']).to_string();
+                (format!("--{name}={raw}"), value)
+            }
+            Read::Env => {
+                let value = std::env::var(&raw).map_err(|_| {
+                    format!("--{name}={raw}: ${raw} is not set\nhelp: set ${raw}, or drop the flag")
+                })?;
+                (format!("--{name}={raw}"), value)
+            }
+        };
         given.push(Given {
-            setting,
-            from: format!("--{name}"),
+            setting: found.setting,
+            from,
             value,
         });
     }
     Ok(given)
 }
 
-/// The configuration this run reads: the files, the environment, and the
-/// flags on top where src/modules/ turns them on.
-pub fn config() -> Result<brocanth_config::Config, String> {
+/// Every settings layer of this run, over the defaults: the module files,
+/// the config files, the environment and the flags. `brocanth-config`
+/// layers them and types each section.
+pub type Layers = brocanth_config::Config;
+
+/// Reads [`Layers`]. A flag of a module whose flags are off stops it.
+pub fn layers() -> Result<Layers, String> {
     refuse_off_flags()?;
     let mut loader = brocanth_config::Loader::new(crate::app::APP);
     for setting in SETTINGS {
@@ -2060,8 +2213,13 @@ pub fn config() -> Result<brocanth_config::Config, String> {
         }
     }
     for given in given()? {
-        let flag = given.from.trim_start_matches('-');
-        loader = loader.flag(given.setting.path, flag, &given.value, given.setting.text);
+        let (path, text) = (given.setting.path, given.setting.text);
+        loader = match given.from.strip_prefix("--") {
+            Some(flag) if given.setting.list => loader.flag_list(path, flag, &given.value),
+            Some(flag) => loader.flag(path, flag, &given.value, text),
+            None if given.setting.list => loader.code_list(path, &given.from, &given.value),
+            None => loader.code(path, &given.from, &given.value, text),
+        };
     }
     loader.load().map_err(|e| e.to_string())
 }
@@ -2077,23 +2235,25 @@ pub fn flag_args(
 
     refuse_off_flags().map_err(anyhow::Error::msg)?;
     let mut command = command;
-    for (setting, name) in flag_names().map_err(anyhow::Error::msg)? {
+    for name in flag_names().map_err(anyhow::Error::msg)? {
         let taken = command
             .get_subcommands()
             .flat_map(|sub| sub.get_arguments())
-            .any(|arg| arg.get_long() == Some(name));
+            .any(|arg| arg.get_long() == Some(name.name.as_str()));
         if taken {
             anyhow::bail!(
-                "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in {}",
-                setting.path,
-                setting.file
+                "`--{}` sets `{}` and is also an argument of a command\nhelp: rename it in {}",
+                name.name,
+                name.setting.path,
+                name.setting.file
             );
         }
+        let (help, value) = name.help();
         command = command.arg(
-            clap::Arg::new(name)
-                .long(name)
-                .value_name("VALUE")
-                .help(setting.help)
+            clap::Arg::new(name.name.clone())
+                .long(name.name)
+                .value_name(value)
+                .help(help)
                 .global(true)
                 .action(clap::ArgAction::Append),
         );
@@ -2124,6 +2284,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
@@ -2153,10 +2314,36 @@ fn defaults() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// `[admin]`, from every settings layer.
+pub fn admin_settings(layers: &Layers) -> Result<crate::plugins::admin::Settings, String> {
+    layers.section("admin").map_err(|e| e.to_string())
+}
+
+/// `[db]`, from every settings layer.
+pub fn db_settings(layers: &Layers) -> Result<crate::plugins::db::Settings, String> {
+    layers.section("db").map_err(|e| e.to_string())
+}
+
+/// `[cache]`, from every settings layer.
+pub fn cache_settings(layers: &Layers) -> Result<crate::plugins::cache::Settings, String> {
+    layers.section("cache").map_err(|e| e.to_string())
+}
+
+/// `[auth]`, from every settings layer.
+pub fn auth_settings(layers: &Layers) -> Result<crate::plugins::auth::Settings, String> {
+    layers.section("auth").map_err(|e| e.to_string())
+}
+
+/// `[superuser]`, from every settings layer.
+pub fn superuser_settings(layers: &Layers) -> Result<crate::plugins::superuser::Settings, String> {
+    layers.section("superuser").map_err(|e| e.to_string())
+}
+
 /// Every settings layer on its own, lowest first, then the merged values.
-/// A secret is masked in every layer.
+/// A secret is masked in every layer; its pointer flag shows where it came
+/// from.
 pub fn settings_report() -> Result<String, String> {
-    let config = config()?;
+    let config = layers()?;
     let mut layers = config.layers().defaults(defaults());
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
@@ -2181,10 +2368,10 @@ impl Default for ServerSettings {
     }
 }
 
-/// `[server] shutdown_grace_secs` from the files, the environment and the
-/// flags, or [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
+/// `[server] shutdown_grace_secs` from every settings layer, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    let config = config()?;
+    let config = layers()?;
     let Some(value) = config
         .raw_section("server")
         .and_then(|server| server.get("shutdown_grace_secs"))
@@ -2247,7 +2434,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 766b872e6c51343b
+// brocanth-digest: b1cdf8a57611e2da
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2265,12 +2452,12 @@ mod flag_tests {
 /// Whether a module's settings have flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flags {
-    /// The project rule: on without a config file; with one,
-    /// `flags_with_config` in src/modules/brocanth.rs.
+    /// The project rule: on, beside a config file too.
     Project,
-    /// On, beside a config file too.
+    /// On.
     On,
-    /// Off. The variable and the config file still set each value.
+    /// Off. The module file, the variable and the config file still set
+    /// each value.
     Off,
 }
 
@@ -2297,8 +2484,8 @@ impl Flag {
 pub mod brocanth {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[server]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
+    /// A setting of `[server]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         ShutdownGraceSecs,
@@ -2315,17 +2502,18 @@ pub mod brocanth {
 
     /// What src/modules/brocanth.rs holds.
     pub struct Module {
-        /// With the `config` module, whether `Flags::Project` reads flags.
-        pub flags_with_config: bool,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
     }
 
     impl Module {
         /// The value of each field the file does not name.
         pub const DEFAULT: Self = Self {
-            flags_with_config: false,
             rename: &[],
+            set: &[],
         };
     }
 }
@@ -2356,8 +2544,8 @@ pub mod commands {
 pub mod db {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[db]` that has a flag. A secret or a list has no flag, so
-    /// it has no variant here and cannot be renamed.
+    /// A setting of `[db]` that has a flag. A secret has two pointer flags and
+    /// no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         MaxConnections,
@@ -2365,6 +2553,7 @@ pub mod db {
         AcquireTimeout,
         IdleTimeout,
         StatementTimeout,
+        SearchPath,
         ReadOnly,
         ApplicationName,
         CaFile,
@@ -2379,6 +2568,7 @@ pub mod db {
                 Key::AcquireTimeout => "db.acquire_timeout",
                 Key::IdleTimeout => "db.idle_timeout",
                 Key::StatementTimeout => "db.statement_timeout",
+                Key::SearchPath => "db.search_path",
                 Key::ReadOnly => "db.read_only",
                 Key::ApplicationName => "db.application_name",
                 Key::CaFile => "db.ca_file",
@@ -2392,6 +2582,9 @@ pub mod db {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
     }
 
     impl Module {
@@ -2399,6 +2592,7 @@ pub mod db {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            set: &[],
         };
     }
 }
@@ -2407,8 +2601,8 @@ pub mod db {
 pub mod cache {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[cache]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
+    /// A setting of `[cache]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Migrate,
@@ -2444,6 +2638,9 @@ pub mod cache {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
         /// The code written into another module.
         pub integrate: Integrate,
     }
@@ -2453,6 +2650,7 @@ pub mod cache {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            set: &[],
             integrate: Integrate::DEFAULT,
         };
     }
@@ -2462,8 +2660,8 @@ pub mod cache {
 pub mod admin {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[admin]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
+    /// A setting of `[admin]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Title,
@@ -2492,6 +2690,9 @@ pub mod admin {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
         /// Where the backoffice answers. A page of yours under this path is a build
         /// error, not a race. Every environment serves the same routes, so this is
         /// a constant and not a setting.
@@ -2503,6 +2704,7 @@ pub mod admin {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            set: &[],
             mount_at: "/admin",
         };
     }
@@ -2512,8 +2714,8 @@ pub mod admin {
 pub mod auth {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[auth]` that has a flag. A secret or a list has no flag,
-    /// so it has no variant here and cannot be renamed.
+    /// A setting of `[auth]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         SigningKeyEnv,
@@ -2544,6 +2746,9 @@ pub mod auth {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
     }
 
     impl Module {
@@ -2551,6 +2756,7 @@ pub mod auth {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            set: &[],
         };
     }
 }
@@ -2559,8 +2765,8 @@ pub mod auth {
 pub mod superuser {
     pub use super::{Flag, Flags};
 
-    /// A setting of `[superuser]` that has a flag. A secret or a list has no
-    /// flag, so it has no variant here and cannot be renamed.
+    /// A setting of `[superuser]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         Email,
@@ -2596,6 +2802,9 @@ pub mod superuser {
         pub flags: Flags,
         /// Flags under another name, or no flag.
         pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
         /// The code written into another module.
         pub integrate: Integrate,
     }
@@ -2605,6 +2814,7 @@ pub mod superuser {
         pub const DEFAULT: Self = Self {
             flags: Flags::Project,
             rename: &[],
+            set: &[],
             integrate: Integrate::DEFAULT,
         };
     }
@@ -2639,7 +2849,7 @@ pub mod roles {
     }
 }
 
-// brocanth-digest: 65ab596dc9bbb415
+// brocanth-digest: 5a0124dbf19e1414
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2654,8 +2864,7 @@ pub mod roles {
 // it does not have, is not dead code.
 #![allow(dead_code)]
 
-/// The framework itself: `[server]`, and whether flags work beside a config
-/// file.
+/// The framework itself: `[server]`.
 pub mod brocanth;
 
 pub mod admin;
@@ -2680,14 +2889,14 @@ pub const ALL: &[&str] = &[
     "roles",
 ];
 
-// brocanth-digest: 078eee33faf7b88c
+// brocanth-digest: a7ecfe8223049252
 ===== src/modules/brocanth.rs =====
-//! The framework itself: the flag rule of the project, and `[server]`.
+//! The framework itself: `[server]`.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::brocanth::{Flag, Key, Module};
 
@@ -2695,17 +2904,16 @@ use crate::plugins::shape::brocanth::{Flag, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // With the `config` module, whether the binary reads flags too. Off:
-    // the file and the environment are the sources, and a flag is refused
-    // with a pointer to this line. Without `config`, flags are always read.
-    // A module file with `Flags::On` or `Flags::Off` overrides this.
-    flags_with_config: false,
-
     // Another name for a flag, or no flag. The variable and the config key
     // keep the declared name. Examples:
     //   (Key::ShutdownGraceSecs, Flag::As("shutdown-grace-secs")),
     //   (Key::ShutdownGraceSecs, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::ShutdownGraceSecs, "value"),
+    set: &[],
 
     ..Module::DEFAULT
 };
@@ -2745,7 +2953,7 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //! A value that differs per deployment is a setting, not a choice: [db] in the
 //! config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::db::{Flag, Flags, Key, Module};
 
@@ -2753,8 +2961,8 @@ use crate::plugins::shape::db::{Flag, Flags, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [db]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    // The command-line flags of [db]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
     flags: Flags::Project,
 
     // Another name for a flag, or no flag. The variable and the config key
@@ -2762,6 +2970,11 @@ pub const MODULE: Module = Module {
     //   (Key::MaxConnections, Flag::As("max-connections")),
     //   (Key::MaxConnections, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::MaxConnections, "value"),
+    set: &[],
 
     ..Module::DEFAULT
 };
@@ -2775,7 +2988,7 @@ pub const MODULE: Module = Module {
 //! A value that differs per deployment is a setting, not a choice: [cache] in
 //! the config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::cache::{Flag, Flags, Integrate, Key, Module};
 
@@ -2783,8 +2996,8 @@ use crate::plugins::shape::cache::{Flag, Flags, Integrate, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [cache]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    // The command-line flags of [cache]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
     flags: Flags::Project,
 
     // Another name for a flag, or no flag. The variable and the config key
@@ -2792,6 +3005,11 @@ pub const MODULE: Module = Module {
     //   (Key::Migrate, Flag::As("migrate")),
     //   (Key::Migrate, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Migrate, "value"),
+    set: &[],
 
     integrate: Integrate {
         // A `cache` tab in the admin: purge expired entries, clear a namespace
@@ -2812,7 +3030,7 @@ pub const MODULE: Module = Module {
 //! A value that differs per deployment is a setting, not a choice: [admin] in
 //! the config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::admin::{Flag, Flags, Key, Module};
 
@@ -2820,8 +3038,8 @@ use crate::plugins::shape::admin::{Flag, Flags, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [admin]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    // The command-line flags of [admin]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
     flags: Flags::Project,
 
     // Another name for a flag, or no flag. The variable and the config key
@@ -2829,6 +3047,11 @@ pub const MODULE: Module = Module {
     //   (Key::Title, Flag::As("title")),
     //   (Key::Title, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Title, "value"),
+    set: &[],
 
     // Where the backoffice answers. A page of yours under this path is a build
     // error, not a race. Every environment serves the same routes, so this is
@@ -2847,7 +3070,7 @@ pub const MODULE: Module = Module {
 //! A value that differs per deployment is a setting, not a choice: [auth] in
 //! the config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::auth::{Flag, Flags, Key, Module};
 
@@ -2855,8 +3078,8 @@ use crate::plugins::shape::auth::{Flag, Flags, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [auth]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    // The command-line flags of [auth]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
     flags: Flags::Project,
 
     // Another name for a flag, or no flag. The variable and the config key
@@ -2864,6 +3087,11 @@ pub const MODULE: Module = Module {
     //   (Key::SigningKeyEnv, Flag::As("signing-key-env")),
     //   (Key::SigningKeyEnv, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::SigningKeyEnv, "value"),
+    set: &[],
 
     ..Module::DEFAULT
 };
@@ -2877,7 +3105,7 @@ pub const MODULE: Module = Module {
 //! A value that differs per deployment is a setting, not a choice: [superuser]
 //! in the config file, an environment variable, or a flag.
 
-// `Flag` and `Key` are for `rename`: unused until it names a setting.
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
 #[allow(unused_imports)]
 use crate::plugins::shape::superuser::{Flag, Flags, Integrate, Key, Module};
 
@@ -2885,8 +3113,8 @@ use crate::plugins::shape::superuser::{Flag, Flags, Integrate, Key, Module};
 // gives a default to a field that a later version of the module adds.
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module {
-    // The command-line flags of [superuser]. `Flags::Project` follows
-    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    // The command-line flags of [superuser]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
     flags: Flags::Project,
 
     // Another name for a flag, or no flag. The variable and the config key
@@ -2894,6 +3122,11 @@ pub const MODULE: Module = Module {
     //   (Key::Email, Flag::As("email")),
     //   (Key::Email, Flag::Hidden),
     rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Email, "value"),
+    set: &[],
 
     integrate: Integrate {
         // The admin's policy is StaffPolicy: a superuser passes every check, a
@@ -3348,14 +3581,14 @@ impl Command for Createsuperuser {
     }
 }
 
-/// `[db]` and `[superuser]`, through the loader the server uses.
+/// `[db]` and `[superuser]`, as the server reads them: every settings layer.
 fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
-    let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
     Ok((
-        loaded
-            .section::<crate::plugins::db::Settings>("db")?
+        crate::plugins::db_settings(&layers)
+            .map_err(anyhow::Error::msg)?
             .config(),
-        loaded.section("superuser")?,
+        crate::plugins::superuser_settings(&layers).map_err(anyhow::Error::msg)?,
     ))
 }
 ===== src/commands/dbshell.rs =====
@@ -3376,9 +3609,6 @@ use brocanth_command::{anyhow, clap, cmd, Command, Context};
 #[cmd]
 #[derive(clap::Args)]
 pub struct Dbshell {
-    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]
-    #[arg(long, short, value_name = "ENV")]
-    env: Option<String>,
     /// Print the command line instead of running it. The password is not printed
     #[arg(long)]
     print: bool,
@@ -3389,23 +3619,15 @@ pub struct Dbshell {
 
 impl Command for Dbshell {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        let url = url(self.env.as_deref(), ctx.root())?;
+        // The config files resolve from the project root.
+        std::env::set_current_dir(ctx.root())?;
+        let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+        let url = crate::plugins::db_settings(&layers)
+            .map_err(anyhow::Error::msg)?
+            .url;
         brocanth_db::shell::run(&url, ctx.root(), self.print, &self.rest)?;
         Ok(())
     }
-}
-
-/// `[db] url`, through the loader the server uses, so the files,
-/// `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server sees.
-fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
-    let mut loader = brocanth_config::Loader::new(crate::app::APP).cwd(root);
-    if let Some(env) = env {
-        loader = loader.env(env);
-    }
-    Ok(loader
-        .load()?
-        .section::<crate::plugins::db::Settings>("db")?
-        .url)
 }
 ===== src/commands/migrate.rs =====
 //! `migrate` -- apply the SQL files in `migrations/` to `[db] url`.
@@ -3531,14 +3753,13 @@ async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The pool's configuration: `[db]`, through the loader the server uses, so
-/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
-/// sees.
+/// The pool's configuration: `[db]`, as the server reads it, through every
+/// settings layer: the default, the module file, the files, the
+/// environment and the flags.
 fn database() -> anyhow::Result<DbConfig> {
-    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok(config
-        .section::<crate::plugins::db::Settings>("db")?
-        .config())
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&layers).map_err(anyhow::Error::msg)?;
+    Ok(settings.config())
 }
 ===== src/commands/routes.rs =====
 //! Every route this application answers.
@@ -5108,6 +5329,7 @@ title = "My Blog"
 enabled = ["config", "commands", "db", "cache", "admin", "auth", "superuser", "roles"]
 
 [bindings]
+ConfigSource = { provider = "config", why = "chosen" }
 PgPool = { provider = "db", why = "cache requires PgPool" }
 
 [modules.config]
@@ -5132,7 +5354,7 @@ kind = ["enhancer", "middleware", "renderer"]
 files = ["src/modules/db.rs", "src/commands/createsuperuser.rs", "src/commands/dbshell.rs", "src/commands/migrate.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
-adapted_to = ["config", "commands"]
+adapted_to = ["commands", "config"]
 
 [modules.cache]
 version = "0.1.0"
@@ -5140,7 +5362,7 @@ kind = ["enhancer"]
 files = ["src/modules/cache.rs", "src/plugins/cache/"]
 config = ["cache"]
 crates = ["brocanth-cache"]
-adapted_to = ["config", "admin"]
+adapted_to = ["admin"]
 
 [modules.admin]
 version = "0.1.0"
@@ -5148,7 +5370,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/admin.rs", "src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["config", "superuser", "commands"]
+adapted_to = ["superuser", "commands"]
 
 [modules.auth]
 version = "0.1.0"
@@ -5156,7 +5378,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "db"]
+adapted_to = ["db"]
 
 [modules.superuser]
 version = "0.1.0"
@@ -5164,7 +5386,7 @@ kind = ["enhancer"]
 files = ["src/modules/superuser.rs", "src/commands/createsuperuser.rs", "src/plugins/superuser/"]
 config = ["superuser"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "commands", "admin", "db"]
+adapted_to = ["commands", "admin", "db"]
 
 [modules.roles]
 version = "0.1.0"
@@ -5174,4 +5396,4 @@ config = []
 crates = ["brocanth-auth"]
 adapted_to = ["admin"]
 
-# brocanth-digest: 880ea7f4d2b7a40d
+# brocanth-digest: aaf61a2ea54c635a

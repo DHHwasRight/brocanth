@@ -13,7 +13,7 @@ The wizard calls it: *A handler takes `Valid<T>`, or it does not compile*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-schema` |

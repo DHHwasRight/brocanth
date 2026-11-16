@@ -14,7 +14,7 @@ The wizard shows it under the database, in the Data question:
 | Part of | [`db`](db.md), off until you tick it |
 | Needs | none |
 | After | none; [`db`](db.md) waits for it |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Development only | yes: `brocanth check --deploy` reports `deploy/development-only` |

@@ -13,7 +13,7 @@ The wizard calls it: *A signed cookie, and a session on the context*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

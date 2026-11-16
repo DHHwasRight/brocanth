@@ -13,7 +13,7 @@ The wizard calls it: *Report page views of these pages to a brocanth server with
 | Part of | nothing |
 | Needs | none |
 | After | nothing |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`analytics`](analytics.md): both would count one page: the hook on the server, and the beacon in the browser |
 | Outside the runtime | yes |
 | Crates | `brocanth-analytics` (no default features; feature `config` with `config`) |

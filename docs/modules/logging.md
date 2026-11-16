@@ -13,7 +13,7 @@ The wizard calls it: *A line per request*.
 | Part of | nothing |
 | Needs | none |
 | After | none |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`observability-logs`](observability-logs.md): both write a line per request; `observability-logs` writes JSON on stdout; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |
