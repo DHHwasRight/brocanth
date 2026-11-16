@@ -23,10 +23,6 @@ impl Module for Logging {
             "a plain-text line per response on stderr, for development; for production use observability-logs",
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .conflicts(
             "observability-logs",
             "both write a line per request; `observability-logs` writes JSON on stdout",

@@ -28,10 +28,6 @@ impl Module for ErrorPages {
         .category(Category::Renderer)
         .category(Category::Middleware)
         .adapts_to(
-            "config",
-            "its setting is read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "rsx",
             "writes `not-found.rsx` and `error.rsx`, rendered inside the layouts",
         )
@@ -71,11 +67,8 @@ impl Module for ErrorPages {
             s.file("src/pages/error.rsx", ERROR_RSX);
         }
 
-        let turn = if project.has("config") {
-            "under [errors] in config/<env>.toml"
-        } else {
-            "with `--errors.details=false`"
-        };
+        // A flag works in every project; a config file is one more place.
+        let turn = "with `--errors.details=false`";
         configurable_hooking(
             s,
             project,

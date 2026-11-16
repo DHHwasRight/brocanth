@@ -23,10 +23,6 @@ impl Module for Gtag {
         )
         .category(Category::Middleware)
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "admin",
             "the admin never gets the tag, at the path src/modules/admin.rs mounts it",
         )
@@ -65,11 +61,8 @@ impl Module for Gtag {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let turn_on = if project.has("config") {
-            "`enabled = true` and `measurement_id` under\n        // [gtag] in config/production.toml"
-        } else {
-            "`--gtag.enabled=true` and\n        // `--gtag.measurement_id=G-…`, or the environment\n        // variables `--help` names"
-        };
+        // A flag works in every project; a config file is one more place.
+        let turn_on = "`--gtag.enabled=true` and\n        // `--gtag.measurement_id=G-…`, or the environment\n        // variables `--help` names";
         let words = if project.has("i18n") {
             "\n        //\n        // The banner's words are the [gtag.banner] keys of\n        \
              // locales/*.toml, in the request's locale. The\n        \
@@ -222,7 +215,7 @@ fn adjust(project: &Project) -> Option<String> {
 }
 
 /// The comment above the registration. `@TURN_ON@` says where to turn it
-/// on, which depends on whether there is a file; `@ADMIN@` names the
+/// on, with the flags every project has; `@ADMIN@` names the
 /// admin, when there is one.
 const PRELUDE: &str = r#"
         // -- brocanth-gtag: Google Analytics, after consent ----------

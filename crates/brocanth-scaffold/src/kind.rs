@@ -108,6 +108,23 @@ kind!(
     One
 );
 
+kind!(
+    /// A settings layer read from files: `config` (TOML) provides it. The
+    /// other layers -- the plugin's default, the module file, the
+    /// environment and the flags -- are in every project and are not a
+    /// Kind. One provider for now; it becomes many when the loader merges
+    /// several files (`docs/module-capabilities.md` §6, 3c).
+    ///
+    /// The scaffold reads it, so a module that only declares settings never
+    /// asks. A module asks when it writes something only a file can hold: a
+    /// list of records, or an example in the file.
+    ConfigSource,
+    group = "config",
+    runtime = "brocanth_config::Config",
+    gist = "settings read from a file",
+    One
+);
+
 /// A requirement on a Kind, as a manifest holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {

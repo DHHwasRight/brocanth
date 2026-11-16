@@ -98,6 +98,11 @@ pub struct CreateArgs {
     /// With --questions: print JSON instead of text
     #[arg(long, requires = "questions")]
     pub json: bool,
+    /// The build-time options, `--<module>.<option>=VALUE`, as `(module,
+    /// option, value)`. `main` adds one argument per declared option and
+    /// fills this from the matches.
+    #[arg(skip)]
+    pub options: Vec<(String, String, String)>,
 }
 
 /// Every module this CLI has, as clap's possible values.
@@ -296,7 +301,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
         ui.note(format!("  {}", line.line()));
     }
 
-    let files = scaffold(&answers)?;
+    let mut files = scaffold(&answers)?;
+    // `--<module>.<option>=VALUE`: written into the new module files.
+    crate::choices::set_options(&module_shapes(&answers)?, &mut files, &args.options, |_| {
+        true
+    })?;
     let mut table = Table::new();
     for (path, contents) in &files {
         let full = root.join(path);
@@ -1037,11 +1046,19 @@ fn framework_settings(built: &mut Built) {
 
 /// Whether a module declared a setting. The framework always declares
 /// `[server]`, so [`has_settings`] is true for every project; this is the
-/// question of whether a plugin reads what this run was given.
+/// question of whether a plugin reads the layers.
 fn module_settings(built: &Built) -> bool {
-    built
-        .settings()
-        .any(|(by, _, setting)| by != FRAMEWORK && setting.kind != Kind::List)
+    built.settings().any(|(by, _, _)| by != FRAMEWORK)
+}
+
+/// Whether the project reads a file layer: a `ConfigSource` provider is
+/// bound. The one question about `config` the generator asks; the modules
+/// never do (`docs/module-capabilities.md` §6).
+pub fn file_layer(a: &Answers) -> bool {
+    use brocanth_scaffold::kind::Kind as _;
+    crate::resolve::bindings(&a.picks)
+        .iter()
+        .any(|(kind, _)| *kind == brocanth_scaffold::ConfigSource::NAME)
 }
 
 /// Every file this project is, with the header and digest on the ones the
@@ -1155,7 +1172,7 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
             crate::choices::module_file(shape, &crate::choices::Choices::default()),
         ));
     }
-    if a.has("config") {
+    if file_layer(a) {
         files.push((
             format!("config/{}.toml", DEFAULT_ENV),
             config_toml(a, &built),
@@ -2021,7 +2038,7 @@ fn instances(built: &Built) -> Vec<&str> {
 /// claimed a config section makes it necessary: a plugin built from a
 /// literal in `main` needs no deserialiser, and the scaffold derives none.
 fn needs_serde(a: &Answers, built: &Built) -> bool {
-    a.has("config") && !built.slot_is_empty(Slot::ConfigSections)
+    file_layer(a) && !built.slot_is_empty(Slot::ConfigSections)
 }
 
 /// The project's serde line, if anything wants one.
@@ -4145,7 +4162,8 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // the extern prelude, so they mean the same thing here and at the macro's
     // expansion site. Sorted, because rustfmt sorts them.
     let mut uses: Vec<String> = built.slot(Slot::AppUses).map(str::to_string).collect();
-    if a.has("config") {
+    let file = file_layer(a);
+    if file {
         // `plugins::config` loads the file, so the chain needs only the
         // extension. Every project declares `[server]`, so it always has
         // `plugins::config`.
@@ -4168,30 +4186,33 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     } else {
         "let builder = $builder"
     };
-    if a.has("config") {
+    if file {
         out.push_str(&format!(
-            "        // The files, the environment and, where src/modules/ turns them\n\
-            \x20       // on, the flags: `brocanth-config` layers them and types each\n\
-            \x20       // section, and it is the only reason a TOML parser is in the tree.\n\
-            \x20       let config = crate::plugins::config()?;\n\
-            \x20       {head}.with_config(config){end}\n",
+            "        // Every settings layer: the module files, the config files, the\n\
+            \x20       // environment and the flags. `brocanth-config` layers them and\n\
+            \x20       // types each section, and it is the only reason a TOML parser is\n\
+            \x20       // in the tree.\n\
+            \x20       let layers = crate::plugins::layers()?;\n\
+            \x20       {head}.with_config({layers}){end}\n",
+            layers = if registrations.is_empty() {
+                "layers"
+            } else {
+                "layers.clone()"
+            },
             end = if registrations.is_empty() { "" } else { ";" },
         ));
-    } else if !a.has("config") && module_settings(built) {
+    } else if module_settings(built) {
         out.push_str(&format!(
-            "        // No file and no TOML parser. Each plugin below starts from its\n\
-            \x20       // defaults and takes what this run was given on top: the\n\
-            \x20       // environment, then the flags.\n\
-            \x20       let given = crate::plugins::given()?;\n\
+            "        // Every settings layer: the module files, the environment and the\n\
+            \x20       // flags, over each plugin's defaults. No file and no TOML parser.\n\
+            \x20       let layers = crate::plugins::layers()?;\n\
             \x20       {head}{end}\n",
             end = if registrations.is_empty() { "" } else { ";" },
         ));
     } else {
         out.push_str(&format!(
-            "        // No file lookup, no merge order, no TOML parser: the core takes\n\
-            \x20       // values that are already built, so each plugin below is handed a\n\
-            \x20       // literal the compiler checks. Add the config plugin when a file is\n\
-            \x20       // wanted; nothing else changes.\n\
+            "        // No setting to read: each plugin below is handed a value the\n\
+            \x20       // compiler checks.\n\
             \x20       {head}{end}\n",
             end = if registrations.is_empty() { "" } else { ";" },
         ));
@@ -4387,11 +4408,7 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     out.push('\n');
     out.push_str(SERVER_SETTINGS);
     out.push('\n');
-    out.push_str(if a.has("config") {
-        GRACE_FROM_CONFIG
-    } else {
-        GRACE_PLAIN
-    });
+    out.push_str(if file { GRACE_FROM_CONFIG } else { GRACE_PLAIN });
 
     // -- serving ------------------------------------------------------
     //
@@ -4578,10 +4595,10 @@ impl Default for ServerSettings {
 "#;
 
 /// `plugins::shutdown_grace` with the config plugin.
-const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs` from the files, the environment and the
-/// flags, or [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
+const GRACE_FROM_CONFIG: &str = r#"/// `[server] shutdown_grace_secs` from every settings layer, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    let config = config()?;
+    let config = layers()?;
     let Some(value) = config
         .raw_section("server")
         .and_then(|server| server.get("shutdown_grace_secs"))
@@ -4605,28 +4622,25 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
 "#;
 
 /// `plugins::shutdown_grace` without it.
-const GRACE_PLAIN: &str = r#"/// `[server] shutdown_grace_secs` from the environment and the flags, or
-/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when neither sets it.
+const GRACE_PLAIN: &str = r#"/// `[server] shutdown_grace_secs` from every settings layer, or
+/// [`SHUTDOWN_GRACE`](crate::app::SHUTDOWN_GRACE) when none sets it.
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
-    let server = server_settings(&given()?)?;
+    let server = server_settings(&layers()?)?;
     Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
 }
 "#;
 
-/// Whether anything declared a setting the binary reads itself: one that is
-/// not a list, which only the file holds. True for every generated project,
+/// Whether anything declared a setting. True for every generated project,
 /// because the framework declares `[server] shutdown_grace_secs`; a `Built`
 /// made without [`contributions`] can still say no.
 fn has_settings(built: &Built) -> bool {
     !declared(built).is_empty()
 }
 
-/// Every declared setting but the lists, as `(section, setting)`, in module
-/// order.
+/// Every declared setting, as `(section, setting)`, in module order.
 fn declared(built: &Built) -> Vec<(&str, &Setting)> {
     built
         .settings()
-        .filter(|(_, _, setting)| setting.kind != Kind::List)
         .map(|(_, section, setting)| (section, setting))
         .collect()
 }
@@ -4673,12 +4687,52 @@ fn renames_fn(a: &Answers, built: &Built) -> String {
     out
 }
 
+/// `code`: every value the module files set, as `(path, value, file)`. One
+/// loop per file with a `set` field: each file's `Key` is its own type.
+fn code_fn(a: &Answers, built: &Built) -> String {
+    let mut out = String::from(
+        "/// The values src/modules/ sets in code, as `(path, value, file)`: the\n\
+         /// layer over the defaults and under every other.\n\
+         fn code() -> Vec<(&'static str, &'static str, &'static str)> {\n\
+         \x20   let mut code = Vec::new();\n",
+    );
+    for shape in crate::choices::shapes(a, built) {
+        if !shape.has_flags() {
+            continue;
+        }
+        let file = format!("{:?}", crate::choices::path_of(&shape.key));
+        // rustfmt's `fn_call_width` is 60, and the tuple obeys it.
+        let tuple = format!("key.path(), *value, {file}");
+        let push = if tuple.len() <= 60 {
+            format!("        code.push(({tuple}));\n")
+        } else {
+            format!(
+                "        code.push((\n\
+                 \x20           key.path(),\n\
+                 \x20           *value,\n\
+                 \x20           {file},\n\
+                 \x20       ));\n"
+            )
+        };
+        out.push_str(&format!(
+            "    for (key, value) in {} {{\n{push}    }}\n",
+            brocanth_scaffold::snippet::module_ref(&shape.key, "set"),
+        ));
+    }
+    out.push_str("    code\n}\n\n");
+    out
+}
+
 /// The settings half of `src/plugins/mod.rs`: the list, the flag names after
-/// the renames in `src/modules/`, the readers, and the report.
+/// the renames in `src/modules/`, the code layer, the readers, and the
+/// report.
 fn flags_rs(a: &Answers, built: &Built) -> String {
-    let config = a.has("config");
+    let config = file_layer(a);
     let declared = declared(built);
     let optional = declared.iter().any(|(_, setting)| setting.optional);
+    let lists = declared
+        .iter()
+        .any(|(_, setting)| setting.kind == Kind::List);
     let mut out = String::from(SETTING_STRUCT_HEAD);
     if config || optional {
         out.push_str(
@@ -4686,13 +4740,23 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
             \x20   pub none_as: Option<&'static str>,\n",
         );
     }
-    out.push_str(if config {
-        "    /// Whether a flag's value stays a string whatever it looks like.\n\
-        \x20   pub text: bool,\n"
+    if config {
+        out.push_str(
+            "    /// Whether a flag's value stays a string whatever it looks like.\n\
+            \x20   pub text: bool,\n",
+        );
+        if lists {
+            out.push_str(
+                "    /// Whether it is a list: the items joined by commas.\n\
+                \x20   pub list: bool,\n",
+            );
+        }
     } else {
-        "    /// The environment variable that sets it.\n\
-        \x20   pub env: &'static str,\n"
-    });
+        out.push_str(
+            "    /// The environment variable that sets it.\n\
+            \x20   pub env: &'static str,\n",
+        );
+    }
     out.push_str(
         "}\n\
          \n\
@@ -4706,19 +4770,13 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     if !one {
         out.push('\n');
     }
-    let owners: Vec<&str> = built
-        .settings()
-        .filter(|(_, _, setting)| setting.kind != Kind::List)
-        .map(|(by, _, _)| by)
-        .collect();
+    let owners: Vec<&str> = built.settings().map(|(by, _, _)| by).collect();
     for ((section, setting), by) in declared.iter().zip(owners) {
         // The module file that renames this flag and turns it on or off.
         let flags = if by == FRAMEWORK {
             "Flags::Project".to_string()
-        } else if setting.flag {
-            brocanth_scaffold::snippet::module_ref(by, "flags")
         } else {
-            "Flags::Off".to_string()
+            brocanth_scaffold::snippet::module_ref(by, "flags")
         };
         let mut entry = format!(
             "Setting {{\n\
@@ -4741,6 +4799,10 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
         if config {
             let text = setting.kind == Kind::Text;
             entry.push_str(&format!("    text: {text},\n"));
+            if lists {
+                let list = setting.kind == Kind::List;
+                entry.push_str(&format!("    list: {list},\n"));
+            }
         } else {
             entry.push_str(&format!(
                 "    env: \"{}_{}__{}\",\n",
@@ -4763,48 +4825,30 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     }
     if one {
         out.pop();
-        out.push_str("];\n\n");
-    } else {
-        out.push_str("];\n\n");
     }
+    out.push_str("];\n\n");
     out.push_str(SETTING_GIVEN);
     out.push_str(&renames_fn(a, built));
-    out.push_str(if config {
-        FLAGS_ON_CONFIG
-    } else {
-        FLAGS_ON_PLAIN
-    });
+    out.push_str(&code_fn(a, built));
+    out.push_str(FLAGS_ON);
     out.push_str(FLAG_NAMES);
-    if config {
-        out.push_str(REFUSE_OFF_FLAGS);
+    out.push_str(REFUSE_OFF_FLAGS);
+    out.push_str(GIVEN_HEAD);
+    if !config {
+        out.push_str(GIVEN_ENV);
     }
-    out.push_str(if config {
-        GIVEN_HEAD_CONFIG
-    } else {
-        GIVEN_HEAD_PLAIN
-    });
     out.push_str(GIVEN_FLAGS);
     if config {
-        out.push_str(CONFIG_FN);
+        out.push_str(
+            &LAYERS_CONFIG.replace("@ARMS@", if lists { LAYERS_LIST_ARMS } else { LAYERS_ARMS }),
+        );
+    } else {
+        out.push_str(LAYERS_PLAIN);
     }
     if a.has("commands") {
-        out.push_str(&FLAG_ARGS.replace(
-            "@REFUSE@",
-            if config {
-                "    refuse_off_flags().map_err(anyhow::Error::msg)?;\n"
-            } else {
-                ""
-            },
-        ));
+        out.push_str(FLAG_ARGS);
     } else {
-        out.push_str(&READ_LINE.replace(
-            "@REFUSE@",
-            if config {
-                "    refuse_off_flags()?;\n"
-            } else {
-                ""
-            },
-        ));
+        out.push_str(READ_LINE);
     }
 
     // Each setting's default, from the plugin's own `Default`.
@@ -4819,6 +4863,19 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
 
     let notes = hooks_off_notes_fn(a, built);
     if config {
+        // The framework's `[server]` is read raw: `brocanth-config` owns it.
+        for section in declared_sections(&declared) {
+            if built
+                .settings()
+                .any(|(by, s, _)| s == section && by == FRAMEWORK)
+            {
+                continue;
+            }
+            out.push_str(&section_from_file(
+                section,
+                &built.settings_type_of(section),
+            ));
+        }
         out.push_str(
             &CONFIG_REPORT.replace("@NOTES@", if notes.is_some() { CONFIG_NOTES } else { "" }),
         );
@@ -4826,6 +4883,9 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
         out.push_str(PARSED);
         if optional {
             out.push_str(OPTIONAL);
+        }
+        if lists {
+            out.push_str(LISTED);
         }
         for section in declared_sections(&declared) {
             out.push_str(&section_settings(
@@ -4861,6 +4921,34 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     }
     if let Some(notes) = notes {
         out.push_str(&notes);
+    }
+    out
+}
+
+/// `<section>_settings` with a file: the section, typed by `brocanth-config`
+/// from every layer.
+fn section_from_file(section: &str, ty: &str) -> String {
+    let ident = section.replace('-', "_");
+    let mut out = format!("\n/// `[{section}]`, from every settings layer.\n");
+    let signature =
+        format!("pub fn {ident}_settings(layers: &Layers) -> Result<{ty}, String> {{\n");
+    if signature.len() > 101 {
+        out.push_str(&format!(
+            "pub fn {ident}_settings(\n    layers: &Layers,\n) -> Result<{ty}, String> {{\n"
+        ));
+    } else {
+        out.push_str(&signature);
+    }
+    // rustfmt's `chain_width` is 60.
+    let chain = format!("layers.section({section:?}).map_err(|e| e.to_string())");
+    if chain.len() <= 60 {
+        out.push_str(&format!("    {chain}\n}}\n"));
+    } else {
+        out.push_str(&format!(
+            "    layers\n\
+             \x20       .section({section:?})\n\
+             \x20       .map_err(|e| e.to_string())\n}}\n"
+        ));
     }
     out
 }
@@ -5088,7 +5176,7 @@ fn section_settings(section: &str, ty: &str, declared: &[(&str, &Setting)]) -> S
         .collect();
     let mut out = format!(
         "\n/// `[{section}]`, as this binary runs it without a file: the plugin's\n\
-         /// defaults, then the environment, then the flags.\n"
+         /// defaults, then the module file, the environment and the flags.\n"
     );
     let signature =
         format!("pub fn {ident}_settings(given: &[Given]) -> Result<{ty}, String> {{\n");
@@ -5104,7 +5192,9 @@ fn section_settings(section: &str, ty: &str, declared: &[(&str, &Setting)]) -> S
         \x20   for given in given {{\n"
     ));
     let reader = |setting: &Setting| {
-        if setting.optional {
+        if setting.kind == Kind::List {
+            "listed"
+        } else if setting.optional {
             "optional"
         } else {
             "parsed"
@@ -5176,10 +5266,12 @@ pub struct Setting {
     pub path: &'static str,
     /// The line `--help` prints.
     pub help: &'static str,
-    /// Whether a flag may set it. A secret has none: every user on the host
-    /// can read a process's arguments.
+    /// Whether a flag may carry its value. A secret has none, because every
+    /// user on the host can read a process's arguments: its flags
+    /// `<path>_file` and `<path>_env` point at the value instead.
     pub flag: bool,
-    /// The module file that renames its flag and turns the flags on or off.
+    /// The module file that renames its flag, turns the flags off, or sets
+    /// a value in code.
     pub file: &'static str,
     /// Whether its module reads flags, from that file.
     pub flags: Flags,
@@ -5189,97 +5281,135 @@ const SETTING_GIVEN: &str = r#"/// One value this run was given, above the defau
 pub struct Given {
     /// What it sets.
     pub setting: &'static Setting,
-    /// Where it came from, as typed: `--cookie`, or `$MY_APP_SESSIONS__COOKIE`.
+    /// Where it came from: `src/modules/sessions.rs`, `$MY_APP_SESSIONS__COOKIE`,
+    /// `--cookie`, or a pointer such as `--db.url_file=/run/secrets/db`.
     pub from: String,
-    /// The value, as typed. Empty is `None` for an `Option` setting.
+    /// The value. Empty is `None` for an `Option` setting.
     pub value: String,
 }
 
+/// What a flag's value is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    /// The value itself: `--sessions.cookie=x`.
+    Value,
+    /// A secret, read from the file at this path: `--db.url_file=/run/secrets/db`.
+    File,
+    /// A secret, read from the variable of this name: `--db.url_env=DATABASE_URL`.
+    Env,
+}
+
+/// One flag: its name after the renames in src/modules/, and what it reads.
+pub struct Name {
+    /// What it sets.
+    pub setting: &'static Setting,
+    /// The name, without `--`.
+    pub name: String,
+    /// What its value is.
+    pub read: Read,
+}
+
+impl Name {
+    /// What `--help` says of it, and the placeholder of its value.
+    pub fn help(&self) -> (String, &'static str) {
+        match self.read {
+            Read::Value => (self.setting.help.to_string(), "VALUE"),
+            Read::File => (
+                format!("Read `{}` from the file at PATH.", self.setting.path),
+                "PATH",
+            ),
+            Read::Env => (
+                format!("Read `{}` from the variable VAR.", self.setting.path),
+                "VAR",
+            ),
+        }
+    }
+}
+
 /// The name each flag answers to after the renames in src/modules/, whether
-/// the flags are read or not.
+/// the flags are read or not. A secret has two pointer flags, `<path>_file`
+/// and `<path>_env`, which no file renames.
 ///
 /// A name that is not spelled as a flag, and two flags under one name, each
 /// stop the binary: each would otherwise be a flag that does nothing, or does
 /// something else. A rename of a key no flag sets does not compile: `Key` has
 /// no variant for it.
-fn names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+fn names() -> Result<Vec<Name>, String> {
     let renames = renames();
-    let mut names: Vec<(&'static Setting, &'static str)> = Vec::new();
-    for setting in SETTINGS.iter().filter(|setting| setting.flag) {
-        let name = renames
-            .iter()
-            .find(|(path, _)| *path == setting.path)
-            .map_or(setting.path, |(_, flag)| flag.name());
-        if name.is_empty() {
-            continue;
+    let mut names: Vec<Name> = Vec::new();
+    for setting in SETTINGS {
+        let wanted = if setting.flag {
+            let name = renames
+                .iter()
+                .find(|(path, _)| *path == setting.path)
+                .map_or(setting.path, |(_, flag)| flag.name());
+            vec![(name.to_string(), Read::Value)]
+        } else {
+            vec![
+                (format!("{}_file", setting.path), Read::File),
+                (format!("{}_env", setting.path), Read::Env),
+            ]
+        };
+        for (name, read) in wanted {
+            if name.is_empty() {
+                continue;
+            }
+            let spelled = name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+            let taken = ["help", "version", "settings"].contains(&name.as_str());
+            if !spelled || name.starts_with(['-', '.', '_']) || taken {
+                return Err(format!(
+                    "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
+                    setting.file
+                ));
+            }
+            if let Some(other) = names.iter().find(|other| other.name == name) {
+                let files = if other.setting.file == setting.file {
+                    other.setting.file.to_string()
+                } else {
+                    format!("{} or {}", other.setting.file, setting.file)
+                };
+                return Err(format!(
+                    "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
+                    other.setting.path, setting.path
+                ));
+            }
+            names.push(Name {
+                setting,
+                name,
+                read,
+            });
         }
-        let spelled = name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
-        let taken = ["help", "version", "settings"].contains(&name);
-        if !spelled || name.starts_with(['-', '.', '_']) || taken {
-            return Err(format!(
-                "{} names a flag `{name}`\nhelp: a flag is lower case, digits, `.`, `_` and `-`, starts with a letter or a digit, and is not `help`, `version` or `settings`",
-                setting.file
-            ));
-        }
-        if let Some((other, _)) = names.iter().find(|(_, taken)| *taken == name) {
-            let files = if other.file == setting.file {
-                other.file.to_string()
-            } else {
-                format!("{} or {}", other.file, setting.file)
-            };
-            return Err(format!(
-                "`--{name}` would set both `{}` and `{}`\nhelp: rename one of them in {files}",
-                other.path, setting.path
-            ));
-        }
-        names.push((setting, name));
     }
     Ok(names)
 }
 
 "#;
 
-const FLAG_NAMES: &str = r#"/// The flags this run reads: each module file decides, and
-/// src/modules/brocanth.rs holds the project rule. Every name is checked
-/// first, read or not.
-pub fn flag_names() -> Result<Vec<(&'static Setting, &'static str)>, String> {
+const FLAG_NAMES: &str = r#"/// The flags this run reads: each module file decides. Every name is
+/// checked first, read or not.
+pub fn flag_names() -> Result<Vec<Name>, String> {
     Ok(names()?
         .into_iter()
-        .filter(|(setting, _)| flags_on(setting.flags))
+        .filter(|name| flags_on(name.setting.flags))
         .collect())
 }
 
 "#;
 
-const FLAGS_ON_CONFIG: &str = r#"/// Whether a module's flags are read: its file says `Flags::On` or
-/// `Flags::Off`, or follows the project rule. With a config file, the file is
-/// the source until src/modules/brocanth.rs turns the flags on.
+const FLAGS_ON: &str = r#"/// Whether a module's flags are read: on, unless its file says
+/// `Flags::Off`. A config file does not turn them off: it is one more layer,
+/// under the environment and the flags.
 fn flags_on(rule: Flags) -> bool {
-    match rule {
-        Flags::On => true,
-        Flags::Off => false,
-        Flags::Project => crate::modules::brocanth::MODULE.flags_with_config,
-    }
+    !matches!(rule, Flags::Off)
 }
 
 "#;
 
-const FLAGS_ON_PLAIN: &str = r#"/// Whether a module's flags are read: its file says `Flags::On` or
-/// `Flags::Off`, or follows the project rule. Without a config file the
-/// project rule is on: the flags and the environment are the only sources.
-fn flags_on(rule: Flags) -> bool {
-    match rule {
-        Flags::On | Flags::Project => true,
-        Flags::Off => false,
-    }
-}
-
-"#;
-
-const REFUSE_OFF_FLAGS: &str = r#"/// A flag given while the flags are off, refused by name with what to do
-/// instead. Silently ignoring it would run with a value nobody chose.
+const REFUSE_OFF_FLAGS: &str = r#"/// A flag given while its module's flags are off, refused by name with
+/// what to do instead. Silently ignoring it would run with a value nobody
+/// chose.
 pub fn refuse_off_flags() -> Result<(), String> {
     let names = names()?;
     for arg in std::env::args_os().skip(1) {
@@ -5291,21 +5421,15 @@ pub fn refuse_off_flags() -> Result<(), String> {
             continue;
         };
         let name = written.split_once('=').map_or(written, |(name, _)| name);
-        let Some((setting, _)) = names.iter().find(|(_, known)| *known == name) else {
+        let Some(found) = names.iter().find(|known| known.name == name) else {
             continue;
         };
-        if flags_on(setting.flags) {
+        if flags_on(found.setting.flags) {
             continue;
         }
-        let (section, key) = setting.path.rsplit_once('.').unwrap_or(("", setting.path));
-        let fix = if setting.file.ends_with("/brocanth.rs") {
-            "flags_with_config: true"
-        } else {
-            "flags: Flags::On"
-        };
         return Err(format!(
-            "`--{name}` is off: this project reads its settings from config/<env>.toml\nhelp: set `{fix}` in {}, or set `{key}` under [{section}] in config/<env>.toml",
-            setting.file
+            "`--{name}` is off: {} turns the flags of its module off\nhelp: set `flags: Flags::On` in {}, or set `{}` in the environment",
+            found.setting.file, found.setting.file, found.setting.path
         ));
     }
     Ok(())
@@ -5313,26 +5437,31 @@ pub fn refuse_off_flags() -> Result<(), String> {
 
 "#;
 
-const GIVEN_HEAD_CONFIG: &str = r#"/// The flags this run was given, in the order typed. The environment is not
-/// here: `brocanth-config` reads it, under the file and over the flags.
+const GIVEN_HEAD: &str = r#"/// What this run was given above the defaults, lowest first: each value
+/// src/modules/ sets in code, each variable that is set when there is no
+/// config file, then each flag in the order typed. A later value for one
+/// key replaces an earlier one. With a config file, `brocanth-config` reads
+/// the files and the variables, between the code and the flags.
 ///
-/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
-/// is a command's, and the command line's own parser has already refused what
+/// `--name=VALUE` and `--name VALUE`. A secret's `_file` flag reads the file
+/// at its path and its `_env` flag the variable it names, so the value
+/// never enters the command line. Every other argument is left alone: it is
+/// a command's, and the command line's own parser has already refused what
 /// nobody declared.
 pub fn given() -> Result<Vec<Given>, String> {
     let mut given = Vec::new();
+    for (path, value, file) in code() {
+        if let Some(setting) = SETTINGS.iter().find(|setting| setting.path == path) {
+            given.push(Given {
+                setting,
+                from: file.to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
 "#;
 
-const GIVEN_HEAD_PLAIN: &str = r#"/// What this run was given above the defaults, lowest first: each variable
-/// that is set, then each flag in the order typed. A later value for one key
-/// replaces an earlier one.
-///
-/// `--name=VALUE` and `--name VALUE`. Every other argument is left alone: it
-/// is a command's, and the command line's own parser has already refused what
-/// nobody declared.
-pub fn given() -> Result<Vec<Given>, String> {
-    let mut given = Vec::new();
-    for setting in SETTINGS {
+const GIVEN_ENV: &str = r#"    for setting in SETTINGS {
         if let Some(value) = std::env::var_os(setting.env) {
             given.push(Given {
                 setting,
@@ -5360,19 +5489,35 @@ const GIVEN_FLAGS: &str = r#"    let names = flag_names()?;
             Some((name, value)) => (name, Some(value.to_string())),
             None => (written, None),
         };
-        let Some((setting, name)) = names.iter().copied().find(|(_, known)| *known == name) else {
+        let Some(found) = names.iter().find(|known| known.name == name) else {
             continue;
         };
-        let value = match inline {
+        let raw = match inline {
             Some(value) => value,
             None => rest
                 .next()
                 .cloned()
                 .ok_or_else(|| format!("--{name} needs a value\nhelp: write --{name}=VALUE"))?,
         };
+        let (from, value) = match found.read {
+            Read::Value => (format!("--{name}"), raw),
+            Read::File => {
+                let text = std::fs::read_to_string(&raw).map_err(|e| {
+                    format!("--{name}={raw}: {e}\nhelp: point it at a file that holds the value")
+                })?;
+                let value = text.trim_end_matches(['\n', '\r']).to_string();
+                (format!("--{name}={raw}"), value)
+            }
+            Read::Env => {
+                let value = std::env::var(&raw).map_err(|_| {
+                    format!("--{name}={raw}: ${raw} is not set\nhelp: set ${raw}, or drop the flag")
+                })?;
+                (format!("--{name}={raw}"), value)
+            }
+        };
         given.push(Given {
-            setting,
-            from: format!("--{name}"),
+            setting: found.setting,
+            from,
             value,
         });
     }
@@ -5380,10 +5525,14 @@ const GIVEN_FLAGS: &str = r#"    let names = flag_names()?;
 }
 "#;
 
-const CONFIG_FN: &str = r#"
-/// The configuration this run reads: the files, the environment, and the
-/// flags on top where src/modules/ turns them on.
-pub fn config() -> Result<brocanth_config::Config, String> {
+const LAYERS_CONFIG: &str = r#"
+/// Every settings layer of this run, over the defaults: the module files,
+/// the config files, the environment and the flags. `brocanth-config`
+/// layers them and types each section.
+pub type Layers = brocanth_config::Config;
+
+/// Reads [`Layers`]. A flag of a module whose flags are off stops it.
+pub fn layers() -> Result<Layers, String> {
     refuse_off_flags()?;
     let mut loader = brocanth_config::Loader::new(crate::app::APP);
     for setting in SETTINGS {
@@ -5392,10 +5541,35 @@ pub fn config() -> Result<brocanth_config::Config, String> {
         }
     }
     for given in given()? {
-        let flag = given.from.trim_start_matches('-');
-        loader = loader.flag(given.setting.path, flag, &given.value, given.setting.text);
+        let (path, text) = (given.setting.path, given.setting.text);
+        loader = match given.from.strip_prefix("--") {
+@ARMS@        };
     }
     loader.load().map_err(|e| e.to_string())
+}
+"#;
+
+/// The arms of `layers` with no list declared.
+const LAYERS_ARMS: &str = r#"            Some(flag) => loader.flag(path, flag, &given.value, text),
+            None => loader.code(path, &given.from, &given.value, text),
+"#;
+
+/// The arms of `layers` with a list declared: a list splits at commas.
+const LAYERS_LIST_ARMS: &str = r#"            Some(flag) if given.setting.list => loader.flag_list(path, flag, &given.value),
+            Some(flag) => loader.flag(path, flag, &given.value, text),
+            None if given.setting.list => loader.code_list(path, &given.from, &given.value),
+            None => loader.code(path, &given.from, &given.value, text),
+"#;
+
+const LAYERS_PLAIN: &str = r#"
+/// Every settings layer of this run, over the defaults, lowest first: the
+/// module files, the environment and the flags.
+pub type Layers = Vec<Given>;
+
+/// Reads [`Layers`]. A flag of a module whose flags are off stops it.
+pub fn layers() -> Result<Layers, String> {
+    refuse_off_flags()?;
+    given()
 }
 "#;
 
@@ -5409,24 +5583,27 @@ pub fn flag_args(
 ) -> brocanth_command::anyhow::Result<brocanth_command::clap::Command> {
     use brocanth_command::{anyhow, clap};
 
-@REFUSE@    let mut command = command;
-    for (setting, name) in flag_names().map_err(anyhow::Error::msg)? {
+    refuse_off_flags().map_err(anyhow::Error::msg)?;
+    let mut command = command;
+    for name in flag_names().map_err(anyhow::Error::msg)? {
         let taken = command
             .get_subcommands()
             .flat_map(|sub| sub.get_arguments())
-            .any(|arg| arg.get_long() == Some(name));
+            .any(|arg| arg.get_long() == Some(name.name.as_str()));
         if taken {
             anyhow::bail!(
-                "`--{name}` sets `{}` and is also an argument of a command\nhelp: rename it in {}",
-                setting.path,
-                setting.file
+                "`--{}` sets `{}` and is also an argument of a command\nhelp: rename it in {}",
+                name.name,
+                name.setting.path,
+                name.setting.file
             );
         }
+        let (help, value) = name.help();
         command = command.arg(
-            clap::Arg::new(name)
-                .long(name)
-                .value_name("VALUE")
-                .help(setting.help)
+            clap::Arg::new(name.name.clone())
+                .long(name.name)
+                .value_name(value)
+                .help(help)
                 .global(true)
                 .action(clap::ArgAction::Append),
         );
@@ -5443,15 +5620,17 @@ const READ_LINE: &str = r#"
 /// This binary has no command line of its own: `brocanth add commands` gives
 /// it one, and `clap` does this.
 pub fn read_line() -> Result<bool, String> {
-@REFUSE@    let names = flag_names()?;
+    refuse_off_flags()?;
+    let names = flag_names()?;
     let mut rest = std::env::args_os()
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = rest.next() {
         if arg == "--help" || arg == "-h" {
             println!("Flags:");
-            for (setting, name) in &names {
-                println!("  --{name} <VALUE>  {}", setting.help);
+            for name in &names {
+                let (help, value) = name.help();
+                println!("  --{} <{value}>  {help}", name.name);
             }
             println!("  --settings  every settings layer, then the merged values");
             return Ok(true);
@@ -5462,7 +5641,7 @@ pub fn read_line() -> Result<bool, String> {
         }
         let written = arg.strip_prefix("--").unwrap_or_default();
         let name = written.split_once('=').map_or(written, |(name, _)| name);
-        if name.is_empty() || !names.iter().any(|(_, known)| *known == name) {
+        if name.is_empty() || !names.iter().any(|known| known.name == name) {
             return Err(format!(
                 "unknown argument `{arg}`\nhelp: `--help` lists the flags"
             ));
@@ -5478,9 +5657,10 @@ pub fn read_line() -> Result<bool, String> {
 
 const CONFIG_REPORT: &str = r#"
 /// Every settings layer on its own, lowest first, then the merged values.
-/// A secret is masked in every layer.
+/// A secret is masked in every layer; its pointer flag shows where it came
+/// from.
 pub fn settings_report() -> Result<String, String> {
-    let config = config()?;
+    let config = layers()?;
     let mut layers = config.layers().defaults(defaults());
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
@@ -5503,6 +5683,27 @@ where
 }
 "#;
 
+const LISTED: &str = r#"
+/// A list: the items joined by commas, each as the type of the list. Empty
+/// is the empty list.
+fn listed<T>(given: &Given) -> Result<Vec<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    given
+        .value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse()
+                .map_err(|e| format!("{} has {item:?}: {e}", given.from))
+        })
+        .collect()
+}
+"#;
+
 const OPTIONAL: &str = r#"
 /// One value for an `Option` field: empty, or the setting's declared alias,
 /// is `None`, decided at this layer.
@@ -5521,15 +5722,27 @@ where
 
 const PLAIN_REPORT: &str = r#"
 /// Every settings layer on its own, lowest first, then the merged values.
-/// A secret is masked in every layer.
+/// A secret is masked in every layer; its pointer flag shows where it came
+/// from.
 pub fn settings_report() -> Result<String, String> {
-    let given = given()?;
+    let given = layers()?;
     let secret = |path: &str| SETTINGS.iter().any(|s| s.path == path && !s.flag);
     let shown = |path: &str, value: String| {
         if secret(path) {
             "(secret)".to_string()
         } else {
             value
+        }
+    };
+    // The layer of one value, from where it came: a flag, a variable, or a
+    // module file.
+    let layer = |g: &Given| -> (usize, &'static str) {
+        if g.from.starts_with("--") {
+            (4, "flags")
+        } else if g.from.starts_with('$') {
+            (3, "environment")
+        } else {
+            (2, "code")
         }
     };
     let width = SETTINGS.iter().map(|s| s.path.len()).max().unwrap_or(0);
@@ -5540,12 +5753,9 @@ pub fn settings_report() -> Result<String, String> {
             shown(path, value)
         ));
     }
-    for (n, label, prefix) in [(2, "environment", "$"), (3, "flags", "--")] {
+    for (n, label) in [(2, "code"), (3, "environment"), (4, "flags")] {
         out.push_str(&format!("\n  {n:>2}  {label}\n"));
-        let mine: Vec<&Given> = given
-            .iter()
-            .filter(|g| g.from.starts_with(prefix))
-            .collect();
+        let mine: Vec<&Given> = given.iter().filter(|g| layer(g).0 == n).collect();
         if mine.is_empty() {
             out.push_str("        (sets nothing)\n");
         }
@@ -5558,9 +5768,11 @@ pub fn settings_report() -> Result<String, String> {
     out.push_str("\nmerged\n");
 @NOTES@    for (path, value) in merged(&given)? {
         let layer = match given.iter().rev().find(|g| g.setting.path == path) {
-            Some(g) if g.from.starts_with('$') => "2 environment",
-            Some(_) => "3 flags",
-            None => "1 defaults",
+            Some(g) => {
+                let (n, label) = layer(g);
+                format!("{n} {label}")
+            }
+            None => "1 defaults".to_string(),
         };
         let value = shown(path, value);
 @LINE@    }
@@ -6663,8 +6875,8 @@ mod tests {
         // must never have to write into it.
         let registry = plugins_mod_rs(&a, &built(&picks));
         for line in [
-            ".plugin_hooking_from_config::<crate::plugins::logging::Logging>(\"logging\")",
-            ".plugin_from_config::<crate::plugins::sessions::Sessions>(\"sessions\")",
+            "<crate::plugins::logging::Logging as brocanth::plugin_api::Plugin>::new(",
+            "<crate::plugins::sessions::Sessions as brocanth::plugin_api::Plugin>::new(",
         ] {
             assert!(registry.contains(line), "{registry}");
         }
@@ -6732,23 +6944,92 @@ mod tests {
     }
 
     #[test]
-    fn without_the_config_plugin_a_plugin_is_built_from_a_literal() {
-        let registry = plugins_mod_rs(&answers(&["sessions"]), &built(&["sessions"]));
-        // Already wrapped, because it is longer than rustfmt's chain_width
-        // and a project must survive its own first `cargo fmt`. The literal
-        // is the default, with the environment and the flags on top.
+    fn a_build_time_option_is_written_into_the_module_file_once() {
+        let a = answers(&["admin"]);
+        let shapes = module_shapes(&a).expect("the modules agree");
+        let given = |module: &str, option: &str, value: &str| {
+            vec![(module.to_string(), option.to_string(), value.to_string())]
+        };
+        let mut files = scaffold(&a).expect("the modules agree");
+        let options = given("admin", "mount_at", "/backoffice");
+        crate::choices::set_options(&shapes, &mut files, &options, |_| true)
+            .expect("a text option takes any text");
+        let (_, admin) = files
+            .iter()
+            .find(|(path, _)| path == "src/modules/admin.rs")
+            .expect("the admin's module file");
         assert!(
-            registry.contains(".plugin(crate::plugins::sessions::Sessions::new(\n")
-                && registry.contains("crate::plugins::sessions_settings(&given)?,")
+            admin.contains("    mount_at: \"/backoffice\",\n"),
+            "{admin}"
+        );
+        // The file exists: no command rewrites it, so the option is refused.
+        let refused = crate::choices::set_options(&shapes, &mut files, &options, |_| false)
+            .expect_err("the file is the project's");
+        assert!(
+            refused[0].message.contains("src/modules/admin.rs exists"),
+            "{refused:?}"
+        );
+        // A module this command does not write.
+        let options = given("oauth-client", "mount_at", "/oauth");
+        let refused = crate::choices::set_options(&shapes, &mut files, &options, |_| true)
+            .expect_err("oauth-client is not added");
+        assert!(
+            refused[0]
+                .message
+                .contains("which this command does not add"),
+            "{refused:?}"
+        );
+        // A value of the wrong type.
+        let a = answers(&["middleware", "middleware-csrf", "storage", "storage-routes"]);
+        let shapes = module_shapes(&a).expect("the modules agree");
+        let mut files = scaffold(&a).expect("the modules agree");
+        let options = given("storage-routes", "public", "yes");
+        let refused = crate::choices::set_options(&shapes, &mut files, &options, |_| true)
+            .expect_err("not a boolean");
+        assert!(
+            refused[0].message.contains("is `true` or `false`"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn one_registration_form_with_and_without_a_config_file() {
+        // The registration a module writes is the same text in both
+        // projects; only the reader behind `layers` differs.
+        let registration = |picks: &[&'static str]| {
+            let registry = plugins_mod_rs(&answers(picks), &built(picks));
+            let start = registry
+                .find("        let builder = builder.plugin(")
+                .unwrap_or_else(|| panic!("{registry}"));
+            let end = start + registry[start..].find(");\n").expect("ends") + 3;
+            (registry[start..end].to_string(), registry)
+        };
+        let (plain, registry) = registration(&["sessions"]);
+        let (file, configured) = registration(&["sessions", "config"]);
+        assert_eq!(plain, file);
+        assert!(
+            plain.contains("crate::plugins::sessions_settings(&layers)?,"),
+            "{plain}"
+        );
+        // The trait is named in the call, so no file needs it in scope.
+        for text in [&registry, &configured] {
+            assert!(
+                !text.contains("use brocanth::plugin_api::Plugin;"),
+                "{text}"
+            );
+            assert!(!text.contains("plugin_from_config"), "{text}");
+        }
+        // Without a file, the reader starts from the default and parses each
+        // layer; with one, `brocanth-config` types the section.
+        assert!(
+            registry.contains("pub type Layers = Vec<Given>;")
                 && registry.contains("crate::plugins::sessions::Settings::default();"),
             "{registry}"
         );
-        assert!(!registry.contains("plugin_from_config"), "{registry}");
-        // `Plugin::new` is a trait method, so this branch -- and only this
-        // branch -- needs the trait in scope.
         assert!(
-            registry.contains("use brocanth::plugin_api::Plugin;"),
-            "{registry}"
+            configured.contains("pub type Layers = brocanth_config::Config;")
+                && configured.contains("layers.section(\"sessions\")"),
+            "{configured}"
         );
     }
 
@@ -7326,6 +7607,7 @@ mod tests {
             force: false,
             questions: false,
             json: false,
+            options: Vec::new(),
         };
         assert_eq!(picked(&args), vec!["rsx"]);
     }
@@ -7616,15 +7898,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The flags a module declares, through a generated binary, both ways.
+    /// The settings layers, through a generated binary, with and without a
+    /// config file: default, module file, file, environment, flags, lowest
+    /// first; and a secret through its pointer flags.
     ///
-    /// Each run is a value the plugin refuses at startup, so the binary
-    /// stops before it binds a socket, and the error proves the flag reached
-    /// the plugin's settings. Without `config`, `main` reads the line itself.
-    /// With it, a renamed flag reaches the file's loader as its top layer
-    /// once `src/modules/brocanth.rs` turns the flags on, and the canonical
-    /// name is then refused by `clap`. A module file with `Flags::On` turns
-    /// one module's flags on while the project rule stays off.
+    /// Each run that must fail is a value the plugin refuses at startup, so
+    /// the binary stops before it binds a socket, and the error proves the
+    /// value reached the plugin's settings. The settings report proves which
+    /// layer won. Without `config`, `main` reads the line itself; with it, the
+    /// flags are on beside the file (`docs/module-capabilities.md` §6).
     ///
     /// `cargo test -p brocanth-cli -- --ignored`.
     #[test]
@@ -7638,8 +7920,8 @@ mod tests {
             .join("brocanth")
             .canonicalize()
             .expect("the framework is beside the cli");
-        // Each edit is a module file, the text the generator wrote, and the
-        // text a developer puts in its place.
+        // Each edit is a file, the text the generator wrote, and the text a
+        // developer puts in its place.
         let build = |name: &str, picks: Vec<&'static str>, edits: &[(&str, &str, &str)]| {
             let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
@@ -7672,8 +7954,14 @@ mod tests {
             );
             root
         };
+        // Where `cargo build` put the binary: the shared target directory
+        // when one is set, as the build inherits it.
+        let target = |root: &Path| {
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map_or_else(|| root.join("target"), std::path::PathBuf::from)
+        };
         let run = |root: &Path, name: &str, args: &[&str], env: &[(&str, &str)]| {
-            let output = Command::new(root.join("target/debug").join(name))
+            let output = Command::new(target(root).join("debug").join(name))
                 .args(args)
                 .envs(env.iter().copied())
                 .current_dir(root)
@@ -7688,118 +7976,170 @@ mod tests {
                 ),
             )
         };
+        // The merged line of `path` in a settings report.
+        let merged = |out: &str, path: &str| -> String {
+            out.split("\nmerged\n")
+                .nth(1)
+                .and_then(|merged| {
+                    merged
+                        .lines()
+                        .find(|line| line.trim_start().starts_with(&format!("{path} ")))
+                })
+                .unwrap_or_default()
+                .to_string()
+        };
+        let set_cookie = (
+            "src/modules/sessions.rs",
+            "    set: &[],",
+            "    set: &[(Key::Cookie, \"from-code\")],",
+        );
 
-        // No config file and no command line: `main` reads the flags, and
-        // the plugins read the environment under them.
-        let bare = build("flags-bare", vec!["sessions", "storage"], &[]);
-        let (ok, out) = run(&bare, "flags-bare", &["--sessions.cookie="], &[]);
+        // No config file and no command line: `main` reads the flags.
+        let name = "flags-bare";
+        let bare = build(name, vec!["sessions", "storage"], &[set_cookie]);
+        let secret = bare.join("secret.txt");
+        std::fs::write(&secret, "\n").unwrap();
+        let secret_flag = format!("--storage.secret_file={}", secret.display());
+        // Each layer wins over the one under it: code, then the variable,
+        // then the flag.
+        let (ok, out) = run(&bare, name, &["--settings"], &[]);
+        assert!(ok && out.contains("   2  code\n"), "{out}");
+        assert!(
+            merged(&out, "sessions.cookie").contains("\"from-code\"  2 code"),
+            "{out}"
+        );
+        let env = [("FLAGS_BARE_SESSIONS__COOKIE", "from-env")];
+        let (ok, out) = run(&bare, name, &["--settings"], &env);
+        assert!(
+            ok && merged(&out, "sessions.cookie").contains("\"from-env\"  3 environment"),
+            "{out}"
+        );
+        let line = ["--sessions.cookie=from-flag", "--settings"];
+        let (ok, out) = run(&bare, name, &line, &env);
+        assert!(
+            ok && merged(&out, "sessions.cookie").contains("\"from-flag\"  4 flags"),
+            "{out}"
+        );
+        // The value reaches the plugin: it refuses an empty cookie.
+        let (ok, out) = run(&bare, name, &["--sessions.cookie="], &[]);
         assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        let (ok, out) = run(&bare, "flags-bare", &["--storage.token_ttl", "abc"], &[]);
+        let (ok, out) = run(&bare, name, &["--storage.token_ttl", "abc"], &[]);
         assert!(
             !ok && out.contains("--storage.token_ttl is \"abc\""),
             "{out}"
         );
-        let (ok, out) = run(&bare, "flags-bare", &["--storage.secret=x"], &[]);
+        // A secret has no value flag, and two pointer flags.
+        let (ok, out) = run(&bare, name, &["--storage.secret=x"], &[]);
+        assert!(!ok && out.contains("unknown argument"), "{out}");
+        let (ok, out) = run(&bare, name, &["--help"], &[]);
         assert!(
-            !ok && out.contains("unknown argument"),
-            "a secret has no flag: {out}"
+            ok && out.contains("--sessions.cookie <VALUE>")
+                && out.contains("--storage.secret_file <PATH>")
+                && out.contains("--storage.secret_env <VAR>")
+                && out.contains("--server.shutdown_grace_secs <VALUE>"),
+            "{out}"
         );
-        let (ok, out) = run(&bare, "flags-bare", &["--help"], &[]);
-        assert!(ok && out.contains("--sessions.cookie <VALUE>"), "{out}");
-        // The framework's own setting has a flag too, typed as its field.
+        // The file's value reaches the plugin: an empty secret is refused.
+        let (ok, out) = run(&bare, name, &[&secret_flag], &[]);
+        assert!(!ok && out.contains("[storage] secret is required"), "{out}");
+        let env = [("MY_SECRET", "")];
+        let (ok, out) = run(&bare, name, &["--storage.secret_env=MY_SECRET"], &env);
+        assert!(!ok && out.contains("[storage] secret is required"), "{out}");
+        let (ok, out) = run(&bare, name, &["--storage.secret_env=NOT_SET_ANYWHERE"], &[]);
         assert!(
-            out.contains("--server.shutdown_grace_secs <VALUE>"),
+            !ok && out.contains("$NOT_SET_ANYWHERE is not set") && out.contains("help: "),
+            "{out}"
+        );
+        // The report shows the pointer, never the value.
+        std::fs::write(&secret, "hush-from-a-file\n").unwrap();
+        let line = [secret_flag.as_str(), "--settings"];
+        let env = [("FLAGS_BARE_STORAGE__SECRET", "hush-from-env")];
+        let (ok, out) = run(&bare, name, &line, &env);
+        assert!(ok, "{out}");
+        assert!(
+            merged(&out, "storage.secret").contains("(secret)  4 flags")
+                && out.contains(&secret_flag)
+                && !out.contains("hush"),
             "{out}"
         );
         let line = ["--server.shutdown_grace_secs=soon"];
-        let (ok, out) = run(&bare, "flags-bare", &line, &[]);
+        let (ok, out) = run(&bare, name, &line, &[]);
         assert!(
             !ok && out.contains("--server.shutdown_grace_secs is \"soon\""),
             "{out}"
         );
-        // A variable reaches the plugin; a secret has one even with no flag.
-        let env = [("FLAGS_BARE_SESSIONS__COOKIE", "")];
-        let (ok, out) = run(&bare, "flags-bare", &[], &env);
-        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        // Each layer on its own, then the merge. The flag wins over the
-        // variable, and the secret is masked everywhere.
-        let env = [
-            ("FLAGS_BARE_SESSIONS__COOKIE", "from-env"),
-            ("FLAGS_BARE_STORAGE__SECRET", "hush"),
-        ];
-        let line = ["--sessions.cookie=from-flag", "--settings"];
-        let (ok, out) = run(&bare, "flags-bare", &line, &env);
-        assert!(ok, "{out}");
-        assert!(out.contains("   2  environment\n"), "{out}");
-        assert!(
-            out.contains("\"from-env\"  $FLAGS_BARE_SESSIONS__COOKIE"),
-            "{out}"
-        );
-        assert!(out.contains("\"from-flag\"  3 flags"), "{out}");
-        assert!(
-            out.contains("storage.secret") && !out.contains("hush"),
-            "{out}"
-        );
         let _ = std::fs::remove_dir_all(&bare);
 
-        // A config file and the project rule left off: a flag is refused by
-        // name, with the two ways to do what was meant. `sessions.rs` turns
-        // the flags of its own module on.
-        let off = build(
-            "flags-off",
-            vec!["sessions", "storage", "config"],
-            &[(
-                "src/modules/sessions.rs",
-                "flags: Flags::Project,",
-                "flags: Flags::On,",
-            )],
-        );
-        let (ok, out) = run(&off, "flags-off", &["--storage.token_ttl=1"], &[]);
-        assert!(
-            !ok && out.contains("`--storage.token_ttl` is off")
-                && out.contains("help: set `flags: Flags::On` in src/modules/storage.rs"),
-            "{out}"
-        );
-        let line = ["--server.shutdown_grace_secs=1"];
-        let (ok, out) = run(&off, "flags-off", &line, &[]);
-        assert!(
-            !ok && out.contains("help: set `flags_with_config: true` in src/modules/brocanth.rs"),
-            "{out}"
-        );
-        let (ok, out) = run(&off, "flags-off", &["--sessions.cookie="], &[]);
-        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        let _ = std::fs::remove_dir_all(&off);
-
-        // A config file, the flags turned on, and one renamed.
+        // A config file: the flags stay on, and the file is one more layer
+        // between the module file and the environment. One flag renamed, and
+        // one module's flags turned off.
+        let name = "flags-configured";
         let configured = build(
-            "flags-configured",
-            vec!["sessions", "config", "commands"],
+            name,
+            vec!["sessions", "storage", "config", "commands"],
             &[
-                (
-                    "src/modules/brocanth.rs",
-                    "flags_with_config: false,",
-                    "flags_with_config: true,",
-                ),
+                set_cookie,
                 (
                     "src/modules/sessions.rs",
                     "rename: &[],",
-                    "rename: &[(Key::Cookie, Flag::As(\"cookie\"))],",
+                    "rename: &[(Key::Secure, Flag::As(\"secure\"))],",
+                ),
+                (
+                    "src/modules/storage.rs",
+                    "flags: Flags::Project,",
+                    "flags: Flags::Off,",
                 ),
             ],
         );
-        let name = "flags-configured";
-        let (ok, out) = run(&configured, name, &["serve", "--cookie="], &[]);
-        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
-        let (ok, out) = run(&configured, name, &["serve", "--sessions.cookie=x"], &[]);
+        let file = configured.join("config/development.toml");
+        // The merged line names the value and the layer; this report pads
+        // the value to a column.
+        let won = |out: &str, value: &str, layer: &str| {
+            let line = merged(out, "sessions.cookie");
+            line.contains(value) && line.trim_end().ends_with(layer)
+        };
+        // The file sets the cookie, over the code.
+        let (ok, out) = run(&configured, name, &["settings"], &[]);
+        assert!(ok && out.contains("  2  code\n"), "{out}");
         assert!(
-            !ok && out.contains("--sessions.cookie"),
-            "renamed away: {out}"
+            won(
+                &out,
+                "\"_flags_configured_session\"",
+                "3 ./config/development.toml"
+            ),
+            "{out}"
         );
+        // Without the key in the file, the code decides.
+        let text = std::fs::read_to_string(&file).unwrap();
+        let cookie = text
+            .lines()
+            .find(|line| line.starts_with("cookie = "))
+            .expect("the file sets the cookie")
+            .to_string();
+        std::fs::write(&file, text.replacen(&cookie, "", 1)).unwrap();
+        let (ok, out) = run(&configured, name, &["settings"], &[]);
+        assert!(ok && won(&out, "\"from-code\"", "2 code"), "{out}");
+        std::fs::write(&file, &text).unwrap();
+        // The variable is over the file, and the flag over the variable.
+        let env = [("FLAGS_CONFIGURED_SESSIONS__COOKIE", "from-env")];
+        let (ok, out) = run(&configured, name, &["settings"], &env);
+        assert!(ok && won(&out, "\"from-env\"", "4 environment"), "{out}");
+        let line = ["settings", "--sessions.cookie=from-flag"];
+        let (ok, out) = run(&configured, name, &line, &env);
+        assert!(ok && won(&out, "\"from-flag\"", "5 flags"), "{out}");
+        // The flag reaches the plugin beside the file.
+        let (ok, out) = run(&configured, name, &["serve", "--sessions.cookie="], &[]);
+        assert!(!ok && out.contains("cookie must not be empty"), "{out}");
         let (ok, out) = run(&configured, name, &["serve", "--help"], &[]);
-        assert!(ok && out.contains("--cookie <VALUE>"), "{out}");
-        let (ok, out) = run(&configured, name, &["settings", "--cookie=x"], &[]);
         assert!(
-            ok && out.contains("--cookie") && out.contains("4 flags"),
+            ok && out.contains("--secure <VALUE>") && !out.contains("--sessions.secure"),
+            "{out}"
+        );
+        // A module whose file turns its flags off refuses them by name.
+        let (ok, out) = run(&configured, name, &["serve", "--storage.token_ttl=1"], &[]);
+        assert!(
+            !ok && out.contains("`--storage.token_ttl` is off")
+                && out.contains("help: set `flags: Flags::On` in src/modules/storage.rs"),
             "{out}"
         );
         // `[server]` takes a flag on top of the file, like a module's section.
@@ -7810,6 +8150,22 @@ mod tests {
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&configured);
+
+        // A secret's pointer beside a file, in a module whose flags are on.
+        let name = "flags-secret";
+        let secret_root = build(name, vec!["storage", "config", "commands"], &[]);
+        let secret = secret_root.join("secret.txt");
+        std::fs::write(&secret, "").unwrap();
+        let pointer = format!("--storage.secret_file={}", secret.display());
+        let (ok, out) = run(&secret_root, name, &["serve", &pointer], &[]);
+        assert!(!ok && out.contains("[storage] secret is required"), "{out}");
+        std::fs::write(&secret, "hush-from-a-file").unwrap();
+        let (ok, out) = run(&secret_root, name, &["settings", &pointer], &[]);
+        assert!(
+            ok && out.contains(&pointer) && !out.contains("hush"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&secret_root);
     }
 
     /// The hooks from `brocanth-middleware` take their settings from the

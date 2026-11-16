@@ -41,10 +41,6 @@ impl Module for PageViews {
             "page views counted on the server: no cookie, no script, no third party; rows in your Postgres",
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "operations",
             "Count page views on the server: no cookie, no script, no third party",
@@ -200,10 +196,6 @@ impl Module for StaticBeacon {
             "a few lines of script that report each page view to an analytics server; no cookie",
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "operations",
             "Report page views of these pages to a brocanth server with `analytics`",

@@ -31,10 +31,6 @@ impl Module for I18n {
         )
         .category(Category::Middleware)
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "gtag",
             "the catalogs carry the consent banner's strings, so the banner follows the locale; \
              with `i18n-routing`, the consent report's path is unprefixed",
@@ -97,11 +93,8 @@ impl Module for I18n {
         s.file("src/plugins/i18n/mod.rs", MOD_RS);
         s.at(Slot::PluginsMod).once("pub mod i18n;");
 
-        let turn = if project.has("config") {
-            "under [i18n] in config/<env>.toml"
-        } else {
-            "with `--i18n.default=fr` and the flags `--help` lists"
-        };
+        // A flag works in every project; a config file is one more place.
+        let turn = "with `--i18n.default=fr` and the flags `--help` lists";
         let routing = project.has("i18n-routing");
         let mut settings = settings();
         if routing {
@@ -465,7 +458,7 @@ mod tests {
 "#;
 
 /// The comment above the registration. `@TURN@` says where the settings
-/// are, which depends on whether there is a file.
+/// are: the flags, which every project has.
 const PRELUDE: &str = r#"
         // -- brocanth-i18n: a locale per request --------------------------
         //

@@ -1,13 +1,15 @@
 //! `config` -- TOML configuration, four sources, merged.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, ConfigSource, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The config plugin.
 ///
-/// The one choice that changes the *source* of every other choice rather
-/// than adding to it: with it a plugin's settings derive `Deserialize` and
-/// `main` reads a file; without it the struct derives nothing, `main` writes
-/// a literal, and no parser is linked.
+/// It provides [`ConfigSource`]: one more settings layer, the files, between
+/// the module files and the environment. The flags and the variables stay.
+/// With it a plugin's settings derive `Deserialize` and each module's
+/// section is written to the file; without it the struct derives nothing
+/// and no parser is linked. No module asks for it: the scaffold reads the
+/// binding (`docs/module-capabilities.md` §6).
 pub struct Config;
 
 impl Module for Config {
@@ -17,6 +19,7 @@ impl Module for Config {
             "config/<env>.toml, merged; without it nothing links a TOML parser",
         )
         .category(Category::Enhancer)
+        .provides::<ConfigSource>("config/<env>.toml, a layer under the environment and the flags")
         .outside_runtime()
         .asked_in(
             "foundations",
@@ -33,7 +36,7 @@ impl Module for Config {
         )
         .absent(
             "brocanth-config",
-            "no TOML parser; main builds each plugin from a literal",
+            "no TOML parser; each setting comes from its default, the module file, the environment or a flag",
         )
     }
 

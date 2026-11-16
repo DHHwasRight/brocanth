@@ -27,7 +27,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The broker, as a choice on the `brocanth create` menu.
@@ -45,10 +45,6 @@ impl Module for Realtime {
         .category(Category::Enhancer)
         .category(Category::Middleware)
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "realtime-sse",
             "it writes the one `authorise` both transports share",
         )
@@ -58,10 +54,6 @@ impl Module for Realtime {
         )
         .asked_in("behaviour", "A broadcast broker")
         .krate(Dep::brocanth("brocanth-realtime"))
-        // Only for the order of the `[realtime]` section and the builder
-        // line: the broker reads its limits from the file the config plugin
-        // loaded, so it belongs under it rather than above it.
-        .after("config")
         .absent(
             "brocanth-realtime",
             "no broker; a write tells nobody, and a client finds out by asking again",
@@ -90,13 +82,6 @@ impl Module for Realtime {
             \x20   crate::plugins::say!(info, \"realtime: up to {max_clients} clients\"; max_clients);"
                 .to_string(),
         );
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait
-            // method, so the trait has to be in scope. Every plugin
-            // module needs the same line, and `use` twice does not
-            // compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 

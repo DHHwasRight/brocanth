@@ -1083,6 +1083,7 @@ mod tests {
                 force: false,
                 questions: false,
                 json: false,
+                options: Vec::new(),
             },
         )
     }
@@ -1424,7 +1425,8 @@ mod tests {
             panic!("{}", said(&e));
         }
         assert!(!root.join("src/flags.rs").exists());
-        assert!(read(&root, "src/modules/brocanth.rs").contains("flags_with_config: true,"));
+        // `WITH_CONFIG` has nowhere to go: the flags are on beside a file.
+        assert!(!read(&root, "src/modules/brocanth.rs").contains("flags_with_config"));
         assert!(read(&root, "src/modules/sessions.rs")
             .contains("rename: &[(Key::Cookie, Flag::As(\"cookie\"))],"));
         assert!(root.join("src/modules/cache.rs").exists());

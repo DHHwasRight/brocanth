@@ -517,7 +517,8 @@ impl Loader {
     /// run.
     #[must_use]
     pub fn flag(mut self, path: &str, flag: &str, raw: &str, text: bool) -> Self {
-        self.flags.push(Given::new(path, flag, raw, Typing::of(text)));
+        self.flags
+            .push(Given::new(path, flag, raw, Typing::of(text)));
         self
     }
 
@@ -539,7 +540,8 @@ impl Loader {
     /// widest decision after the plugin's own default.
     #[must_use]
     pub fn code(mut self, path: &str, file: &str, raw: &str, text: bool) -> Self {
-        self.code.push(Given::new(path, file, raw, Typing::of(text)));
+        self.code
+            .push(Given::new(path, file, raw, Typing::of(text)));
         self
     }
 
@@ -897,7 +899,10 @@ fn given_layer(
         }
         table.insert(key.clone(), one.value(from(&one.name)));
     }
-    Ok(Value::new(ValueKind::Table(root), Provenance::inline(label)))
+    Ok(Value::new(
+        ValueKind::Table(root),
+        Provenance::inline(label),
+    ))
 }
 
 fn with_extension(stem: &Path, ext: &str) -> PathBuf {

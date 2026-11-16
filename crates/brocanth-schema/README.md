@@ -46,8 +46,7 @@ one setting (see `docs/module-flags.md`):
 | `report` | `--validation.report` | `$<APP>_VALIDATION__REPORT` | `json` | How a failed check is reported: `json` or `form`. Another value stops the application at startup. |
 
 With the `config` module the key is in `[validation]` in
-`config/<env>.toml`. With `config`, the flags are off until you set
-`flags_with_config: true` in `src/modules/brocanth.rs`.
+`config/<env>.toml` too, and the flag stays on.
 
 ## Examples
 

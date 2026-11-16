@@ -20,15 +20,14 @@
 //!     fn manifest(&self) -> Manifest {
 //!         Manifest::new("cache", "a cache in Postgres, on an unlogged table")
 //!             .krate(Dep::brocanth("brocanth-cache"))
-//!             .after("config")
 //!     }
 //!
-//!     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+//!     fn contribute(&self, _project: &Project, s: &mut Scaffold) {
 //!         s.file("src/plugins/cache/mod.rs", "// ...\n");
 //!         s.at(Slot::PluginsMod).line("pub mod cache;");
 //!         // Writes the chain line *and* the provider list, which have
 //!         // to agree. `plugin_line` alone writes only the first.
-//!         snippet::plugin(s, project, "cache", "Cache");
+//!         snippet::plugin(s, "cache", "Cache");
 //!     }
 //! }
 //! ```
@@ -68,7 +67,7 @@ pub mod kind;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use kind::{KindRef, PgPool, Requirement};
+pub use kind::{ConfigSource, KindRef, PgPool, Requirement};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1445,12 +1444,14 @@ pub struct Setting {
     /// the file needs and a `--help` line has no room for. A `\n` starts
     /// another comment line. Empty for none.
     pub note: String,
-    /// Whether the command line may set it. Off for a secret: every user on
-    /// the machine can read another process's arguments.
+    /// Whether a flag may carry its value. Off for a secret: every user on
+    /// the machine can read another process's arguments. A secret has two
+    /// pointer flags instead, `--<section>.<key>_file=PATH` and
+    /// `--<section>.<key>_env=VAR`, which never carry the value.
     pub flag: bool,
-    /// Whether the value is a secret. Set with [`Setting::secret`]: no
-    /// flag, and the generated `Debug` of the settings struct prints
-    /// `<redacted>` for it (see [`snippet::redact_secrets`]).
+    /// Whether the value is a secret. Set with [`Setting::secret`]: pointer
+    /// flags and no value flag, and the generated `Debug` of the settings
+    /// struct prints `<redacted>` for it (see [`snippet::redact_secrets`]).
     pub secret: bool,
     /// Whether the field is an `Option`. An empty value, `--x=` or `X=`,
     /// sets `None`; an absent one leaves the layer below in charge. The file
@@ -1483,9 +1484,10 @@ pub enum Kind {
     Integer,
     /// A number with a fractional part.
     Float,
-    /// A list of strings. In the file only, and in the environment by index
-    /// when the project has `config`: a flag has no spelling for a list that
-    /// would not also be a way to get one wrong.
+    /// A list of strings. A flag, a variable without a file and the module
+    /// file give the items joined by commas: `--csrf.exempt=/hooks,/api`.
+    /// With a file, the variable sets it by index. A list of records has no
+    /// declaration and no flag: it lives in code and in the file only.
     List,
 }
 
@@ -1510,12 +1512,11 @@ impl Setting {
         Self::new(key, Kind::Float, toml_float(value), help)
     }
 
-    /// A list of strings. No flag; see [`Kind::List`].
+    /// A list of strings. Its flag takes the items joined by commas; see
+    /// [`Kind::List`].
     pub fn list(key: &'static str, value: &[&str], help: &'static str) -> Self {
         let items: Vec<String> = value.iter().map(|item| toml_string(item)).collect();
-        let mut setting = Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help);
-        setting.flag = false;
-        setting
+        Self::new(key, Kind::List, format!("[{}]", items.join(", ")), help)
     }
 
     fn new(key: &'static str, kind: Kind, value: String, help: &'static str) -> Self {
@@ -1568,12 +1569,17 @@ impl Setting {
         self
     }
 
-    /// No flag for this one: the file and the environment only.
+    /// No value flag for this one: a secret.
     ///
-    /// For a secret. A flag is in `ps` output for every user on the host and
-    /// in the shell history of whoever typed it. The generated `Debug` of
-    /// the settings struct prints `<redacted>` for it, so a log line or a
-    /// panic message that prints the settings leaks nothing.
+    /// A flag is in `ps` output for every user on the host and in the shell
+    /// history of whoever typed it. So a secret gets two pointer flags
+    /// instead: `--<section>.<key>_file=PATH` reads the value from a file
+    /// (where Docker and Kubernetes mount secrets), and
+    /// `--<section>.<key>_env=VAR` reads it from another variable. The
+    /// settings report shows the pointer, never the value. The file and the
+    /// environment still set it. The generated `Debug` of the settings
+    /// struct prints `<redacted>` for it, so a log line or a panic message
+    /// that prints the settings leaks nothing.
     pub fn secret(mut self) -> Self {
         self.flag = false;
         self.secret = true;
@@ -2369,20 +2375,35 @@ impl Default for Settings {
 /// Not sugar: each one is a place where two modules must agree, and the
 /// agreement belongs in one function rather than in each of them.
 pub mod snippet {
-    use super::{Kind, Project, Scaffold, Setting, Slot};
+    use super::{Project, Scaffold, Setting, Slot};
+
+    /// Whether this project reads a file layer: a [`ConfigSource`] provider
+    /// is bound. The scaffold asks for every module, so a module that only
+    /// declares settings never asks, and never declares `uses`.
+    ///
+    /// [`ConfigSource`]: crate::kind::ConfigSource
+    fn file_layer(project: &Project) -> bool {
+        use crate::kind::Kind as _;
+        project
+            .bindings
+            .iter()
+            .any(|(kind, _)| *kind == crate::kind::ConfigSource::NAME)
+    }
 
     /// Registers a plugin whose settings are declared, and writes everything
     /// that follows from the declaration.
     ///
-    /// * With the `config` module: the `[key]` section, generated from the
-    ///   settings, and the configured registration. The flags reach the
-    ///   file's loader as its top layer when the project turns them on.
-    /// * Without it: a registration that starts from `Settings::default()`
-    ///   and applies whatever flags this run was given, through a function
-    ///   the CLI generates per section in `src/plugins/mod.rs`.
+    /// One registration, whatever the project reads its settings from: the
+    /// plugin is built from `crate::plugins::<key>_settings(&layers)`, which
+    /// the CLI generates in `src/plugins/mod.rs`. That reader layers the
+    /// default, the module file, the files (with a [`ConfigSource`]), the
+    /// environment and the flags. With a `ConfigSource` this also writes the
+    /// `[key]` section, made from the declarations.
     ///
     /// The provider line too, as [`plugin`] writes it. `key` is the module's
     /// key, its plugin's module name and its section; `ty` the plugin type.
+    ///
+    /// [`ConfigSource`]: crate::kind::ConfigSource
     pub fn configurable(
         s: &mut Scaffold,
         project: &Project,
@@ -2390,22 +2411,23 @@ pub mod snippet {
         ty: &str,
         settings: Vec<Setting>,
     ) {
-        if project.has("config") {
+        if file_layer(project) {
             s.at(Slot::ConfigSections)
                 .block(super::config_section(key, &settings));
         }
-        // Without a file, a declared setting still has the environment
-        // and, unless it is a secret, a flag.
-        if project.has("config") || settings.iter().all(|setting| setting.kind == Kind::List) {
-            s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+        let config = if settings.is_empty() {
+            format!("crate::plugins::{key}::Settings::default()")
         } else {
-            s.at(Slot::AppPlugins).block(format!(
-                "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
-                 \x20           crate::plugins::{ident}_settings(&given)?,\n\
-                 \x20       ));\n",
-                ident = key.replace('-', "_"),
-            ));
-        }
+            format!(
+                "crate::plugins::{}_settings(&layers)?",
+                key.replace('-', "_")
+            )
+        };
+        s.at(Slot::AppPlugins).block(constructed(
+            "plugin",
+            &format!("crate::plugins::{key}::{ty}"),
+            &config,
+        ));
         s.at(Slot::PluginsInstalled)
             .line(format!("{key} crate::plugins::{key}::{ty}"));
         for setting in settings {
@@ -2472,13 +2494,9 @@ pub mod snippet {
     /// everything that follows from the declaration.
     ///
     /// [`configurable`] for a plugin that installs hooks and whose
-    /// configuration type lives in its own crate:
-    ///
-    /// * With `config`: the `[section]` block and a registration through
-    ///   `plugin_hooking_from_config`, so the file, the environment and the
-    ///   flags reach the plugin.
-    /// * Without it: a registration that starts from the configuration
-    ///   type's `Default` and applies the environment and the flags.
+    /// configuration type lives in its own crate: one registration, built
+    /// from `crate::plugins::<section>_settings(&layers)`, and with a
+    /// `ConfigSource` the `[section]` block.
     ///
     /// Also the provider line and the hook record line, as [`hooking`]
     /// writes them, and the settings type, so the generated readers name
@@ -2497,103 +2515,28 @@ pub mod snippet {
             prelude,
             adjust,
         } = hooking;
-        if project.has("config") {
+        if file_layer(project) {
             s.at(Slot::ConfigSections)
                 .block(super::config_section(section, &settings));
         }
-        let statement = if project.has("config") {
-            match &adjust {
-                None => {
-                    // rustfmt breaks the argument onto its own line when
-                    // the call does not fit in 100 columns.
-                    let call =
-                        format!("            .plugin_hooking_from_config::<{ty}>({section:?})");
-                    let call = if call.len() <= 100 {
-                        call
-                    } else {
-                        format!(
-                            "            .plugin_hooking_from_config::<{ty}>(\n\
-                             \x20               {section:?},\n\
-                             \x20           )"
-                        )
-                    };
+        let ident = section.replace('-', "_");
+        let value = match &adjust {
+            None => format!("crate::plugins::{ident}_settings(&layers)?"),
+            Some(adjust) => {
+                let one = format!("crate::plugins::{ident}_settings(&layers)?{adjust}");
+                // 16 columns of indent and a comma: what the argument line
+                // costs inside the registration.
+                if one.len() < 100 - 16 {
+                    one
+                } else {
                     format!(
-                        "        let builder = builder\n\
-                         {call}\n\
-                         \x20           .map_err(|e| e.to_string())?;\n"
-                    )
-                }
-                // rustfmt puts the closure on the call's line when that
-                // line fits: flat when the body fits too, else as a block.
-                Some(adjust)
-                    if format!(
-                        "            .plugin_hooking_from_config_with::<{ty}>({section:?}, |config| {{"
-                    )
-                    .len()
-                        <= 100 =>
-                {
-                    let call = format!("            .plugin_hooking_from_config_with::<{ty}>(");
-                    let flat = format!("{call}{section:?}, |config| config{adjust})");
-                    let call = if flat.len() <= 100 {
-                        format!("{flat}\n")
-                    } else {
-                        let one = format!("                config{adjust}\n");
-                        let body = if one.trim_end().len() <= 100 {
-                            one
-                        } else {
-                            format!("                config\n{}", broken_chain(adjust, 20, ""))
-                        };
-                        format!("{call}{section:?}, |config| {{\n{body}            }})\n")
-                    };
-                    format!(
-                        "        let builder = builder\n\
-                         {call}\
-                         \x20           .map_err(|e| e.to_string())?;\n"
-                    )
-                }
-                Some(adjust) => {
-                    let one = format!("                |config| config{adjust},\n");
-                    let closure = if one.trim_end().len() <= 100 {
-                        one
-                    } else {
-                        format!(
-                            "                |config| {{\n\
-                             \x20                   config\n\
-                             {}\
-                             \x20               }},\n",
-                            broken_chain(adjust, 24, "")
-                        )
-                    };
-                    format!(
-                        "        let builder = builder\n\
-                         \x20           .plugin_hooking_from_config_with::<{ty}>(\n\
-                         \x20               {section:?},\n\
-                         {closure}\
-                         \x20           )\n\
-                         \x20           .map_err(|e| e.to_string())?;\n"
+                        "crate::plugins::{ident}_settings(&layers)?\n{}",
+                        broken_chain(adjust, 4, "")
                     )
                 }
             }
-        } else {
-            let ident = section.replace('-', "_");
-            let value = match &adjust {
-                None => format!("crate::plugins::{ident}_settings(&given)?"),
-                Some(adjust) => {
-                    let one = format!("crate::plugins::{ident}_settings(&given)?{adjust}");
-                    // 16 columns of indent and a comma: what the argument
-                    // line costs inside the registration.
-                    if one.len() < 100 - 16 {
-                        one
-                    } else {
-                        format!(
-                            "crate::plugins::{ident}_settings(&given)?\n{}",
-                            broken_chain(adjust, 4, "")
-                        )
-                    }
-                }
-            };
-            hooking_line(ty, &value)
         };
+        let statement = hooking_line(ty, &value);
         s.at(Slot::AppPlugins)
             .block(format!("{prelude}{statement}"));
         s.at(Slot::PluginsInstalled).line(format!("{key} {ty}"));
@@ -2607,12 +2550,12 @@ pub mod snippet {
 
     /// The statement that registers a plugin instance in the application.
     ///
-    /// Two forms, and which one is right is not the module's choice: with
-    /// the config plugin the instance is built from a named section, and
-    /// without it the generator hands it a literal the compiler checks.
+    /// One form, whatever the project reads its settings from: the plugin
+    /// is built with `<ty as Plugin>::new(..)`, so no file needs the trait
+    /// in scope.
     ///
-    /// It is here, and not written out in each module, for a duller reason
-    /// than that. Both forms are longer than rustfmt's `chain_width`, so
+    /// It is here, and not written out in each module, for a dull reason.
+    /// It is longer than rustfmt's `chain_width`, so
     /// they have to arrive already broken or a developer's first
     /// `cargo fmt` rewrites a file they never touched. That is a fact
     /// about rustfmt, not about caching or logging, and every module
@@ -2642,8 +2585,8 @@ pub mod snippet {
     /// is `Install` applied once per plugin in registration order, and the
     /// generated `App` names that type to hold a context. Writing the two
     /// separately is writing the same list twice.
-    pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str) {
-        s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+    pub fn plugin(s: &mut Scaffold, key: &str, ty: &str) {
+        s.at(Slot::AppPlugins).block(plugin_line(key, ty));
         s.at(Slot::PluginsInstalled)
             .line(format!("{key} crate::plugins::{key}::{ty}"));
     }
@@ -2695,11 +2638,16 @@ pub mod snippet {
     /// rustfmt breaks is `"Config::default()\n    .a(1)\n    .b(2)"`.
     /// This function indents it and adds the trailing comma.
     ///
-    /// No `Project` argument: the statement is the same with and without
-    /// `config`. A plugin whose configuration comes from the file uses
-    /// [`configurable_hooking`], which calls this function for its
-    /// literal branch.
+    /// No `Project` argument: the statement is the same in every project. A
+    /// plugin with declared settings uses [`configurable_hooking`], which
+    /// calls this function with its reader.
     pub fn hooking_line(ty: &str, config: &str) -> String {
+        constructed("plugin_hooking", ty, config)
+    }
+
+    /// `let builder = builder.<method>(<ty as Plugin>::new(<config>));`, in
+    /// the shape rustfmt gives it. See [`hooking_line`].
+    fn constructed(method: &str, ty: &str, config: &str) -> String {
         // The argument, at `indent` columns, with its trailing comma.
         let value = |indent: usize| -> String {
             let pad = " ".repeat(indent);
@@ -2713,21 +2661,23 @@ pub mod snippet {
             lines.concat()
         };
         // rustfmt keeps the call and the constructor on the `let` line when
-        // they fit in 100 columns. Else on one line after `let builder =`,
-        // when that line is at most 95 columns, which a short type name
-        // gives. Else it breaks both calls. The 95 is measured, not
-        // documented: rustfmt 1.9 breaks a 96-column line of this shape,
-        // whatever the argument (`brocanth_errors::Errors` is 98).
-        let call = format!("builder.plugin_hooking(<{ty} as brocanth::plugin_api::Plugin>::new(");
+        // that line is at most 98 columns for `plugin_hooking`, 97 for
+        // `plugin`. Else, for `plugin_hooking` only, on one line after `let
+        // builder =`, when that line is at most 95 columns. Else it breaks
+        // both calls. The numbers are measured, not documented: rustfmt 1.9,
+        // with an argument that does not fit on the `let` line
+        // (`every_plugin_registration_shape_is_what_rustfmt_writes`).
+        let call = format!("builder.{method}(<{ty} as brocanth::plugin_api::Plugin>::new(");
         let head = format!("            {call}");
-        if 8 + "let builder = ".len() + call.len() <= 100 {
+        let folded = if method == "plugin" { 97 } else { 98 };
+        if 8 + "let builder = ".len() + call.len() <= folded {
             format!(
                 "        let builder = {call}\n\
                  {}\
                  \x20       ));\n",
                 value(12)
             )
-        } else if head.len() <= 95 {
+        } else if method == "plugin_hooking" && head.len() <= 95 {
             format!(
                 "        let builder =\n\
                  {head}\n\
@@ -2737,7 +2687,7 @@ pub mod snippet {
             )
         } else {
             format!(
-                "        let builder = builder.plugin_hooking(\n\
+                "        let builder = builder.{method}(\n\
                  \x20           <{ty} as brocanth::plugin_api::Plugin>::new(\n\
                  {}\
                  \x20           ),\n\
@@ -2771,20 +2721,12 @@ pub mod snippet {
     ///
     /// It stays public for a caller that builds the chain some other way
     /// and writes [`Slot::PluginsInstalled`] itself.
-    pub fn plugin_line(project: &Project, key: &str, ty: &str) -> String {
-        if project.has("config") {
-            format!(
-                "        let builder = builder\n\
-                 \x20           .plugin_from_config::<crate::plugins::{key}::{ty}>({key:?})\n\
-                 \x20           .map_err(|e| e.to_string())?;\n"
-            )
-        } else {
-            format!(
-                "        let builder = builder.plugin(crate::plugins::{key}::{ty}::new(\n\
-                 \x20           crate::plugins::{key}::Settings::default(),\n\
-                 \x20       ));\n"
-            )
-        }
+    pub fn plugin_line(key: &str, ty: &str) -> String {
+        constructed(
+            "plugin",
+            &format!("crate::plugins::{key}::{ty}"),
+            &format!("crate::plugins::{key}::Settings::default()"),
+        )
     }
 
     /// A value from a module file, as generated code reads it:
@@ -2880,28 +2822,19 @@ pub mod snippet {
         }
     }
 
-    /// The import the literal form needs, and the configured form does not.
-    ///
-    /// `Plugin::new` is a trait method, so a file that calls it must have
-    /// the trait in scope; `plugin_from_config` is the builder's own method
-    /// and needs nothing. Write it with
-    /// [`Writer::once`](crate::Writer::once) into
-    /// [`Slot::AppUses`](crate::Slot::AppUses), because every plugin module
-    /// needs the same line and a file with it twice does not compile.
-    pub const PLUGIN_TRAIT_USE: &str = "use brocanth::plugin_api::Plugin;";
-
     /// The derive a settings struct carries, and the sentence explaining it.
     ///
-    /// This is the modularity claim at its sharpest. With the config plugin
-    /// the struct is deserialised and derives for it; without, nothing
-    /// deserialises anything and the derive is not there to be compiled. A
+    /// This is the modularity claim at its sharpest. With a file layer (a
+    /// `ConfigSource`) the struct is deserialised and derives for it;
+    /// without, nothing deserialises anything and the derive is not there
+    /// to be compiled. A
     /// module that wrote `serde::Deserialize` unconditionally would put a
     /// parser in the tree of a project that asked for none.
     ///
     /// Returns the derive lines, and a sentence for the struct's own doc
     /// comment that says why they are what they are.
     pub fn settings_derive(project: &Project, section: &str) -> (String, String) {
-        if project.has("config") {
+        if file_layer(project) {
             (
                 "#[derive(Debug, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
                     .to_string(),
@@ -2914,9 +2847,9 @@ pub mod snippet {
         } else {
             (
                 "#[derive(Debug)]".to_string(),
-                "Nothing deserialises it: `main` builds it from a literal, and the\n\
-                 /// compiler checks that literal. `Plugin::Config` carries no bounds the\n\
-                 /// core imposes, so there is no deserialiser here to link."
+                "Nothing deserialises it: `src/plugins/mod.rs` starts from `Default` and\n\
+                 /// parses each flag and variable into its field. `Plugin::Config` carries\n\
+                 /// no bounds the core imposes, so there is no deserialiser here to link."
                     .to_string(),
             )
         }

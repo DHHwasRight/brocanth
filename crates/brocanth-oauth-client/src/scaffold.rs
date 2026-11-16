@@ -16,7 +16,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{
-    configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
+    configurable, integration, module_ref, redact_secrets, settings_derive,
 };
 use brocanth_scaffold::{
     Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
@@ -83,10 +83,6 @@ impl Module for OauthClient {
         )
         .requires::<PgPool>("the tokens are rows in the `db` module's database; a restart must not drop them")
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "middleware-csrf",
             "the Connect and Disconnect forms carry the CSRF token",
         )
@@ -110,7 +106,6 @@ impl Module for OauthClient {
                 .feature_with("admin", "admin"),
         )
         .after("auth")
-        .after("config")
         .absent(
             "oauth-client",
             "no connected accounts; nothing calls a provider's API for a person",
@@ -133,9 +128,6 @@ impl Module for OauthClient {
             "OauthClientPlugin",
             settings(project.has("oauth-client-memory")),
         );
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         s.at(Slot::RouterMounts).line(format!(
             "    crate::plugins::oauth_client::mount(routes, {})?;",
             module_ref("oauth-client", "mount_at")

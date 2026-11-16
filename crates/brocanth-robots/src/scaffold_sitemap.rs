@@ -31,7 +31,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The base URL a new project starts with: the address `serve` listens on.
@@ -48,10 +48,6 @@ impl Module for Sitemap {
         )
         .category(Category::Routes)
         .outside_runtime()
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to(
             "admin",
             "the admin is excluded, at the path src/modules/admin.rs mounts it",
@@ -72,7 +68,6 @@ impl Module for Sitemap {
         )
         .asked_in("pages", "A sitemap.xml that lists every page")
         .krate(Dep::brocanth("brocanth-robots"))
-        .after("config")
         // The `i18n` plugin puts its negotiator in the services at
         // `configure`; this one reads it there.
         .after("i18n")
@@ -90,9 +85,6 @@ impl Module for Sitemap {
         s.at(Slot::PagesRoutes).line("/sitemap.xml");
         s.at(Slot::PluginsMod).line("pub mod sitemap;");
         configurable(s, project, "sitemap", "Sitemap", settings(project));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 

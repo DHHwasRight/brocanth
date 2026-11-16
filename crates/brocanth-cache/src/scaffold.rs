@@ -27,9 +27,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{
-    configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
-};
+use brocanth_scaffold::snippet::{configurable, integration, redact_secrets, settings_derive};
 use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
@@ -51,10 +49,6 @@ impl Module for Cache {
             "a cache on an unlogged Postgres table, not Redis; without it no cache at all",
         )
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .requires_unless::<PgPool>(
             &BACKENDS,
             "the cache is an unlogged table on the project's pool; without a child backend there is nowhere else to keep it",
@@ -85,10 +79,6 @@ impl Module for Cache {
                 .feature_unless(BACKENDS[1], "postgres")
                 .feature_with("admin", "admin"),
         )
-        // Only for the order of the `[cache]` section and the builder line:
-        // the cache reads its URL from the file the config plugin loaded, so
-        // it belongs under it rather than above it.
-        .after("config")
         .absent(
             "brocanth-cache",
             "no cache; every read does the work a hit would have skipped",
@@ -132,10 +122,6 @@ impl Module for CacheMemory {
         .part_of_but_off("cache")
         .because("it is a backend for the cache, so there is nothing to store in it without one")
         .asked_in("data", "")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .conflicts(
             "cache-redis",
             "a project has one cache backend, and both write `src/plugins/cache/mod.rs`",
@@ -219,12 +205,6 @@ pub fn write_plugin(s: &mut Scaffold, project: &Project, backend: Backend) {
     );
     s.at(Slot::PluginsMod).line("pub mod cache;");
     configurable(s, project, "cache", "Cache", backend.settings);
-    if !project.has("config") {
-        // The literal form calls `Plugin::new`, which is a trait method, so
-        // the trait has to be in scope. Every plugin module needs the same
-        // line, and `use` twice does not compile.
-        s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-    }
 }
 
 /// The names after `use brocanth_cache::`: a single one without braces,

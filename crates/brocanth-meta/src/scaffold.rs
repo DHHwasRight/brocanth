@@ -16,7 +16,7 @@
 //!
 //! Compiled only under the `scaffold` feature.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// A title, a description, a canonical URL and share tags for each page.
@@ -30,10 +30,6 @@ impl Module for PageMeta {
         )
         .category(Category::Renderer)
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to("i18n", "`<html lang>` and `og:locale` follow the request's locale")
         .adapts_to(
             "i18n-routing",
@@ -45,7 +41,7 @@ impl Module for PageMeta {
         )
         .adapts_to(
             "sitemap",
-            "with a config file, an unset `base_url` is `[sitemap] base_url`, so the two never disagree",
+            "an unset `base_url` is `[sitemap] base_url`, so the two never disagree",
         )
         // The export renders every page through the layouts, so a static
         // site takes it.
@@ -63,9 +59,6 @@ impl Module for PageMeta {
         s.at(Slot::PluginsMod).line("pub mod meta;");
         s.at(Slot::PagesItems).block(pages_items(project));
         configurable(s, project, "meta", "Meta", settings(project));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         let mut agents = AGENTS.to_string();
         if project.has("rsx") {
             agents.push_str(AGENTS_RSX);
@@ -98,7 +91,7 @@ fn settings(project: &Project) -> Vec<Setting> {
             "http://localhost:3000",
             "The site's address, scheme and host. A canonical URL and og:url need it.",
         )
-        .note(if project.has("sitemap") && project.has("config") {
+        .note(if project.has("sitemap") {
             "Unset, it is [sitemap] base_url, so a canonical URL and a sitemap <loc>\n\
              name one site."
         } else {
@@ -193,7 +186,7 @@ fn plugin_rs(project: &Project) -> String {
     } else {
         String::new()
     };
-    let fallback = project.has("sitemap") && project.has("config");
+    let fallback = project.has("sitemap");
     PLUGIN_RS
         .replace(
             "@LC@",
@@ -232,11 +225,11 @@ fn app_test(project: &Project) -> String {
 }
 
 /// `configure` when `[sitemap]` gives the address `[meta]` left out.
-const SITEMAP_FALLBACK: &str = r#"lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+const SITEMAP_FALLBACK: &str = r#"_lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         // `[meta] base_url` unset: the address `[sitemap]` lists the pages
         // under, so a canonical URL and a sitemap <loc> name one site.
         if !self.has_base_url {
-            if let Some(url) = sitemap_base_url(lc) {
+            if let Some(url) = sitemap_base_url() {
                 self.site = std::mem::take(&mut self.site).base_url(url);
             }
         }
@@ -244,15 +237,12 @@ const SITEMAP_FALLBACK: &str = r#"lc: &mut Lifecycle<'_>) -> Result<(), PluginEr
 
 /// The reader `SITEMAP_FALLBACK` calls.
 const SITEMAP_ADDRESS: &str = r#"
-/// `[sitemap] base_url`, from the configuration the config plugin loaded.
-fn sitemap_base_url(lc: &Lifecycle<'_>) -> Option<String> {
-    #[derive(Default, serde::Deserialize)]
-    struct Address {
-        base_url: Option<String>,
-    }
-    let effective = brocanth_config::effective_of(lc.services())?;
-    let address: Address = effective.config().section("sitemap").ok()?;
-    address.base_url.filter(|url| !url.is_empty())
+/// `[sitemap] base_url`, through every settings layer, as the sitemap reads
+/// it.
+fn sitemap_base_url() -> Option<String> {
+    let layers = crate::plugins::layers().ok()?;
+    let sitemap = crate::plugins::sitemap_settings(&layers).ok()?;
+    sitemap.base_url.filter(|url| !url.is_empty())
 }
 "#;
 

@@ -42,7 +42,7 @@
 //!   once, and works in both shapes: adding `jobs` later moves the send off
 //!   the request with no change to the page.
 
-use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive};
 use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
@@ -58,10 +58,6 @@ impl Module for Mail {
         )
         .category(Category::Enhancer)
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "jobs",
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
         )
@@ -73,7 +69,6 @@ impl Module for Mail {
                 .feature("serde")
                 .note("the `Outbox` in src/plugins/mail, and SMTP with rustls"),
         )
-        .after("config")
         .after("jobs")
         .absent(
             "brocanth-mail",
@@ -91,10 +86,6 @@ impl Module for Mail {
         // reset link in git is a password in git.
         s.at(Slot::GitIgnore).line("/tmp/mail");
         configurable(s, project, "mail", "MailPlugin", settings(project));
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, a trait method.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }

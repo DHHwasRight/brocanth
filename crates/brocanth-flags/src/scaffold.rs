@@ -19,7 +19,7 @@
 //!
 //! [`enabled`]: https://docs.rs/brocanth-flags
 
-use brocanth_scaffold::snippet::{configurable, integration, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, integration};
 use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
@@ -34,10 +34,6 @@ impl Module for FeatureFlags {
             "feature flags: on for all, a percentage, users or groups; rows in your Postgres",
         )
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to(
             "auth",
             "a flag sees the signed-in account, so percentage and user rules match it",
@@ -72,10 +68,6 @@ impl Module for FeatureFlags {
         // The plugin's own configuration type, not a generated one: the
         // generated readers start from its `Default` and set its fields.
         s.settings_type("flags", "brocanth_flags::FlagsConfig");
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, a trait method.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         if project.has("admin") {
             integration(s, "flags", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
