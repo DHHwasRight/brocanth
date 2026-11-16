@@ -434,6 +434,17 @@ fn shape_mod(shape: &Shape) -> String {
     // The module itself.
     let file = path_of(&shape.key);
     let mut fields: Vec<(String, String, String)> = Vec::new();
+    if shape.framework() {
+        // A new file does not write it; the field stays so a file that
+        // predates stage 3 still compiles.
+        fields.push((
+            "flags_with_config".to_string(),
+            "bool".to_string(),
+            "No longer read: the flags are on beside a config file. Kept so an \
+             older file that sets it still compiles."
+                .to_string(),
+        ));
+    }
     if !shape.framework() && shape.has_flags() {
         fields.push((
             "flags".to_string(),
@@ -493,6 +504,7 @@ fn shape_mod(shape: &Shape) -> String {
     let mut defaults: Vec<(String, String)> = Vec::new();
     for (name, _, _) in &fields {
         let value = match name.as_str() {
+            "flags_with_config" => "false".to_string(),
             "flags" => "Flags::Project".to_string(),
             "rename" | "set" => "&[]".to_string(),
             "hooks" => "Hooks::DEFAULT".to_string(),
