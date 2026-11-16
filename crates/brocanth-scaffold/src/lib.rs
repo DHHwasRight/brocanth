@@ -319,6 +319,8 @@ pub struct Manifest {
     /// `brocanth remove` drops none of them: it prints the `DROP TABLE`
     /// statements, so the developer drops the data on purpose or keeps it.
     /// A table another module shares (the `queue_*` tables) is not listed.
+    /// `crates/brocanth-cli/tests/manifest_tables.rs` compares the list
+    /// with the crate's `CREATE TABLE` statements.
     pub tables: Vec<&'static str>,
 }
 
