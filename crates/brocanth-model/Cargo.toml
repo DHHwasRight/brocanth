@@ -117,7 +117,7 @@ default = ["postgres"]
 postgres = ["runtime", "sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 # This crate, as a dev-dependency on itself, with `plugin` and `db` on, so the
 # seam and its cost argument are compiled and tested on every run while

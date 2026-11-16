@@ -78,10 +78,13 @@ async fn the_orm_and_sea_query_share_one_pool_and_one_database() {
 
     // One connection, so a held transaction proves the two handles share
     // the pool: nothing else can take a connection while it is open.
+    //
+    // The default `acquire_timeout` stays: it also bounds the first
+    // connect, and a SCRAM login in a debug build on a busy machine takes
+    // longer than a short one. Step 4 bounds its own wait.
     let mut cfg = DbConfig::new(url);
     cfg.search_path = vec![schema.clone()];
     cfg.max_connections = 1;
-    cfg.acquire_timeout = Duration::from_millis(300);
     let db = Db::connect(&cfg).await.expect("connect in the schema");
     sqlx::query("CREATE TABLE note (id serial PRIMARY KEY, body text NOT NULL)")
         .execute(db.pool())
@@ -146,10 +149,10 @@ async fn the_orm_and_sea_query_share_one_pool_and_one_database() {
 
     // 4. One pool: while the ORM holds its only connection, Db waits for it.
     let held = orm.begin().await.expect("begin");
-    let waited = db.ping().await;
+    let waited = tokio::time::timeout(Duration::from_millis(500), db.ping()).await;
     assert!(
         waited.is_err(),
-        "Db got a second connection from a pool of one"
+        "Db got a second connection from a pool of one: {waited:?}"
     );
     held.commit().await.expect("commit");
     db.ping().await.expect("the connection is back in the pool");
