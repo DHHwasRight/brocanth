@@ -14,7 +14,7 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Needs | none |
 | Provides | `PgPool`: the project's one Postgres pool, published as `brocanth_db::Db`. No other module opens a pool |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`commands`](commands.md), [`model`](model.md) |
+| Adapts to | [`config`](config.md), [`commands`](commands.md), [`model`](model.md), [`db-embedded`](db-embedded.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-db` (feature `plugin`) |
@@ -80,6 +80,13 @@ A duration is a whole number of seconds. For `idle_timeout` and
 | `read_only` | bool | `false` | `--db.read_only` | Every transaction is read-only: for a replica, or a reporting process. |
 | `application_name` | text | the project name | `--db.application_name` | The name pg_stat_activity shows. Empty sends none. |
 | `ca_file` | text, optional | commented out | `--db.ca_file` | A PEM bundle to trust, with verify-full. Empty means none. |
+
+## With `db-embedded`
+
+[`db-embedded`](db-embedded.md) starts a Postgres server from the binary,
+for development. Its plugin registers before this one (`after("db-embedded")`
+in this manifest). `configure` reads its `brocanth_db::embedded::EmbeddedUrl`
+from the services and opens the pool on it in place of `[db] url`.
 
 ## Read more
 

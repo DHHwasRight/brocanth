@@ -10,6 +10,8 @@
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
 //! - [`migrate`]: plain SQL migrations, for a project with no ORM.
+//! - `embedded` (feature `embedded`): a development Postgres started from
+//!   the binary, for the `db-embedded` module. Never in production.
 //! - [`stamp`]: the UTC stamp of a migration's name. It needs no feature.
 //! - [`DbIdentity`]: who a transaction runs as, for row-level security.
 //!   [`Db::transact_as`] and [`Tx::assume`] set it.
@@ -21,6 +23,8 @@
 pub mod config;
 #[cfg(feature = "runtime")]
 mod db;
+#[cfg(feature = "embedded")]
+pub mod embedded;
 #[cfg(feature = "runtime")]
 pub mod error;
 #[cfg(feature = "runtime")]
@@ -31,6 +35,8 @@ pub mod migrate;
 pub mod principal;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
+#[cfg(feature = "scaffold")]
+mod scaffold_embedded;
 #[cfg(feature = "runtime")]
 pub mod shell;
 pub mod stamp;

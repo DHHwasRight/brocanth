@@ -23,6 +23,8 @@ use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
 
+pub use crate::scaffold_embedded::DbEmbedded;
+
 /// The database, as a choice on the `brocanth create` menu.
 ///
 /// Named `Database` and not `Db`, which is this crate's own type: a second
@@ -56,6 +58,10 @@ impl Module for Database {
             "model",
             "no SQL `migrate` command: `model` writes its own, over SeaORM",
         )
+        .adapts_to(
+            "db-embedded",
+            "`configure` opens the pool on the embedded server's URL, not on `[db] url`",
+        )
         .asked_in("data", "A Postgres pool, and SQL built with sea-query")
         .recommends(
             "observability-health",
@@ -69,6 +75,9 @@ impl Module for Database {
         // Only for the order of the `[db]` section and the builder line: the
         // URL comes from the file the config plugin loaded.
         .after("config")
+        // Its child registers first: the server runs before the pool reads
+        // its URL, and stops after the pool closes (shutdown runs in reverse).
+        .after("db-embedded")
         .absent(
             "brocanth-db",
             "no database pool; a page that needs SQL has nowhere to send it",
@@ -528,6 +537,17 @@ A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
 log, never to the client.
 "#;
 
+/// The top of `configure` with `db-embedded`: its plugin, registered
+/// before this one, started the server in its own `configure`.
+const EMBEDDED_URL: &str =
+    "        // `db-embedded` started a Postgres server in its own `configure`,
+        // registered before this plugin: the pool opens on it, and `[db] url`
+        // is not read. `brocanth remove db-embedded` goes back to the URL.
+        if let Some(embedded) = lc.services().get::<brocanth_db::embedded::EmbeddedUrl>() {
+            self.config.url = embedded.0.clone();
+        }
+";
+
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "db");
     let name = project.name;
@@ -547,6 +567,11 @@ fn plugin_rs(project: &Project) -> String {
             "The default is a\n    \
              /// local development database; set the variable for `db.url` everywhere else.",
         )
+    };
+    let (lc, embedded) = if project.has("db-embedded") {
+        ("lc", EMBEDDED_URL)
+    } else {
+        ("_lc", "")
     };
     format!(
         r##"//! The database, as this application registers it.
@@ -655,8 +680,8 @@ impl Plugin for Database {{
         }}
     }}
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-        if self.config.url.is_empty() {{
+    fn configure(&mut self, {lc}: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
+{embedded}        if self.config.url.is_empty() {{
             return Err(PluginError::new(
                 "[db] url is required; there is no default database\n\
                  help: set `url` under [db] in the config file, or the variable for `db.url`",

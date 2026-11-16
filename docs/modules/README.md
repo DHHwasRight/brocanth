@@ -67,6 +67,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`config`](config.md) | config/<env>.toml, merged; without it nothing links a TOML parser | Enhancer |  |
 | [`sessions`](sessions.md) | a cookie, and a `Session` the context hands a handler | Middleware |  |
 | [`db`](db.md) | one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver | Enhancer, Middleware, Renderer |  |
+| [`db-embedded`](db-embedded.md) | a Postgres server started from the binary, for development with no Postgres installed; never in production | Enhancer | db |
 | [`model`](model.md) | SeaORM, validations, migrations; without it no SQL driver at all | Enhancer, Middleware |  |
 | [`flags`](flags.md) | feature flags: on for all, a percentage, users or groups; rows in your Postgres | Enhancer |  |
 | [`audit`](audit.md) | change history: who changed which row, when, and what; rows in your Postgres | Middleware, Enhancer |  |

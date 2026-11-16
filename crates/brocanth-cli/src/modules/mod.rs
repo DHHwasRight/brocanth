@@ -97,6 +97,9 @@ pub const ALL: &[&dyn Module] = &[
     // The pool, from the crate that is the pool. Before `model`, which is
     // the ORM over the same connections.
     &brocanth_db::scaffold::Database,
+    // Its development server: Postgres from the binary, refused by
+    // `check --deploy`. Off until asked for.
+    &brocanth_db::scaffold::DbEmbedded,
     // The ORM, from the crate that is the ORM.
     &brocanth_model::scaffold::Model,
     // From `brocanth-cache` itself, which is the point: a module can live in
