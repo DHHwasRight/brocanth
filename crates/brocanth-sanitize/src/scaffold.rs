@@ -7,7 +7,7 @@
 //! the dependency and the rule an agent must follow: user HTML reaches a
 //! template as a `SafeHtml`, and nothing else is written raw.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The sanitizer, as a choice on the menu.
 pub struct Sanitize;
@@ -18,6 +18,7 @@ impl Module for Sanitize {
             "sanitize",
             "an allow-list HTML sanitizer and a SafeHtml type; links html5ever",
         )
+        .contributes::<AgentsSection>("how HTML from users is cleaned before it is shown")
         .category(Category::Renderer)
         .asked_in("pages", "Show HTML that users write, cleaned")
         .krate(Dep::brocanth("brocanth-sanitize").feature_with("rsx", "rsx"))

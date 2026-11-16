@@ -28,7 +28,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, module_ref, Hooking};
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 /// First-party analytics, as a choice on the `brocanth create` menu.
@@ -50,6 +51,8 @@ impl Module for PageViews {
             "Count page views on the server: no cookie, no script, no third party",
         )
         .requires::<PgPool>("the views are rows in the database the `db` module opens; in memory they would vanish at every restart")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[analytics]`")
+        .contributes::<AgentsSection>("what is counted, and that nothing needs consent")
         .krate(
             Dep::brocanth("brocanth-analytics")
                 .feature_with("config", "config")
@@ -99,6 +102,8 @@ impl Module for PageViews {
         if project.has("admin") {
             integration(s, "analytics", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        s.at(Slot::ConfigChecks)
+            .line(r#"Entry::migrates("analytics", "`brocanth_analytics::PgStore::SCHEMA`"),"#);
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }
@@ -199,6 +204,7 @@ impl Module for StaticBeacon {
             "beacon",
             "a few lines of script that report each page view to an analytics server; no cookie",
         )
+        .contributes::<AgentsSection>("how the beacon is sent, and that it sets no cookie")
         .category(Category::Middleware)
         .adapts_to(
             "config",

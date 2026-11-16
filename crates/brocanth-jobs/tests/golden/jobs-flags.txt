@@ -1440,6 +1440,7 @@ macro_rules! register {
         let builder = builder.plugin(crate::plugins::db::Database::new(
             crate::plugins::db_settings(&given)?,
         ));
+        // JobQueue <- jobs (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::jobs::Jobs::new(
             crate::plugins::jobs_settings(&given)?,
         ));
@@ -2102,7 +2103,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 3db4ab7594be5089
+// brocanth-digest: f96400d3b85dac83
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3091,6 +3092,7 @@ enabled = ["db", "jobs"]
 
 [bindings]
 PgPool = { provider = "db", why = "jobs requires PgPool" }
+JobQueue = { provider = "jobs", why = "chosen" }
 
 [modules.db]
 version = "0.1.0"
@@ -3108,4 +3110,4 @@ config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
 adapted_to = []
 
-# brocanth-digest: 08dd7a098f1db5c4
+# brocanth-digest: a3eac555ac271a52

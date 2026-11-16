@@ -20,7 +20,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// One paginator, as a choice on the `brocanth create` menu.
 pub struct Pagination;
@@ -31,6 +31,7 @@ impl Module for Pagination {
             "pagination",
             "offset and keyset pages, with links that keep the query; no dependency",
         )
+        .contributes::<AgentsSection>("how a list is paginated")
         .category(Category::Renderer)
         .outside_runtime()
         .adapts_to(

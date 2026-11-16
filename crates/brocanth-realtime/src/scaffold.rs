@@ -28,7 +28,9 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// The broker, as a choice on the `brocanth create` menu.
 ///
@@ -127,6 +129,7 @@ impl Module for Sse {
             "realtime-sse",
             "one long response per subscriber, frames written as they are made",
         )
+        .contributes::<AgentsSection>("how a page streams events over server-sent events")
         .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")
@@ -523,6 +526,7 @@ impl Module for WebSocket {
             "realtime-websocket",
             "a duplex socket per subscriber, frames both ways",
         )
+        .contributes::<AgentsSection>("how a page talks over a WebSocket")
         .category(Category::Routes)
         .asked_in("behaviour", "")
         .part_of_but_off("realtime")

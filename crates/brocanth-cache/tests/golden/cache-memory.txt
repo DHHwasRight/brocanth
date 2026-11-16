@@ -2399,6 +2399,9 @@ title = "My App"
 [modules]
 enabled = ["config", "cache", "cache-memory"]
 
+[bindings]
+CacheStore = { provider = "cache", why = "chosen" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2423,4 +2426,4 @@ config = ["cache"]
 crates = []
 adapted_to = ["config"]
 
-# brocanth-digest: 5cf5bd918f1be84e
+# brocanth-digest: 430665e169599fb3

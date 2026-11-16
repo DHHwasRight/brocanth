@@ -17,7 +17,9 @@
 //! Compiled only under the `scaffold` feature.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// A title, a description, a canonical URL and share tags for each page.
 pub struct PageMeta;
@@ -28,6 +30,7 @@ impl Module for PageMeta {
             "meta",
             "a title, a description, a canonical URL and Open Graph tags for each page",
         )
+        .contributes::<AgentsSection>("how a page sets its title and metadata")
         .category(Category::Renderer)
         .category(Category::Enhancer)
         .adapts_to(

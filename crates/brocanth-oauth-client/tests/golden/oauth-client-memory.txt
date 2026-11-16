@@ -1465,6 +1465,7 @@ macro_rules! register {
         let builder = builder.plugin(crate::plugins::db::Database::new(
             crate::plugins::db_settings(&given)?,
         ));
+        // SessionCookie <- auth (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::auth::Auth::new(
             crate::plugins::auth_settings(&given)?,
         ));
@@ -2401,7 +2402,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e77ca5a0493267d0
+// brocanth-digest: c161e58f7060ee30
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4063,6 +4064,7 @@ enabled = ["db", "auth", "oauth", "oauth-client", "oauth-client-memory"]
 
 [bindings]
 PgPool = { provider = "db", why = "oauth-client requires PgPool" }
+SessionCookie = { provider = "auth", why = "chosen" }
 
 [modules.db]
 version = "0.1.0"
@@ -4104,4 +4106,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: c062a49240a3077f
+# brocanth-digest: 0237059b7cd78517

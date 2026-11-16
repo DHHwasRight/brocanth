@@ -20,7 +20,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// A development Postgres in the binary, as a child of `db` on the menu.
 pub struct DbEmbedded;
@@ -31,6 +33,7 @@ impl Module for DbEmbedded {
             "db-embedded",
             "a Postgres server started from the binary, for development with no Postgres installed; never in production",
         )
+        .contributes::<AgentsSection>("the database runs in the binary, for development only")
         .category(Category::Enhancer)
         .part_of_but_off("db")
         .because("it starts the server that the `db` pool opens; without the pool nothing connects to it")

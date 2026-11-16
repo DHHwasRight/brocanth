@@ -10,7 +10,9 @@
 //! project sends nothing to Google from a developer's machine.
 
 use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// Google Analytics 4 behind a consent banner.
 pub struct Gtag;
@@ -21,6 +23,7 @@ impl Module for Gtag {
             "gtag",
             "Google Analytics 4 behind a consent banner; in `basic` mode nothing leaves before the visitor accepts",
         )
+        .contributes::<AgentsSection>("the consent banner, and that no tag loads without consent")
         .category(Category::Middleware)
         .adapts_to(
             "config",

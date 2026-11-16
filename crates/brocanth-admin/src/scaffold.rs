@@ -40,7 +40,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
+};
 
 /// The backoffice, as a choice on the `brocanth create` menu.
 ///
@@ -56,6 +58,7 @@ impl Module for Backoffice {
             "admin",
             "a Django-shaped backoffice at /admin, locked until you say who may in",
         )
+        .contributes::<AgentsSection>("how a model gets an admin screen")
         // This crate's version, said here and not left to the CLI's, because
         // `brocanth admin eject` writes the same number into the header of
         // every screen it copies. `brocanth.toml` and the header then name
@@ -430,6 +433,7 @@ impl Module for BackofficeActions {
             "admin-actions",
             "\"Delete selected\" on every admin list, with a confirmation page",
         )
+        .contributes::<AgentsSection>("how a bulk action is added to an admin list")
         .category(Category::Enhancer)
         .asked_in("doors", "")
         .part_of_but_off("admin")

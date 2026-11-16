@@ -1405,6 +1405,7 @@ macro_rules! register {
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
         let builder = $builder.with_config(config);
+        // JobQueue <- jobs (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
@@ -1875,7 +1876,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 1c0175e3332ea12f
+// brocanth-digest: 5af912dd7f505b03
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2552,6 +2553,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "jobs", "jobs-memory"]
 
+[bindings]
+JobQueue = { provider = "jobs", why = "chosen" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2576,4 +2580,4 @@ config = []
 crates = ["brocanth-jobs"]
 adapted_to = []
 
-# brocanth-digest: 05d1d1b8edb2d012
+# brocanth-digest: c67296811918d962

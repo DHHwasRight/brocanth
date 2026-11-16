@@ -1802,6 +1802,7 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
             .map_err(|e| e.to_string())?;
+        // SessionCookie <- auth (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
@@ -2555,7 +2556,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: a7dfae9bf1451c39
+// brocanth-digest: 34abd5d55deb3bb9
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -5945,6 +5946,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "auth", "auth-screens", "rsx", "input", "middleware", "middleware-csrf", "mail", "flash"]
 
+[bindings]
+SessionCookie = { provider = "auth", why = "chosen" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -6017,4 +6021,4 @@ config = ["flash"]
 crates = ["brocanth-middleware"]
 adapted_to = ["config"]
 
-# brocanth-digest: 7b625edc4ba0b7c6
+# brocanth-digest: ebe978e153ea7294

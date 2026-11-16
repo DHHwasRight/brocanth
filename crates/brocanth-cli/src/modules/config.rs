@@ -89,7 +89,10 @@ impl Command for Check {
             env: self.env,
             allow: self.allow,
         };
-        let report = check::run(crate::app::APP, ctx.root(), &options)?;
+        // The checks this project's modules contribute, written by
+        // `brocanth` into src/commands/mod.rs.
+        let checks = super::config_checks();
+        let report = check::run_with(crate::app::APP, ctx.root(), &options, &checks)?;
         eprint!("{report}");
         if report.failed(self.strict) {
             std::process::exit(1);

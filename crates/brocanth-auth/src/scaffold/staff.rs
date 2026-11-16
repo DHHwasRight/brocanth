@@ -23,7 +23,7 @@
 
 use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 use super::uses_postgres;
@@ -37,6 +37,7 @@ impl Module for Superuser {
             "superuser",
             "operator accounts that pass every admin check, and a createsuperuser command",
         )
+        .contributes::<AgentsSection>("how a superuser is made, and that none is made in code")
         .category(Category::Enhancer)
         .needs(
             "auth",
@@ -417,6 +418,7 @@ impl Module for Roles {
             "roles",
             "roles that grant permissions, stored with the accounts, for staff and the admin",
         )
+        .contributes::<AgentsSection>("how roles grant staff access, and who may change them")
         .category(Category::Enhancer)
         .needs(
             "superuser",

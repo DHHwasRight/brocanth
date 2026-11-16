@@ -5,7 +5,9 @@
 //! skips the layouts they define. Each is a separate entry on the menu, and
 //! each can be left out.
 
-use brocanth_scaffold::{snippet, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{
+    snippet, AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot,
+};
 
 /// rsx lives in its own repository, so `--brocanth-path` does not reach it.
 /// That asymmetry is on purpose: brocanth is the thing being developed here
@@ -21,6 +23,7 @@ impl Module for Rsx {
             "rsx",
             "`.rsx` templates compiled into the binary; without it a page builds a String",
         )
+        .contributes::<AgentsSection>("how views, layouts and static files are written")
         .category(Category::Renderer)
         .adapts_to("rsx-tailwind", "the layout links the stylesheet")
         .adapts_to("rsx-htmx", "the layout loads dp-swap and marks its depth")
@@ -102,6 +105,7 @@ impl Module for Tailwind {
             "rsx-tailwind",
             "a CSS build over the class names in your templates; needs node",
         )
+        .contributes::<AgentsSection>("where the CSS comes from, and how it is built")
         .category(Category::External)
         .category(Category::Enhancer)
         .outside_runtime()

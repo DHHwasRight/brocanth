@@ -324,7 +324,7 @@ mod tests {
         let (picks, added) = resolve(&["db", "jobs"], Door::Create).expect("resolves");
         assert_eq!(picks, ["db", "jobs"]);
         assert!(added.is_empty());
-        assert_eq!(bindings(&picks), [("PgPool", "db")]);
+        assert_eq!(bindings(&picks), [("PgPool", "db"), ("JobQueue", "jobs")]);
         assert!(after("jobs", &picks).contains(&"db"));
         assert_eq!(why(&["db"], "PgPool"), "chosen");
     }
@@ -397,6 +397,33 @@ mod tests {
             );
             assert!(said.contains("keep one of: db, otherpool"), "{said}");
         });
+    }
+
+    #[test]
+    fn the_capability_kinds_bind_their_provider_and_a_child_refines_it() {
+        let picks = ["db", "cache", "cache-redis", "jobs", "jobs-memory", "auth"];
+        assert!(doubled(&picks).is_empty());
+        assert_eq!(
+            bindings(&picks),
+            [
+                ("PgPool", "db"),
+                ("CacheStore", "cache"),
+                ("JobQueue", "jobs"),
+                ("SessionCookie", "auth")
+            ]
+        );
+        // mail uses the queue, so it writes after whichever provides it.
+        assert!(after("mail", &["jobs", "jobs-memory", "mail"]).contains(&"jobs"));
+        assert!(!after("mail", &["mail"]).contains(&"jobs"));
+    }
+
+    #[test]
+    fn two_session_cookies_conflict() {
+        let said = doubled(&["sessions", "auth"])[0].render();
+        assert!(
+            said.contains("`sessions` and `auth` each provide SessionCookie"),
+            "{said}"
+        );
     }
 
     #[test]

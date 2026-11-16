@@ -73,7 +73,7 @@
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, SessionCookie, Setting, Slot,
 };
 
 mod lockout;
@@ -105,6 +105,7 @@ impl Module for Auth {
             "its settings are read from the config file, not written as a literal",
         )
         .uses::<PgPool>("accounts and sessions are rows on the project's pool, not in memory")
+        .provides::<SessionCookie>("a signed session cookie, with sign-in and sign-out")
         .adapts_to(
             "auth-oauth",
             "the session cookie is SameSite=Lax, so the provider callback sees who is signed in",

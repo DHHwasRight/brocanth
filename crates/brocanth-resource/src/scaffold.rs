@@ -42,7 +42,9 @@
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::module_ref;
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot,
+};
 
 /// The records API, as a choice on the `brocanth create` menu.
 ///
@@ -63,6 +65,7 @@ impl Module for Records {
             "resource",
             "typed CRUD routes over one table, with the policy in the WHERE clause",
         )
+        .contributes::<AgentsSection>("the records API, and its CSRF rule")
         .category(Category::Routes)
         .asked_in("doors", "")
         .adapts_to(

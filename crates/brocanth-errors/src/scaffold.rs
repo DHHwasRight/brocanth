@@ -14,7 +14,9 @@
 //! Compiled only under the `scaffold` feature.
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// HTML error pages, a development page with the cause, and reporters.
 pub struct ErrorPages;
@@ -25,6 +27,7 @@ impl Module for ErrorPages {
             "errors",
             "HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook",
         )
+        .contributes::<AgentsSection>("how an error page is shown and reported")
         .category(Category::Renderer)
         .category(Category::Middleware)
         .adapts_to(

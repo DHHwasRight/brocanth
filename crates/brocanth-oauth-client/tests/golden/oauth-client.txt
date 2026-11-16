@@ -1546,6 +1546,7 @@ macro_rules! register {
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
             .map_err(|e| e.to_string())?;
+        // SessionCookie <- auth (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
@@ -2444,7 +2445,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6ca5fb29db0a491b
+// brocanth-digest: 9f43e976a4b8bcef
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4749,6 +4750,7 @@ enabled = ["config", "db", "auth", "middleware", "middleware-csrf", "admin", "oa
 
 [bindings]
 PgPool = { provider = "db", why = "oauth-client requires PgPool" }
+SessionCookie = { provider = "auth", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -4814,4 +4816,4 @@ config = ["oauth_client"]
 crates = ["brocanth-oauth-client"]
 adapted_to = ["config", "middleware-csrf", "admin"]
 
-# brocanth-digest: b1874a8ae7df05a4
+# brocanth-digest: d43f499ae87eaf28

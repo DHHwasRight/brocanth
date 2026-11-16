@@ -1469,6 +1469,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
+        // CacheStore <- cache (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::cache::Cache>("cache")
             .map_err(|e| e.to_string())?;
@@ -2105,7 +2106,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 07b7c08a4485b179
+// brocanth-digest: 0046f6cea48ec7aa
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3375,6 +3376,7 @@ enabled = ["config", "db", "cache", "admin"]
 
 [bindings]
 PgPool = { provider = "db", why = "cache requires PgPool" }
+CacheStore = { provider = "cache", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -3408,4 +3410,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: a33a6b084b9316a1
+# brocanth-digest: b9dc0b6b535632ba

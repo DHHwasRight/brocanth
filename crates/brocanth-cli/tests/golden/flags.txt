@@ -1405,6 +1405,7 @@ macro_rules! register {
         // environment, then the flags.
         let given = crate::plugins::given()?;
         let builder = $builder;
+        // SessionCookie <- sessions (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::sessions::Sessions::new(
             crate::plugins::sessions_settings(&given)?,
         ));
@@ -1961,7 +1962,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 750ed8976dcf6e96
+// brocanth-digest: d6a7d74e5ef4ca15
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2718,6 +2719,9 @@ title = "My Blog"
 [modules]
 enabled = ["sessions", "storage"]
 
+[bindings]
+SessionCookie = { provider = "sessions", why = "chosen" }
+
 [modules.sessions]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2734,4 +2738,4 @@ config = ["storage"]
 crates = ["brocanth-storage"]
 adapted_to = []
 
-# brocanth-digest: 01e93ef3dd33faab
+# brocanth-digest: ddd1a3fbc3d9f6fe

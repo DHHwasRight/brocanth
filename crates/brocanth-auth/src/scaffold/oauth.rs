@@ -25,7 +25,9 @@
 use brocanth_scaffold::snippet::{
     configurable, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
+};
 
 /// The providers this module declares settings for, by catalog id.
 pub const PROVIDERS: &[(&str, &str)] = &[
@@ -44,6 +46,7 @@ impl Module for AuthOauth {
             "auth-oauth",
             "sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client",
         )
+        .contributes::<AgentsSection>("how provider sign-in is added, and what a callback must check")
         .category(Category::Routes)
         .category(Category::Enhancer)
         .part_of_but_off("auth")

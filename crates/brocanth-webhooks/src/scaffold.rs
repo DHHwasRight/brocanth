@@ -21,7 +21,8 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 /// The parent: the crate both directions are written in.
@@ -33,6 +34,7 @@ impl Module for Webhooks {
             "webhooks",
             "signed webhooks: verified deliveries in, signed events out; pick a direction below",
         )
+        .contributes::<AgentsSection>("the rule about webhook secrets")
         .category(Category::Enhancer)
         .asked_in(
             "doors",
@@ -81,6 +83,8 @@ impl Module for WebhooksIn {
             "its settings are read from the config file, not written as a literal",
         )
         .uses::<PgPool>("the idempotency keys are rows every instance shares; without it they are in memory")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[webhooks_in]`, while the keys are in Postgres")
+        .contributes::<AgentsSection>("how a source is verified, and what a handler must not do")
         // The idempotency keys in the database, when there is one.
         .krate(krate().feature_with("db", "postgres"))
         // The example event derives `Deserialize`. The config plugin brings
@@ -124,6 +128,10 @@ impl Module for WebhooksIn {
             },
             incoming_settings(db),
         );
+        if db {
+            s.at(Slot::ConfigChecks)
+                .line(r#"Entry::migrates("webhooks_in", "`brocanth_webhooks::PgSeen::SCHEMA`"),"#);
+        }
         s.at(Slot::AgentsSections).block(IN_AGENTS.to_string());
     }
 }
@@ -500,6 +508,8 @@ impl Module for WebhooksOut {
         .part_of_but_off("webhooks")
         .because("it is the outgoing half of `brocanth-webhooks`, which the parent brings")
         .requires::<PgPool>("the endpoints and the delivery log are rows in the `db` module's database")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[webhooks_out]`")
+        .contributes::<AgentsSection>("how to emit an event inside the caller's transaction")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -542,6 +552,8 @@ impl Module for WebhooksOut {
         if project.has("admin") {
             integration(s, "webhooks-out", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        s.at(Slot::ConfigChecks)
+            .line(r#"Entry::migrates("webhooks_out", "`brocanth_webhooks::Outgoing::SCHEMA`"),"#);
         s.at(Slot::AgentsSections).block(OUT_AGENTS.to_string());
     }
 }

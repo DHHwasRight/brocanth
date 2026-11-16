@@ -11,7 +11,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_cache::scaffold::{url_setting, write_plugin, Backend, CONFIGURE_URL};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{CacheStore, Category, Dep, Manifest, Module, Project, Scaffold};
 
 /// The cache on Redis or Valkey, as a choice under `cache`.
 pub struct CacheRedis;
@@ -26,6 +26,7 @@ impl Module for CacheRedis {
         .part_of_but_off("cache")
         .because("it is a backend for the cache, so there is nothing to store in it without one")
         .asked_in("data", "")
+        .provides::<CacheStore>("the cache, on a Redis or Valkey server")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",

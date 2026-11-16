@@ -31,7 +31,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    CacheStore, Category, ConfigCheck, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting,
+    Slot,
 };
 
 /// The cache, as a choice on the `brocanth create` menu.
@@ -59,6 +60,8 @@ impl Module for Cache {
             &BACKENDS,
             "the cache is an unlogged table on the project's pool; without a child backend there is nowhere else to keep it",
         )
+        .provides::<CacheStore>("the cache, on an unlogged Postgres table; a child backend replaces the table")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[cache]`, while the cache is on Postgres")
         .adapts_to(
             "cache-memory",
             "`cache-memory` writes the plugin file, over this process's memory",
@@ -109,6 +112,8 @@ impl Module for Cache {
             return;
         }
         write_plugin(s, project, postgres_on_db());
+        s.at(Slot::ConfigChecks)
+            .line(r#"Entry::migrates("cache", "`brocanth_cache::PgCache::schema_sql`"),"#);
     }
 }
 
@@ -132,6 +137,7 @@ impl Module for CacheMemory {
         .part_of_but_off("cache")
         .because("it is a backend for the cache, so there is nothing to store in it without one")
         .asked_in("data", "")
+        .provides::<CacheStore>("the cache, in this process's memory")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
