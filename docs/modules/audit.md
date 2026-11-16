@@ -14,7 +14,7 @@ The wizard calls it: *Change history: who changed which row, and when*.
 | Needs | [`model`](model.md): it records the changes the model layer publishes |
 | Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
 | After | none |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-audit` (feature `config` with `config`, `admin` with `admin`) |

@@ -14,7 +14,7 @@ The wizard calls it: *Send mail*.
 | Needs | none |
 | Uses | `PgPool`: the application opens Postgres, so the test that starts it is left out |
 | After | [`config`](config.md), [`jobs`](jobs.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-mail` (features `smtp`, `serde`) |

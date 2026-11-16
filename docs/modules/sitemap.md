@@ -13,7 +13,7 @@ The wizard calls it: *A sitemap.xml that lists every page*.
 | Part of | nothing |
 | Needs | none |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`jt`](jt.md), [`realtime-sse`](realtime-sse.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md), [`meta`](meta.md) |
+| Adapts to | [`jt`](jt.md), [`realtime-sse`](realtime-sse.md), [`static`](static.md), [`i18n-routing`](i18n-routing.md), [`meta`](meta.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | `brocanth-robots` |
