@@ -237,7 +237,7 @@ use brocanth::plugin_hooks::{
     Begin, HandlerError, HookFamilies, Request as CoreRequest, RequestState,
     Response as CoreResponse,
 };
-use brocanth::plugin_routes::{route, AnyHandler, Handler, RouteCx, Routed};
+use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
 use brocanth::plugin_shutdown::{ShutdownReason, ShutdownReport};
 use brocanth::routing::{Router, Verb};
 use bytes::Bytes;
@@ -796,22 +796,16 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
             // reads, and `RouteCx` borrows it shared.
             let request: &CoreRequest = request;
 
-            // `route` owns the 501, the 405 and the 404, shared with
-            // `brocanth-test`. They are built here rather than returned
-            // early, so that the response hooks and `after_dispatch` see them
-            // like any other response. The 501 is unreachable from the wire
-            // (`crate::read` answered it) but reachable from a request hook
-            // that rewrote the method.
-            match route(&self.router, request) {
-                Routed::Found { handler, matched } => {
-                    let params = matched.params();
-                    // After the hooks: a provider may read what they wrote.
-                    let context = self.app.context_for(request, &*state);
-                    let mut cx = RouteCx::new(request, &params, &context, state);
-                    handler.call_blocking(&mut cx)
-                }
-                Routed::Answer(response) => Ok(response),
-            }
+            // `App::dispatch` owns the router, the context and the 501, the
+            // 405 and the 404, shared with `brocanth-test`. They are built
+            // inside the dispatch region, so that the response hooks and
+            // `after_dispatch` see them like any other response. The 501 is
+            // unreachable from the wire (`crate::read` answered it) but
+            // reachable from a request hook that rewrote the method.
+            self.app
+                .dispatch_blocking(&self.router, request, state, |handler, cx| {
+                    handler.call_blocking(cx)
+                })
         });
 
         from_core(response)
@@ -839,17 +833,11 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
         let outcome = match self.app.begin(&mut request, &mut state) {
             Begin::Answered(outcome) => outcome,
             Begin::Dispatch => {
-                let read: &CoreRequest = &request;
-                match route(&self.router, read) {
-                    Routed::Found { handler, matched } => {
-                        let params = matched.params();
-                        // After the hooks: a provider may read what they wrote.
-                        let context = self.app.context_for(read, &state);
-                        let mut cx = RouteCx::new(read, &params, &context, &mut state);
-                        handler.call_inline(&mut cx).await
-                    }
-                    Routed::Answer(response) => Ok(response),
-                }
+                self.app
+                    .dispatch(&self.router, &request, &mut state, async |handler, cx| {
+                        handler.call_inline(cx).await
+                    })
+                    .await
             }
         };
 
@@ -973,6 +961,7 @@ pub async fn serve<E: 'static, H: HookFamilies, R: RouteKind<E>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brocanth::plugin_routes::{route, Routed};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
