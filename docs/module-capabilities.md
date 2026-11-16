@@ -2,8 +2,8 @@
 
 Status: accepted (2026-11-16)
 
-The owner's answers and corrections are in §4, §5, §6 and §13. Nothing
-here is built yet. Base:
+The owner's answers and corrections are in §4, §5, §6 and §13. Stage 1
+(one pool, the resolver) is built; see the note under §12. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -567,6 +567,67 @@ methods, resolver with auto-add (§4.1), `check_module` rules. Exit:
 `after("db")` 11 -> 0; `POSTGRES_WITH`, the auth "own pool" variant and
 `[auth] url` are gone; no module but `db` opens a pool; `brocanth create
 --jobs` prints `added db`.
+
+**Stage 1: done (2026-11-16).** Measured with a grep of non-test code under
+`crates/*/src` (a `#[cfg(test)] mod tests` block is cut off):
+
+| Relation | Before (`b7c40f37`) | After |
+|---|---|---|
+| `has("db")` | 10 | 0 (now `provider::<PgPool>()`, 5 calls) |
+| `needs("db")` | 7 | 0 (now `requires::<PgPool>`) |
+| `adapts_to("db")` | 9 | 0 (now `uses::<PgPool>`) |
+| `after("db")` | 10 | 0 (implied by `requires` / `uses`) |
+| `POSTGRES_WITH` | 6 | 0 |
+
+The counts on `b7c40f37` differ from §1 (9, 8, 11), which was measured on
+`8f546fc`. `brocanth create demo --with config,jobs` prints `added db:
+jobs requires PgPool (a Postgres pool)`; `brocanth remove db` then refuses
+and names `jobs`. The auth "own pool" variant, `[auth] url`, the queue's
+`[jobs] url` variant and the cache's `[cache] url` variant are gone. In a
+generated project only `db` opens a Postgres pool from a URL.
+
+What was built, and the choices made on the way:
+
+- `brocanth_scaffold::kind`: the `Kind` trait, `Cardinality`, `KindRef`,
+  `Requirement`, the `kind!` macro, and one Kind, `PgPool`. The trait is
+  not re-exported at the crate root, because the root already has `Kind`
+  (a setting's type). `PgPool` is.
+- Manifest: `provides`, `requires`, `uses`, and `requires_unless(&[keys],
+  why)`. The last one was not in the sketch: `jobs` and `cache` require the
+  pool unless their own child (`jobs-memory`, `cache-memory`,
+  `cache-redis`) holds the data, so a memory backend does not pull `db`
+  in. It follows `Dep::feature_unless`.
+- `Project::provider::<K>()` and `with_bindings`. `check_module` keeps the
+  two-way rule for Kinds, and adds three: a reason on each declaration,
+  one declaration per Kind, and an `unless` key that exists.
+- The resolver, `crates/brocanth-cli/src/resolve.rs`. It runs at the
+  front doors (`create` flags and chooser, `add`), before `selection`. It
+  adds the single provider that is not `development_only`; it never adds a
+  development-only provider, which binds only when chosen by name (ready
+  for stage 1b's `db-embedded`). Several providers, or only
+  development-only ones: an error with `help: add one of: ..`. Two chosen
+  providers of a Kind of cardinality one: an error, except a child that
+  provides its parent's Kind (it refines the parent). `remove` refuses to
+  take out the only provider of a required Kind.
+- `brocanth_cli::testing::generate` does not resolve: a module test names
+  every module, so its golden says what it holds.
+- The binding is a comment over the provider's first line in the chain
+  (`// PgPool <- db (jobs requires PgPool).`) and a `[bindings]` entry in
+  `brocanth.toml`. The `why` is derived from the selection (the first
+  chosen module that requires the Kind, or `chosen`), so `add` and
+  `remove` keep no state of their own and cannot disagree with the record.
+  `brocanth check` (`brocanth-config`) reads `[bindings]` for the
+  storage-on-disk warning instead of asking for `db`.
+- The chooser ticks the single provider when a requirement has no
+  `unless`; a requirement a child lifts is resolved after the screen and
+  printed like the flags.
+- `jobs` keeps `Queue::beside`: a small control pool on the `db`
+  database, sized by the queue. It reads no URL of its own; it exists so a
+  running job never holds the connection its heartbeat needs. A later
+  stage may revisit it if "one pool" must mean one `PgPool` value.
+- `Dep::feature_with("db", "postgres")` still names the key (auth,
+  storage, webhooks-in). A Kind-aware `feature_with` waits for a second
+  `PgPool` provider that changes a feature.
 
 **Stage 1b — `db-embedded` (1-2 days, independent).** The module over
 `postgresql_embedded`, offered in the wizard, refused by `check --deploy`.
