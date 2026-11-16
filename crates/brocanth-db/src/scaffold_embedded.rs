@@ -20,7 +20,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{
     AgentsSection, Category, Contribution, Dep, Manifest, Module, Project, Scaffold, Setting, Slot,
 };
@@ -39,10 +39,6 @@ impl Module for DbEmbedded {
         .part_of_but_off("db")
         .because("it starts the server that the `db` pool opens; without the pool nothing connects to it")
         .asked_in("data", "Postgres inside the binary, for development")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .development_only(
             "the server runs inside one process on one disk, with a generated password in a file beside its data; a deploy needs a managed or a real Postgres",
         )
@@ -52,20 +48,13 @@ impl Module for DbEmbedded {
                 .note("a pinned Postgres release, installed at the first start"),
         )
         // No `after`: `db` waits for this module (`after("db-embedded")` in
-        // its manifest), so the server runs before the pool reads a URL. An
-        // `after("config")` here would push `db`, and every module after
-        // it, one step later in every project that has a config file.
+        // its manifest), so the server runs before the pool reads a URL.
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         s.file("src/plugins/db_embedded/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod db_embedded;");
         configurable(s, project, "db_embedded", "DbEmbedded", settings(project));
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, a trait method, so the
-            // trait has to be in scope.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         s.at(Slot::GitIgnore).line("/tmp/postgres");
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }

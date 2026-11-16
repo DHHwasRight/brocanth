@@ -41,9 +41,7 @@
 //!
 //! [`OpenApiPlugin::configure`]: crate::OpenApiPlugin
 
-use brocanth_scaffold::snippet::{
-    configurable, integration, module_ref, settings_derive, PLUGIN_TRAIT_USE,
-};
+use brocanth_scaffold::snippet::{configurable, integration, module_ref, settings_derive};
 use brocanth_scaffold::{
     AdminPanel, Category, Dep, Manifest, Module, Mount, MountRole, Project, Scaffold, Setting,
     Slot, Tab,
@@ -96,10 +94,6 @@ impl Module for OpenApi {
         )
         .category(Category::Routes)
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to("input", "the document lists the declared bodies")
         .asked_in("doors", "An OpenAPI document, derived from your routes")
         .krate(
@@ -111,10 +105,6 @@ impl Module for OpenApi {
                 .feature("zod")
                 .feature_with("admin", "admin"),
         )
-        // Only for the order of the `[openapi]` section and the builder line:
-        // the title and the version come from the file the config plugin
-        // loaded, so this belongs under it rather than above it.
-        .after("config")
         .adapts_to(
             "auth-oauth",
             "the sign-in routes it mounts are hidden from the document",
@@ -152,12 +142,6 @@ impl Module for OpenApi {
         s.at(Slot::PagesRoutes).line("/openapi.yaml");
         s.at(Slot::PluginsMod).line("pub mod openapi;");
         configurable(s, project, "openapi", "OpenApi", settings(project));
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait method,
-            // so the trait has to be in scope. Every plugin module needs the
-            // same line, and `use` twice does not compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         if project.collector::<AdminPanel>().is_some() {
             integration(s, "openapi", "admin", Slot::AdminPanels, ADMIN_TAB);
         }

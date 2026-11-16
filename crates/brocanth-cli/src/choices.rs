@@ -10,7 +10,7 @@
 //!   `..Module::DEFAULT`, so a field that a later version adds takes its
 //!   default and an old file still compiles.
 //! * `src/modules/brocanth.rs`, the project's: the framework's own file,
-//!   with the project flag rule and the `[server]` renames.
+//!   with the `[server]` renames and values.
 //! * `src/plugins/shape.rs`, the generator's: the types.
 //!
 //! **Decision: a module file depends on its own module only.** The fields
@@ -19,7 +19,7 @@
 //! change in a file the project owns. `Integrate::admin` exists in a project
 //! without `admin` for that reason.
 
-use brocanth_scaffold::{module_ident, Hook, Kind, Opt, Scaffold as Built};
+use brocanth_scaffold::{module_ident, Hook, Opt, OptKind, Scaffold as Built};
 
 use crate::commands::create::{about, Answers};
 
@@ -36,7 +36,8 @@ pub struct Shape {
     pub gist: String,
     /// The sections whose settings have flags here.
     pub sections: Vec<String>,
-    /// Each setting with a flag: the `Key` variant and the setting's path.
+    /// Each setting with a value flag: the `Key` variant and the setting's
+    /// path. A secret has none.
     pub keys: Vec<(String, String)>,
     /// Every hook the module declares, the required ones included.
     pub hooks: Vec<(String, String, Hook)>,
@@ -54,7 +55,7 @@ impl Shape {
         module_ident(&self.key)
     }
 
-    /// Whether the file has `flags` and `rename`.
+    /// Whether the file has `flags`, `rename` and `set`.
     pub fn has_flags(&self) -> bool {
         !self.keys.is_empty()
     }
@@ -107,7 +108,7 @@ fn shape(key: &str, built: &Built) -> Shape {
     let mut keys: Vec<(String, String)> = Vec::new();
     let flagged: Vec<(&str, &str)> = built
         .settings()
-        .filter(|(by, _, setting)| *by == key && setting.flag && setting.kind != Kind::List)
+        .filter(|(by, _, setting)| *by == key && setting.flag)
         .map(|(_, section, setting)| (section, setting.key))
         .collect();
     for (section, setting) in &flagged {
@@ -132,7 +133,7 @@ fn shape(key: &str, built: &Built) -> Shape {
     if key == FRAMEWORK {
         return Shape {
             key: key.to_string(),
-            gist: "the framework itself: the flag rule of the project, and `[server]`".to_string(),
+            gist: "the framework itself: `[server]`".to_string(),
             sections,
             keys,
             hooks: Vec::new(),
@@ -196,8 +197,7 @@ pub fn mod_rs(a: &Answers) -> String {
          // it does not have, is not dead code.\n\
          #![allow(dead_code)]\n\
          \n\
-         /// The framework itself: `[server]`, and whether flags work beside a config\n\
-         /// file.\n\
+         /// The framework itself: `[server]`.\n\
          pub mod brocanth;\n",
     );
     // Sorted, as rustfmt sorts `mod` lines.
@@ -280,12 +280,12 @@ const SHAPE_HEAD: &str = r#"//! The shape of each file in src/modules/: one Rust
 /// Whether a module's settings have flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flags {
-    /// The project rule: on without a config file; with one,
-    /// `flags_with_config` in src/modules/brocanth.rs.
+    /// The project rule: on, beside a config file too.
     Project,
-    /// On, beside a config file too.
+    /// On.
     On,
-    /// Off. The variable and the config file still set each value.
+    /// Off. The module file, the variable and the config file still set
+    /// each value.
     Off,
 }
 
@@ -325,8 +325,8 @@ fn shape_mod(shape: &Shape) -> String {
         body.push_str("    pub use super::{Flag, Flags};\n\n");
         let sections: Vec<String> = shape.sections.iter().map(|s| format!("`[{s}]`")).collect();
         let doc = format!(
-            "A setting of {} that has a flag. A secret or a list has no flag, so it \
-             has no variant here and cannot be renamed.",
+            "A setting of {} that has a flag. A secret has two pointer flags and no \
+             variant here: it cannot be renamed or set in code.",
             sections.join(", ")
         );
         for line in wrap(&doc, 72) {
@@ -435,12 +435,17 @@ fn shape_mod(shape: &Shape) -> String {
     let file = path_of(&shape.key);
     let mut fields: Vec<(String, String, String)> = Vec::new();
     if shape.framework() {
+        // A new file does not write it; the field stays so a file that
+        // predates stage 3 still compiles.
         fields.push((
             "flags_with_config".to_string(),
             "bool".to_string(),
-            "With the `config` module, whether `Flags::Project` reads flags.".to_string(),
+            "No longer read: the flags are on beside a config file. Kept so an \
+             older file that sets it still compiles."
+                .to_string(),
         ));
-    } else if shape.has_flags() {
+    }
+    if !shape.framework() && shape.has_flags() {
         fields.push((
             "flags".to_string(),
             "Flags".to_string(),
@@ -452,6 +457,13 @@ fn shape_mod(shape: &Shape) -> String {
             "rename".to_string(),
             "&'static [(Key, Flag)]".to_string(),
             "Flags under another name, or no flag.".to_string(),
+        ));
+        fields.push((
+            "set".to_string(),
+            "&'static [(Key, &'static str)]".to_string(),
+            "Values in code, as a flag spells them: over the default, under the \
+             config file, the environment and the flags."
+                .to_string(),
         ));
     }
     if !toggles.is_empty() {
@@ -494,7 +506,7 @@ fn shape_mod(shape: &Shape) -> String {
         let value = match name.as_str() {
             "flags_with_config" => "false".to_string(),
             "flags" => "Flags::Project".to_string(),
-            "rename" => "&[]".to_string(),
+            "rename" | "set" => "&[]".to_string(),
             "hooks" => "Hooks::DEFAULT".to_string(),
             "integrate" => "Integrate::DEFAULT".to_string(),
             option => shape
@@ -541,10 +553,11 @@ fn default_const(fields: &[(String, String)]) -> String {
 /// `src/flags.rs` held, when `add` moves it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Choices {
-    /// `flags_with_config` in `brocanth.rs`.
-    pub flags_with_config: bool,
     /// Each rename: the `Key` variant, and the flag's name, empty for none.
     pub rename: Vec<(String, String)>,
+    /// Each build-time option the command line set, as `(key, Rust
+    /// literal)`: `brocanth add admin --admin.mount_at=/backoffice`.
+    pub options: Vec<(String, String)>,
 }
 
 /// A module file, as `create` and `add` write it once.
@@ -553,7 +566,7 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
     let mut out = String::new();
     // -- the header
     if shape.framework() {
-        out.push_str("//! The framework itself: the flag rule of the project, and `[server]`.\n");
+        out.push_str("//! The framework itself: `[server]`.\n");
     } else {
         for line in wrap(&format!("`{}`: {}.", shape.key, shape.gist), 76) {
             out.push_str(&format!("//! {line}\n"));
@@ -633,7 +646,9 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
     names.push("Module");
     let path = format!("crate::plugins::shape::{ident}");
     if shape.has_flags() {
-        out.push_str("// `Flag` and `Key` are for `rename`: unused until it names a setting.\n");
+        out.push_str(
+            "// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.\n",
+        );
         out.push_str("#[allow(unused_imports)]\n");
     }
     out.push_str(&use_line(&path, &names));
@@ -654,20 +669,11 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
          pub const MODULE: Module = Module {\n",
     );
     let mut groups: Vec<String> = Vec::new();
-    if shape.framework() {
-        groups.push(format!(
-            "    // With the `config` module, whether the binary reads flags too. Off:\n\
-             \x20   // the file and the environment are the sources, and a flag is refused\n\
-             \x20   // with a pointer to this line. Without `config`, flags are always read.\n\
-             \x20   // A module file with `Flags::On` or `Flags::Off` overrides this.\n\
-             \x20   flags_with_config: {},\n",
-            choices.flags_with_config
-        ));
-    } else if shape.has_flags() {
+    if !shape.framework() && shape.has_flags() {
         let sections: Vec<String> = shape.sections.iter().map(|s| format!("[{s}]")).collect();
         groups.push(format!(
-            "    // The command-line flags of {}. `Flags::Project` follows\n\
-             \x20   // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.\n\
+            "    // The command-line flags of {}: on, beside a config file too.\n\
+             \x20   // `Flags::Off` turns them off; the variables still work.\n\
              \x20   flags: Flags::Project,\n",
             sections.join(", ")
         ));
@@ -683,6 +689,12 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
         );
         group.push_str(&rename_line(&choices.rename));
         groups.push(group);
+        groups.push(format!(
+            "    // A value in code, spelled as a flag spells it: over the default,\n\
+             \x20   // under the config file, the environment and the flags. Example:\n\
+             \x20   //   (Key::{variant}, \"value\"),\n\
+             \x20   set: &[],\n"
+        ));
     }
     if !toggles.is_empty() {
         let mut group = String::from("    hooks: Hooks {\n");
@@ -715,7 +727,12 @@ pub fn module_file(shape: &Shape, choices: &Choices) -> String {
         for line in wrap(opt.help, 72) {
             group.push_str(&format!("    // {line}\n"));
         }
-        group.push_str(&format!("    {}: {},\n", opt.key, opt.default));
+        let value = choices
+            .options
+            .iter()
+            .find(|(key, _)| key == opt.key)
+            .map_or(opt.default.as_str(), |(_, literal)| literal.as_str());
+        group.push_str(&format!("    {}: {value},\n", opt.key));
         groups.push(group);
     }
     groups.push("    ..Module::DEFAULT\n".to_string());
@@ -802,6 +819,143 @@ pub fn key_of<'a>(shapes: &'a [Shape], path: &str) -> Option<(&'a Shape, &'a str
             .find(|(_, p)| p == path)
             .map(|(variant, _)| (shape, variant.as_str()))
     })
+}
+
+// -- build-time options -----------------------------------------------------
+
+/// The help heading of the build-time options in `create --help` and `add
+/// --help`.
+const OPTIONS_HEADING: &str = "Module options, written into src/modules/ (build time)";
+
+/// Each module's build-time options, as `brocanth create` and `brocanth add`
+/// take them: `--<module>.<option>=VALUE`. They shape the build (a mount
+/// path, a hook toggle the compiler checks), so they are written into the
+/// module file once, and no flag of the binary changes them
+/// (`docs/module-capabilities.md` §6, 3d).
+pub fn option_args() -> Vec<clap::Arg> {
+    let mut out = Vec::new();
+    for key in crate::commands::create::all() {
+        for opt in about(key).options {
+            let id = format!("{key}.{}", opt.key);
+            out.push(
+                clap::Arg::new(id.clone())
+                    .long(id)
+                    .value_name("VALUE")
+                    .help(format!("{} Written into {}.", opt.help, path_of(key)))
+                    .help_heading(OPTIONS_HEADING),
+            );
+        }
+    }
+    out
+}
+
+/// The build-time options this run was given, as `(module, option, value)`.
+pub fn options_given(matches: &clap::ArgMatches) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for key in crate::commands::create::all() {
+        for opt in about(key).options {
+            let id = format!("{key}.{}", opt.key);
+            if let Ok(Some(value)) = matches.try_get_one::<String>(&id) {
+                out.push((key.to_string(), opt.key.to_string(), value.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// `value` as the Rust literal of an option of `kind`, or why it is not one.
+fn option_literal(kind: OptKind, value: &str) -> Result<String, String> {
+    match kind {
+        OptKind::Text => Ok(format!("{value:?}")),
+        OptKind::Bool => value
+            .parse::<bool>()
+            .map(|b| b.to_string())
+            .map_err(|_| "is `true` or `false`".to_string()),
+        OptKind::Integer => value
+            .parse::<i64>()
+            .map(|n| n.to_string())
+            .map_err(|_| "is a whole number".to_string()),
+        OptKind::Unsigned => value
+            .parse::<u64>()
+            .map(|n| n.to_string())
+            .map_err(|_| "is a whole number, 0 or more".to_string()),
+    }
+}
+
+/// Writes each build-time option into the module file of `files` that the
+/// command writes. `writes` is the set of module files this command will
+/// write: an option for a module whose file exists is refused, because no
+/// command rewrites a file the project owns.
+pub fn set_options(
+    shapes: &[Shape],
+    files: &mut [(String, String)],
+    given: &[(String, String, String)],
+    writes: impl Fn(&str) -> bool,
+) -> Result<(), Vec<crate::ui::Diagnostic>> {
+    use crate::ui::Diagnostic;
+    let mut wrong = Vec::new();
+    let mut per_module: Vec<(&Shape, Choices)> = Vec::new();
+    for (key, option, value) in given {
+        let flag = format!("--{key}.{option}");
+        let Some(shape) = shapes.iter().find(|shape| &shape.key == key) else {
+            wrong.push(
+                Diagnostic::error(
+                    "option",
+                    format!("{flag} sets an option of `{key}`, which this command does not add"),
+                )
+                .help(format!(
+                    "add `{key}` in the same command, or edit {} by hand",
+                    path_of(key)
+                )),
+            );
+            continue;
+        };
+        let path = path_of(key);
+        if !writes(&path) {
+            wrong.push(
+                Diagnostic::error(
+                    "option",
+                    format!("{flag}: {path} exists, and no command rewrites it"),
+                )
+                .help(format!("set `{option}` in {path} by hand")),
+            );
+            continue;
+        }
+        let opt = shape
+            .options
+            .iter()
+            .find(|opt| opt.key == option)
+            .expect("the flag exists only for a declared option");
+        match option_literal(opt.kind, value) {
+            Ok(literal) => match per_module.iter_mut().find(|(s, _)| s.key == shape.key) {
+                Some((_, choices)) => choices.options.push((option.clone(), literal)),
+                None => per_module.push((
+                    shape,
+                    Choices {
+                        options: vec![(option.clone(), literal)],
+                        ..Choices::default()
+                    },
+                )),
+            },
+            Err(what) => wrong.push(
+                Diagnostic::error(
+                    "option",
+                    format!("{flag} is {value:?}, and `{option}` {what}"),
+                )
+                .help(format!("write {flag}=VALUE with a value of that type")),
+            ),
+        }
+    }
+    if !wrong.is_empty() {
+        return Err(wrong);
+    }
+    for (shape, choices) in per_module {
+        let path = path_of(&shape.key);
+        if let Some((_, text)) = files.iter_mut().find(|(p, _)| *p == path) {
+            *text = module_file(shape, &choices);
+        }
+    }
+    Ok(())
 }
 
 // -- the old src/flags.rs -------------------------------------------------------
@@ -923,13 +1077,11 @@ pub fn move_legacy(legacy: &Legacy, shapes: &[Shape]) -> Moved {
     let mut moved = Moved::default();
     let mut choices: Vec<Choices> = vec![Choices::default(); shapes.len()];
     if legacy.with_config {
-        if let Some(at) = shapes.iter().position(Shape::framework) {
-            choices[at].flags_with_config = true;
-            moved.lines.push(format!(
-                "WITH_CONFIG = true -> flags_with_config: true in {}",
-                path_of(FRAMEWORK)
-            ));
-        }
+        // Flags are on beside a config file in every project now, so the
+        // switch has nowhere to go.
+        moved
+            .lines
+            .push("WITH_CONFIG = true -> dropped: flags are on beside a config file".to_string());
     }
     for (path, name) in &legacy.renames {
         match key_of(shapes, path) {

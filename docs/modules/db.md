@@ -14,7 +14,7 @@ The wizard calls it: *A Postgres pool, and SQL built with sea-query*.
 | Needs | none |
 | Provides | `PgPool`: the project's one Postgres pool, published as `brocanth_db::Db`. No other module opens a pool |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`commands`](commands.md), [`model`](model.md), [`db-embedded`](db-embedded.md) |
+| Adapts to | [`commands`](commands.md), [`model`](model.md), [`db-embedded`](db-embedded.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-db` (feature `plugin`) |

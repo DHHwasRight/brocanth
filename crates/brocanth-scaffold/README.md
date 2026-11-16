@@ -101,18 +101,22 @@ guide. A summary:
 - **Snippets** write lines that must agree, from one call:
   `snippet::plugin` (registration and provider list), `snippet::hooking`
   (plus the hook record), `snippet::configurable` (plus the declared
-  settings and, with `config`, the `[section]` block), and
+  settings and, with a `ConfigSource`, the `[section]` block), and
   `snippet::configurable_hooking` (a hooking plugin from a library crate
   with declared settings). `configurable_hooking` takes a
   `snippet::Hooking`: the section is the plugin's instance name, and
   `config_ty` names the library's configuration type, which
-  `Scaffold::settings_type` records. With `config`, the registration goes
-  through `brocanth-config`'s `plugin_hooking_from_config`.
+  `Scaffold::settings_type` records. Every project gets one registration
+  form: the plugin is built from `crate::plugins::<section>_settings(&layers)`,
+  which layers the default, the module file, the files, the environment
+  and the flags. A module never asks whether the project has `config`.
 - **Settings**: `Setting::text`, `bool`, `integer`, `float`, `list`, with
   `.note`, `.secret`, `.optional`, `.none_as(alias)`, `.commented`. Each
-  setting gives a generated project a flag `--<section>.<key>`, a
-  variable `$<APP>_<SECTION>__<KEY>`, and with `config` a key under
-  `[<section>]`. See [docs/module-flags.md](../../docs/module-flags.md).
+  setting gives a generated project a flag `--<section>.<key>` (a secret
+  gets `--<section>.<key>_file` and `--<section>.<key>_env` instead), a
+  variable `$<APP>_<SECTION>__<KEY>`, a value in its module file, and with
+  a `ConfigSource` a key under `[<section>]`. See
+  [docs/module-flags.md](../../docs/module-flags.md).
 - **Choices** a project makes in its `src/modules/<key>.rs`:
   `Manifest::hook(name, what, Hook::on() | Hook::off() | Hook::required())`,
   with `.phase(Phase::Identify | Guard | Cache | Encode)` on a request or
@@ -137,7 +141,6 @@ impl Module for Cache {
     fn manifest(&self) -> Manifest {
         Manifest::new("cache", "a cache in Postgres, on an unlogged table")
             .krate(Dep::brocanth("brocanth-cache"))
-            .after("config")
             .absent("cache", "no cache; every read goes to the database")
     }
 
@@ -155,10 +158,11 @@ impl Module for Cache {
     }
 }
 
-// What the CLI does with it, in short:
+// What the CLI does with it, in short. `config` provides the file layer.
 let known = ["cache", "config"];
 let on = ["cache", "config"];
-let project = Project::new("my-app", "My App", &on, &known);
+let bindings = [("ConfigSource", "config")];
+let project = Project::new("my-app", "My App", &on, &known).with_bindings(&bindings);
 let mut s = Scaffold::new();
 s.now_writing("cache");
 Cache.contribute(&project, &mut s);

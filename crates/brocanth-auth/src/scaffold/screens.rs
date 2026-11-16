@@ -31,7 +31,7 @@
 //!   proof with the session key, and `Path=/account` keeps it off every
 //!   other request.
 
-use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive};
 use brocanth_scaffold::{
     AgentsSection, Category, Contribution, Manifest, Module, Opt, PgPool, Project, Scaffold,
     Setting, Slot,
@@ -61,10 +61,6 @@ impl Module for AuthScreens {
         )
         .needs("mail", "the verification and reset links leave by mail")
         .needs("flash", "a screen says what happened on the page it redirects to")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .uses::<PgPool>("accounts are in Postgres, so the generated end-to-end test is left out")
         .adapts_to(
             "auth-lockout",
@@ -123,9 +119,6 @@ impl Module for AuthScreens {
                 ),
             ],
         );
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         let lockout = project.has("auth-lockout");
         for (path, text) in PAGES {
             let text = match *path {

@@ -40,9 +40,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{
-    configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
-};
+use brocanth_scaffold::snippet::{configurable, integration, redact_secrets, settings_derive};
 use brocanth_scaffold::{
     AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, JobQueue, Manifest,
     Module, PgPool, Project, Scaffold, Setting, Slot, Tab,
@@ -77,10 +75,6 @@ impl Module for Jobs {
             "a queue in Postgres with retries and a dead letter; a worker in this process",
         )
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .requires_unless::<PgPool>(
             &["jobs-memory"],
             "the queue's tables live in the project's database, beside the pages' pool",
@@ -123,9 +117,6 @@ impl Module for Jobs {
                 .feature("derive")
                 .note("a job's payload is stored as JSON"),
         )
-        // Only for the order of the `[jobs]` section and the builder line:
-        // the queue reads its URL from the file the config plugin loaded.
-        .after("config")
         .absent(
             "brocanth-jobs",
             "no queue; slow work happens inside the request that asked for it",
@@ -140,9 +131,6 @@ impl Module for Jobs {
         );
         s.at(Slot::PluginsMod).line("pub mod jobs;");
         configurable(s, project, "jobs", "Jobs", settings(store));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         if project.collector::<AdminPanel>().is_some() {
             integration(s, "jobs", "admin", Slot::AdminPanels, ADMIN_TAB);
         }

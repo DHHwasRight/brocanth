@@ -39,7 +39,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive};
 use brocanth_scaffold::{
     AdminPanel, AgentsSection, Category, Contribution, Dep, Manifest, Module, MountRole, Opt,
     Project, Scaffold, Setting, Slot,
@@ -67,10 +67,6 @@ impl Module for Backoffice {
         .version(env!("CARGO_PKG_VERSION"))
         .category(Category::Routes)
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to("middleware-csrf", "every form carries the CSRF token")
         .adapts_to(
             "superuser",
@@ -200,9 +196,6 @@ impl Module for Backoffice {
         // them, because the settings arrive when the application is built
         // and `mount` runs after that, when the route table is.
         configurable(s, project, "admin", "AdminSettings", settings(&title));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         // The prefix is the application's decision, so it is written at the
         // call and not inside `mount`.
         s.at(Slot::RouterMounts).line(format!(

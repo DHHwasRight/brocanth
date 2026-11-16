@@ -12,17 +12,19 @@
 //!   1  defaults
 //!        sessions.cookie  = "_my_app_session"
 //!        sessions.secure  = true
-//!   2  config/development.toml
+//!   2  code
+//!        (sets nothing)
+//!   3  config/development.toml
 //!        sessions.cookie  = "_my_app_session"   line 3
 //!        sessions.secure  = false               line 5
-//!   3  environment
+//!   4  environment
 //!        sessions.secure  = true                $MY_APP_SESSIONS__SECURE
-//!   4  flags
+//!   5  flags
 //!        sessions.cookie  = "x"                 --cookie
 //!
 //! merged
-//!   sessions.cookie       = "x"                 4 flags
-//!   sessions.secure       = true                3 environment
+//!   sessions.cookie       = "x"                 5 flags
+//!   sessions.secure       = true                4 environment
 //! ```
 //!
 //! The plugins' defaults are not in a [`Config`]: a plugin built with
@@ -50,6 +52,8 @@ pub struct Layers<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Layer {
     Defaults,
+    /// The application's code: the module files in `src/modules/`.
+    Code,
     /// A file, by its position from the lowest-precedence one.
     File(usize, String),
     Environment,
@@ -61,6 +65,7 @@ impl Layer {
     fn name(&self) -> String {
         match self {
             Layer::Defaults => "defaults".to_string(),
+            Layer::Code => "code".to_string(),
             Layer::File(_, path) => path.clone(),
             Layer::Environment => "environment".to_string(),
             Layer::Flags => "flags".to_string(),
@@ -131,6 +136,7 @@ impl<'a> Layers<'a> {
     fn layer_of(&self, from: &Provenance) -> Layer {
         match from {
             Provenance::Default { .. } => Layer::Defaults,
+            Provenance::Code { .. } => Layer::Code,
             Provenance::File { file, .. } => {
                 // `sources` is highest precedence first; a layer number counts
                 // from the lowest.
@@ -150,6 +156,7 @@ impl<'a> Layers<'a> {
     fn detail(from: &Provenance) -> String {
         match from {
             Provenance::File { line, .. } => format!("line {line}"),
+            Provenance::Code { file } => file.to_string(),
             Provenance::EnvVar { var } => format!("${var}"),
             Provenance::Flag { flag } => format!("--{flag}"),
             Provenance::Default { plugin } => format!("default ({plugin})"),
@@ -174,8 +181,9 @@ impl<'a> Layers<'a> {
                 })
                 .collect(),
         )];
-        // Every file, and the environment and the flags, even when they set
-        // nothing: an empty layer is a fact worth seeing.
+        // The code, every file, the environment and the flags, even when
+        // they set nothing: an empty layer is a fact worth seeing.
+        layers.push((Layer::Code, Vec::new()));
         let sources = self.config.sources();
         for (i, source) in sources.iter().enumerate().rev() {
             layers.push((
@@ -305,6 +313,7 @@ mod tests {
             .cwd(root)
             .env_lookup(|_| None)
             .env_vars(|| vec![("MY_APP_SESSIONS__SECURE".into(), "true".into())])
+            .code("sessions.cookie", "src/modules/sessions.rs", "code", true)
             .flag("sessions.cookie", "cookie", "x", true)
             .load()
             .unwrap();
@@ -323,20 +332,23 @@ mod tests {
              \x20       sessions.cookie  = \"_my_app_session\"\n\
              \x20       sessions.secret  = (secret)\n\
              \n\
-             \x20  2  {file}\n\
+             \x20  2  code\n\
+             \x20       sessions.cookie  = \"code\"             src/modules/sessions.rs\n\
+             \n\
+             \x20  3  {file}\n\
              \x20       sessions.cookie  = \"file\"             line 2\n\
              \x20       sessions.secure  = false              line 3\n\
              \n\
-             \x20  3  environment\n\
+             \x20  4  environment\n\
              \x20       sessions.secure  = true               $MY_APP_SESSIONS__SECURE\n\
              \n\
-             \x20  4  flags\n\
+             \x20  5  flags\n\
              \x20       sessions.cookie  = \"x\"                --cookie\n\
              \n\
              merged\n\
-             \x20 sessions.cookie        = \"x\"                4 flags\n\
+             \x20 sessions.cookie        = \"x\"                5 flags\n\
              \x20 sessions.secret        = (secret)           1 defaults\n\
-             \x20 sessions.secure        = true               3 environment\n"
+             \x20 sessions.secure        = true               4 environment\n"
         );
         assert_eq!(text, expected, "\n{text}");
     }

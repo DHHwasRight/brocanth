@@ -22,9 +22,7 @@
 //! choosing this module adds a file and a mount, and rewrites nothing that
 //! `auth` wrote.
 
-use brocanth_scaffold::snippet::{
-    configurable, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
-};
+use brocanth_scaffold::snippet::{configurable, module_ref, redact_secrets, settings_derive};
 use brocanth_scaffold::{
     AgentsSection, Category, Contribution, Dep, Manifest, Module, MountRole, Opt, Project,
     Scaffold, Setting, Slot,
@@ -53,10 +51,6 @@ impl Module for AuthOauth {
         .part_of_but_off("auth")
         .because("a provider identity becomes an account and a session, and `auth` holds both")
         .asked_in("doors", "Sign-in with GitHub, Google, Microsoft or GitLab")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .adapts_to(
             "middleware-csrf",
             "the button and the link forms carry the CSRF token",
@@ -107,9 +101,6 @@ impl Module for AuthOauth {
         );
         s.at(Slot::PluginsMod).line("pub mod auth_oauth;");
         configurable(s, project, "auth_oauth", "AuthOauth", settings());
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         s.at(Slot::RouterMounts).line(format!(
             "    crate::plugins::auth_oauth::mount(routes, {})?;",
             module_ref("auth-oauth", "mount_at")

@@ -13,7 +13,7 @@ The wizard calls it: *Upload and download routes, behind a guard and file tokens
 | Part of | [`storage`](storage.md), off until you tick it |
 | Needs | [`middleware-csrf`](middleware-csrf.md): an upload is a form post, and the routes read the check's field and header |
 | After | [`storage`](storage.md), [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`storage-thumbnails`](storage-thumbnails.md) |
+| Adapts to | [`storage-thumbnails`](storage-thumbnails.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-storage` (feature `routes`; `variants` with [`storage-thumbnails`](storage-thumbnails.md)) |

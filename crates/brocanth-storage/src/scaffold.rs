@@ -37,7 +37,6 @@
 
 use brocanth_scaffold::snippet::{
     configurable, configurable_hooking, module_ref, redact_secrets, settings_derive, Hooking,
-    PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
     AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, MountRole, Opt, PgPool,
@@ -63,10 +62,6 @@ impl Module for FileStorage {
         )
         .category(Category::Enhancer)
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .uses::<PgPool>(
             "the objects live in the `db` database, on its pool, and not on one machine's disk",
         )
@@ -75,10 +70,6 @@ impl Module for FileStorage {
             "Uploads on disk or in Postgres, addressed by content hash",
         )
         .krate(Dep::brocanth("brocanth-storage").feature_with("db", "postgres"))
-        // Only for the order of the `[storage]` section and the builder line:
-        // the store reads its root and its secret from the file the config
-        // plugin loaded, so it belongs under it rather than above it.
-        .after("config")
         .absent(
             "brocanth-storage",
             "no file storage; an upload has nowhere to go and no address to be read back from",
@@ -106,12 +97,6 @@ impl Module for FileStorage {
         configurable(s, project, "storage", "Files", settings(db));
         // No `.gitignore` line: `LocalDisk::open` writes one holding `*` into
         // the root, so the rule moves when `root` does.
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait method,
-            // so the trait has to be in scope. Every plugin module needs the
-            // same line, and `use` twice does not compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 
@@ -539,10 +524,6 @@ impl Module for StorageRoutes {
         .because("it is the HTTP edge of `brocanth-storage`, which the parent brings")
         .asked_in("data", "Upload and download routes, behind a guard and file tokens")
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "storage-thumbnails",
             "`?thumb=WxH` answers in the sizes `thumb_sizes` lists",
         )
@@ -559,7 +540,6 @@ impl Module for StorageRoutes {
         // The plugin reads the store and the token service from the
         // services the storage plugin fills, at its own `after_config`.
         .after("storage")
-        .after("config")
         .hook(
             "answer",
             "answer POST {path} and GET {path}/{address}",

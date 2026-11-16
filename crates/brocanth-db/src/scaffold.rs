@@ -18,10 +18,10 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive};
 use brocanth_scaffold::{
-    AgentsSection, Category, Contribution, Dep, Manifest, Module, PgPool, Project, Scaffold,
-    Setting, Slot,
+    AgentsSection, Category, ConfigSource, Contribution, Dep, Manifest, Module, PgPool, Project,
+    Scaffold, Setting, Slot,
 };
 
 pub use crate::scaffold_embedded::DbEmbedded;
@@ -48,9 +48,8 @@ impl Module for Database {
         // The one shared pool. Every Postgres module requires it and opens no
         // pool of its own, so `brocanth create --jobs` adds this module.
         .provides::<PgPool>("the project's one Postgres pool, published as `brocanth_db::Db`")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
+        .uses::<ConfigSource>(
+            "the development URL is in the development file, so the default is empty and each environment names its own",
         )
         .adapts_to(
             "commands",
@@ -74,9 +73,6 @@ impl Module for Database {
                 .feature("plugin")
                 .note("the pool, read as `ctx.db()`"),
         )
-        // Only for the order of the `[db]` section and the builder line: the
-        // URL comes from the file the config plugin loaded.
-        .after("config")
         // Its child registers first: the server runs before the pool reads
         // its URL, and stops after the pool closes (shutdown runs in reverse).
         .after("db-embedded")
@@ -94,21 +90,15 @@ impl Module for Database {
         s.at(Slot::PluginsMod).line("pub mod db;");
         configurable(s, project, "db", "Database", settings(project));
         if project.has("commands") {
-            s.file("src/commands/dbshell.rs", dbshell_rs(project));
+            s.file("src/commands/dbshell.rs", DBSHELL_RS);
             s.at(Slot::CommandsMod).line("pub mod dbshell;");
         }
         // Plain SQL migrations, for a project with no ORM. With `model`,
         // the `migrate` command is the model's: one per project.
         if project.has("commands") && !project.has("model") {
-            s.file("src/commands/migrate.rs", migrate_rs(project));
+            s.file("src/commands/migrate.rs", MIGRATE_RS);
             s.at(Slot::CommandsMod).line("pub mod migrate;");
             s.at(Slot::AgentsSections).block(AGENTS_MIGRATE.to_string());
-        }
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, a trait method, so the
-            // trait has to be in scope. Every plugin module needs the same
-            // line, and `use` twice does not compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
         // Load-bearing: the provider list is in the application's type, so
         // this stops compiling the moment the registration is deleted.
@@ -226,15 +216,6 @@ impl Ctx {
 
 /// `src/commands/migrate.rs`: `brocanth_db::migrate` on the database the
 /// server reads.
-fn migrate_rs(project: &Project) -> String {
-    let url = if project.has("config") {
-        MIGRATE_URL_FROM_CONFIG
-    } else {
-        MIGRATE_URL_FROM_ENV
-    };
-    MIGRATE_RS.replace("@URL@", url)
-}
-
 const MIGRATE_RS: &str = r#"//! `migrate` -- apply the SQL files in `migrations/` to `[db] url`.
 //!
 //! A migration is one file, `migrations/<UTC time>_<name>.sql`. The
@@ -357,27 +338,13 @@ async fn apply(migrator: &Migrator<'_>, action: Action) -> anyhow::Result<()> {
     }
     Ok(())
 }
-@URL@"#;
 
-const MIGRATE_URL_FROM_CONFIG: &str = r#"
-/// The pool's configuration: `[db]`, through the loader the server uses, so
-/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
-/// sees.
+/// The pool's configuration: `[db]`, as the server reads it, through every
+/// settings layer: the default, the module file, the files, the
+/// environment and the flags.
 fn database() -> anyhow::Result<DbConfig> {
-    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok(config
-        .section::<crate::plugins::db::Settings>("db")?
-        .config())
-}
-"#;
-
-const MIGRATE_URL_FROM_ENV: &str = r#"
-/// The pool's configuration, as the server reads `[db]` without a file:
-/// the defaults in `src/plugins/db/mod.rs`, then `$<APP>_DB__URL` and the
-/// other variables, then the flags.
-fn database() -> anyhow::Result<DbConfig> {
-    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
-    let settings = crate::plugins::db_settings(&given).map_err(anyhow::Error::msg)?;
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&layers).map_err(anyhow::Error::msg)?;
     Ok(settings.config())
 }
 "#;
@@ -408,31 +375,6 @@ a new one.
 /// A command of the project and not of the `brocanth` CLI: only the
 /// project knows how its configuration is read, and the CLI links no
 /// configuration loader.
-fn dbshell_rs(project: &Project) -> String {
-    let configured = project.has("config");
-    let env_arg = if configured {
-        "    /// The environment whose `[db] url` to open [default: $<APP>_ENV, or development]\n    \
-         #[arg(long, short, value_name = \"ENV\")]\n    \
-         env: Option<String>,\n"
-    } else {
-        ""
-    };
-    let call = if configured {
-        "url(self.env.as_deref(), ctx.root())?"
-    } else {
-        "url()?"
-    };
-    let url = if configured {
-        DBSHELL_URL_FROM_CONFIG
-    } else {
-        DBSHELL_URL_FROM_ENV
-    };
-    DBSHELL_RS
-        .replace("@ENV_ARG@", env_arg)
-        .replace("@CALL@", call)
-        .replace("@URL@", url)
-}
-
 const DBSHELL_RS: &str = r#"//! `dbshell` -- the database's own client, on this application's database.
 //!
 //! Reads `[db] url` the way the server does and replaces itself with `psql`
@@ -450,7 +392,7 @@ use brocanth_command::{anyhow, clap, cmd, Command, Context};
 #[cmd]
 #[derive(clap::Args)]
 pub struct Dbshell {
-@ENV_ARG@    /// Print the command line instead of running it. The password is not printed
+    /// Print the command line instead of running it. The password is not printed
     #[arg(long)]
     print: bool,
     /// Passed to psql unchanged, after `--`
@@ -460,34 +402,15 @@ pub struct Dbshell {
 
 impl Command for Dbshell {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
-        let url = @CALL@;
+        // The config files resolve from the project root.
+        std::env::set_current_dir(ctx.root())?;
+        let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+        let url = crate::plugins::db_settings(&layers)
+            .map_err(anyhow::Error::msg)?
+            .url;
         brocanth_db::shell::run(&url, ctx.root(), self.print, &self.rest)?;
         Ok(())
     }
-}
-@URL@"#;
-
-const DBSHELL_URL_FROM_CONFIG: &str = r#"
-/// `[db] url`, through the loader the server uses, so the files,
-/// `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server sees.
-fn url(env: Option<&str>, root: &std::path::Path) -> anyhow::Result<String> {
-    let mut loader = brocanth_config::Loader::new(crate::app::APP).cwd(root);
-    if let Some(env) = env {
-        loader = loader.env(env);
-    }
-    Ok(loader
-        .load()?
-        .section::<crate::plugins::db::Settings>("db")?
-        .url)
-}
-"#;
-
-const DBSHELL_URL_FROM_ENV: &str = r#"
-/// `[db] url`: the default, or `$<APP>_DB__URL`, as the server reads it.
-fn url() -> anyhow::Result<String> {
-    Ok(crate::plugins::db_settings(&[])
-        .map_err(anyhow::Error::msg)?
-        .url)
 }
 "#;
 
@@ -557,7 +480,7 @@ fn plugin_rs(project: &Project) -> String {
     // URL, and any other environment must name its own: an empty default
     // makes `configure` say so. Without one, the literal is the only source,
     // and it is for development.
-    let (url, url_doc) = if project.has("config") {
+    let (url, url_doc) = if project.provider::<ConfigSource>().is_some() {
         (
             "",
             "Empty by default: each\n    \

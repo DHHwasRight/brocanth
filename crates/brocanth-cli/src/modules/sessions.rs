@@ -6,7 +6,7 @@
 //! manifest and the generated file say so, so nobody picks this for
 //! accounts.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{
     AgentsSection, Category, Contribution, Manifest, Module, Project, Scaffold, SessionCookie,
     Setting, Slot,
@@ -26,10 +26,6 @@ impl Module for Sessions {
             "a cookie name on the context and an empty `session` layer to build on; no session store, for sign-in pick `auth`",
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "doors",
             "A session seam to build on (no store; signed sessions are `auth`)",
@@ -60,13 +56,6 @@ impl Module for Sessions {
                     .note("Development only. Anywhere a browser reaches over HTTPS, this is true."),
             ],
         );
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait
-            // method, so the trait has to be in scope. Every plugin
-            // module needs the same line, and `use` twice does not
-            // compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         // A plugin *offers* middleware and cannot mount it. The pattern is
         // a decision, and the decision is the application's -- so the line
         // is in `main` where it can be read and changed.

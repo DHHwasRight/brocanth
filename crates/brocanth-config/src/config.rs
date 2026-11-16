@@ -436,17 +436,41 @@ pub struct Loader {
     cwd: PathBuf,
     env_lookup: EnvLookup,
     env_vars: Option<EnvVars>,
-    flags: Vec<Flag>,
+    code: Vec<Given>,
+    flags: Vec<Given>,
     none_as: Vec<(String, String)>,
 }
 
-/// One value given on the command line, for [`Loader::flag`].
+/// One value the application gave the loader: in its code
+/// ([`Loader::code`]) or on the command line ([`Loader::flag`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Flag {
+struct Given {
     path: Vec<String>,
+    /// The flag without `--`, or the source file that sets it.
     name: String,
     raw: String,
-    text: bool,
+    typing: Typing,
+}
+
+/// How a given raw value becomes a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typing {
+    /// Always a string, unless empty.
+    Text,
+    /// Typed as an environment variable is.
+    Inferred,
+    /// A list of strings, split at each comma. Empty is the empty list.
+    List,
+}
+
+impl Typing {
+    fn of(text: bool) -> Self {
+        if text {
+            Typing::Text
+        } else {
+            Typing::Inferred
+        }
+    }
 }
 
 impl Loader {
@@ -459,6 +483,7 @@ impl Loader {
             cwd: PathBuf::from("."),
             env_lookup: Box::new(|k| std::env::var(k).ok()),
             env_vars: None,
+            code: Vec::new(),
             flags: Vec::new(),
             none_as: Vec::new(),
         }
@@ -492,12 +517,38 @@ impl Loader {
     /// run.
     #[must_use]
     pub fn flag(mut self, path: &str, flag: &str, raw: &str, text: bool) -> Self {
-        self.flags.push(Flag {
-            path: path.split('.').map(str::to_string).collect(),
-            name: flag.to_string(),
-            raw: raw.to_string(),
-            text,
-        });
+        self.flags
+            .push(Given::new(path, flag, raw, Typing::of(text)));
+        self
+    }
+
+    /// Adds a list given on the command line: `raw` split at each comma,
+    /// each item a string. An empty `raw` is the empty list. Above every
+    /// other source, as [`Loader::flag`] is.
+    #[must_use]
+    pub fn flag_list(mut self, path: &str, flag: &str, raw: &str) -> Self {
+        self.flags.push(Given::new(path, flag, raw, Typing::List));
+        self
+    }
+
+    /// Adds a value the application's code sets, under every file: a
+    /// module file in `src/modules/` of a generated project.
+    ///
+    /// `file` names the source file, for the report. `raw` and `text` are
+    /// as for [`Loader::flag`]. A file, a variable and a flag each outrank
+    /// it: code is shared by every deployment of the binary, so it is the
+    /// widest decision after the plugin's own default.
+    #[must_use]
+    pub fn code(mut self, path: &str, file: &str, raw: &str, text: bool) -> Self {
+        self.code
+            .push(Given::new(path, file, raw, Typing::of(text)));
+        self
+    }
+
+    /// [`Loader::code`] for a list: `raw` split at each comma.
+    #[must_use]
+    pub fn code_list(mut self, path: &str, file: &str, raw: &str) -> Self {
+        self.code.push(Given::new(path, file, raw, Typing::List));
         self
     }
 
@@ -675,6 +726,10 @@ impl Loader {
             ValueKind::Table(Table::open()),
             Provenance::inline("nothing"),
         );
+        value::merge(
+            &mut root,
+            given_layer(&self.code, Provenance::code, "code")?,
+        );
         for source in present.iter().rev() {
             let file = Arc::new(source.clone());
             let text = std::fs::read_to_string(&source.path).map_err(|e| ConfigError::Io {
@@ -696,7 +751,10 @@ impl Loader {
         let (env_layer, used) =
             crate::env::layer(&self.app, &vars).map_err(|source| ConfigError::Env { source })?;
         value::merge(&mut root, env_layer);
-        value::merge(&mut root, self.flag_layer()?);
+        value::merge(
+            &mut root,
+            given_layer(&self.flags, Provenance::flag, "command line")?,
+        );
         for (path, alias) in &self.none_as {
             if let Some(value) = root.at_mut(path) {
                 if value.plain().as_deref() == Some(alias.as_str()) {
@@ -712,60 +770,6 @@ impl Loader {
             sources: present,
             env_vars: used,
         })
-    }
-
-    /// The flags, as one layer. A later flag for the same path replaces an
-    /// earlier one, as a shell user expects of `--x=1 --x=2`.
-    fn flag_layer(&self) -> Result<Value, ConfigError> {
-        let mut root = Table::open();
-        for flag in &self.flags {
-            let wrong = |message: &str| ConfigError::Flag {
-                flag: flag.name.clone(),
-                message: message.to_string(),
-            };
-            let Some((key, parents)) = flag.path.split_last() else {
-                return Err(wrong("names no key"));
-            };
-            if flag.path.iter().any(String::is_empty) || parents.is_empty() {
-                return Err(wrong(
-                    "a flag names a section and a key, joined by dots: `section.key`",
-                ));
-            }
-            let mut table = &mut root;
-            for part in parents {
-                let next = table.get(part).is_some_and(|v| v.as_table().is_some());
-                if !next {
-                    if table.get(part).is_some() {
-                        return Err(wrong("another flag names this as a value, not a table"));
-                    }
-                    table.insert(
-                        part.clone(),
-                        Value::new(
-                            ValueKind::Table(Table::open()),
-                            Provenance::flag(&flag.name),
-                        ),
-                    );
-                }
-                table = table
-                    .get_mut(part)
-                    .and_then(Value::as_table_mut)
-                    .expect("inserted above");
-            }
-            let from = Provenance::flag(&flag.name);
-            let value = if flag.text && !flag.raw.is_empty() {
-                Value::new(ValueKind::String(flag.raw.clone()), from)
-            } else {
-                Value::inferred(&flag.raw, from)
-            };
-            if table.get(key).is_some_and(|v| v.as_table().is_some()) {
-                return Err(wrong("another flag names keys under this one"));
-            }
-            table.insert(key.clone(), value);
-        }
-        Ok(Value::new(
-            ValueKind::Table(root),
-            Provenance::inline("command line"),
-        ))
     }
 
     /// The files that exist, highest precedence first, at most one per slot.
@@ -818,6 +822,87 @@ impl Loader {
         }
         Ok(present)
     }
+}
+
+impl Given {
+    fn new(path: &str, name: &str, raw: &str, typing: Typing) -> Self {
+        Self {
+            path: path.split('.').map(str::to_string).collect(),
+            name: name.to_string(),
+            raw: raw.to_string(),
+            typing,
+        }
+    }
+
+    /// The value, typed as [`Typing`] says, from `from`.
+    fn value(&self, from: Provenance) -> Value {
+        match self.typing {
+            Typing::Text if !self.raw.is_empty() => {
+                Value::new(ValueKind::String(self.raw.clone()), from)
+            }
+            Typing::Text | Typing::Inferred => Value::inferred(&self.raw, from),
+            Typing::List => {
+                let items = self
+                    .raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(|item| Value::new(ValueKind::String(item.to_string()), from.clone()))
+                    .collect();
+                Value::new(ValueKind::Array(items), from)
+            }
+        }
+    }
+}
+
+/// The given values, as one layer: the code's or the flags'. A later value
+/// for the same path replaces an earlier one, as a shell user expects of
+/// `--x=1 --x=2`. `from` makes each value's provenance from its name.
+fn given_layer(
+    given: &[Given],
+    from: fn(&str) -> Provenance,
+    label: &str,
+) -> Result<Value, ConfigError> {
+    let mut root = Table::open();
+    for one in given {
+        let wrong = |message: &str| ConfigError::Flag {
+            flag: one.name.clone(),
+            message: message.to_string(),
+        };
+        let Some((key, parents)) = one.path.split_last() else {
+            return Err(wrong("names no key"));
+        };
+        if one.path.iter().any(String::is_empty) || parents.is_empty() {
+            return Err(wrong(
+                "a flag names a section and a key, joined by dots: `section.key`",
+            ));
+        }
+        let mut table = &mut root;
+        for part in parents {
+            let next = table.get(part).is_some_and(|v| v.as_table().is_some());
+            if !next {
+                if table.get(part).is_some() {
+                    return Err(wrong("another flag names this as a value, not a table"));
+                }
+                table.insert(
+                    part.clone(),
+                    Value::new(ValueKind::Table(Table::open()), from(&one.name)),
+                );
+            }
+            table = table
+                .get_mut(part)
+                .and_then(Value::as_table_mut)
+                .expect("inserted above");
+        }
+        if table.get(key).is_some_and(|v| v.as_table().is_some()) {
+            return Err(wrong("another flag names keys under this one"));
+        }
+        table.insert(key.clone(), one.value(from(&one.name)));
+    }
+    Ok(Value::new(
+        ValueKind::Table(root),
+        Provenance::inline(label),
+    ))
 }
 
 fn with_extension(stem: &Path, ext: &str) -> PathBuf {
@@ -1424,6 +1509,45 @@ mod toml_tests {
         let from = cfg.provenance("sessions.cookie").unwrap();
         assert_eq!(from.to_string(), "--cookie");
         assert_eq!(sessions["cookie"].shadowed().len(), 2, "env, then file");
+    }
+
+    #[test]
+    fn code_is_under_the_file_and_a_list_flag_splits_at_commas() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("config/test.toml"),
+            "[csrf]\ncookie = \"file\"\n",
+        );
+        let cfg = Loader::new("my_app")
+            .env("test")
+            .root(root)
+            .cwd(root)
+            .env_lookup(lookup(&[]))
+            .env_vars(Vec::new)
+            .code("csrf.cookie", "src/modules/csrf.rs", "code", true)
+            .code("csrf.secure", "src/modules/csrf.rs", "false", false)
+            .code_list("csrf.exempt", "src/modules/csrf.rs", "/a")
+            .flag_list("csrf.exempt", "csrf.exempt", "/hooks, /callbacks")
+            .flag_list("csrf.methods", "csrf.methods", "")
+            .load()
+            .unwrap();
+        let csrf = cfg.raw_section("csrf").unwrap();
+        // The file outranks the code; the code outranks the default.
+        assert_eq!(csrf["cookie"].as_str(), Some("file"));
+        assert_eq!(csrf["secure"].as_bool(), Some(false));
+        assert_eq!(
+            cfg.provenance("csrf.secure").unwrap().to_string(),
+            "src/modules/csrf.rs"
+        );
+        let exempt: Vec<&str> = csrf["exempt"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(exempt, ["/hooks", "/callbacks"]);
+        assert_eq!(csrf["methods"].as_array().map(<[Value]>::len), Some(0));
     }
 
     #[test]

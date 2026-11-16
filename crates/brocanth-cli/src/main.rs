@@ -147,7 +147,11 @@ enum Command {
 /// flags, and a `--help` synthesised here would be a worse copy of one that
 /// already exists.
 fn with_project_commands() -> clap::Command {
-    let command = Cli::command();
+    // The build-time options of every module, on the two commands that
+    // write module files.
+    let command = Cli::command()
+        .mut_subcommand("create", |create| create.args(choices::option_args()))
+        .mut_subcommand("add", |add| add.args(choices::option_args()));
     let Some(listed) = commands::delegate::listed(dir_from_argv().as_deref()) else {
         return command;
     };
@@ -208,16 +212,17 @@ fn main() -> ExitCode {
     let dir = global.dir.as_deref();
 
     let result = match matches.subcommand() {
-        Some(("create", m)) => commands::create::run(
-            &ui,
-            dir,
-            commands::create::CreateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
-        ),
-        Some(("add", m)) => commands::add::run(
-            &ui,
-            dir,
-            commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
-        ),
+        Some(("create", m)) => {
+            let mut args =
+                commands::create::CreateArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit());
+            args.options = choices::options_given(m);
+            commands::create::run(&ui, dir, args)
+        }
+        Some(("add", m)) => {
+            let mut args = commands::add::AddArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit());
+            args.options = choices::options_given(m);
+            commands::add::run(&ui, dir, args)
+        }
         Some(("remove", m)) => commands::remove::run(
             &ui,
             dir,

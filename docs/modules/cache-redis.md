@@ -13,7 +13,7 @@ The wizard shows it under the cache, in the Data question.
 | Part of | [`cache`](cache.md), off until you tick it |
 | Needs | none |
 | After | [`cache`](cache.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`cache-memory`](cache-memory.md): a project has one cache backend, and both write `src/plugins/cache/mod.rs`; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-cache-redis`; `brocanth-cache` loses `postgres` |

@@ -52,7 +52,6 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::PLUGIN_TRAIT_USE;
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// Authorisation, as a choice on the `brocanth create` menu.
@@ -95,17 +94,15 @@ impl Module for Authorisation {
         s.file("src/plugins/policy/mod.rs", plugin_rs(project));
         s.at(Slot::PluginsMod).line("pub mod policy;");
         // No setting, so no section and no `Settings`: the plugin is built
-        // from `()`, with or without the config file.
+        // from `()`, in every project. The trait is named in the call, so no
+        // file needs it in scope.
         s.at(Slot::AppPlugins).block(
-            "        let builder = builder.plugin(crate::plugins::policy::Policies::new(()));\n"
+            "        let builder = builder\n\
+             \x20           .plugin(<crate::plugins::policy::Policies as brocanth::plugin_api::Plugin>::new(()));\n"
                 .to_string(),
         );
         s.at(Slot::PluginsInstalled)
             .line("policy crate::plugins::policy::Policies");
-        // `Plugin::new` is a trait method, so the trait has to be in scope.
-        // Every plugin module needs the same line, and `use` twice does not
-        // compile.
-        s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         // A brand-new project reads the dialect, rather than warning that
         // nothing does.
         s.at(Slot::AppContext).block(

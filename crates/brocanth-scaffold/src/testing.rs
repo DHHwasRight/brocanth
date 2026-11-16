@@ -129,6 +129,18 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         .requirements(&alone)
         .map(|r| (r.kind.name, SOME_PROVIDER))
         .collect();
+    // The scaffold reads the file layer for every module, declared or not:
+    // bound in the first run and not in the second, so both registrations
+    // are checked.
+    {
+        use crate::kind::Kind as _;
+        if !all_bound
+            .iter()
+            .any(|(kind, _)| *kind == crate::kind::ConfigSource::NAME)
+        {
+            all_bound.push((crate::kind::ConfigSource::NAME, SOME_PROVIDER));
+        }
+    }
     for (kind, _) in &m.provides {
         all_bound.push((kind.name, m.key));
         required.push((kind.name, m.key));
@@ -891,6 +903,36 @@ mod tests {
             let source = format!(
                 "fn f() {{\n    {{\n{}    }}\n}}\n",
                 crate::snippet::hooking_line(ty, config)
+            );
+            if let Some(wrong) = unformatted(&files(&[("f.rs", &source)])) {
+                assert!(wrong.is_empty(), "rustfmt changes:\n{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_plugin_registration_shape_is_what_rustfmt_writes() {
+        // The one registration form, for a short key, a long one, and a
+        // plugin with no declared setting.
+        for (key, ty, settings) in [
+            ("db", "Database", true),
+            ("oauth_client", "OauthClient", true),
+            ("observability", "Observe", true),
+            ("model", "Model", false),
+        ] {
+            let mut s = crate::Scaffold::new();
+            s.now_writing(key);
+            let everything = [key];
+            let project = crate::Project::new("my-blog", "My Blog", &everything, &everything);
+            let declared = if settings {
+                vec![crate::Setting::bool("on", true, "On.")]
+            } else {
+                Vec::new()
+            };
+            crate::snippet::configurable(&mut s, &project, key, ty, declared);
+            let source = format!(
+                "fn f() {{\n    {{\n{}    }}\n}}\n",
+                s.slot(crate::Slot::AppPlugins).collect::<String>()
             );
             if let Some(wrong) = unformatted(&files(&[("f.rs", &source)])) {
                 assert!(wrong.is_empty(), "rustfmt changes:\n{source}");

@@ -38,10 +38,6 @@ impl Module for Audit {
         // the hook record is a middleware's slot.
         .category(Category::Middleware)
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "operations",
             "Change history: who changed which row, and when",

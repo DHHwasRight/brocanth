@@ -13,7 +13,7 @@ The wizard calls it: *Answer 304 when the browser already has the page*.
 | Part of | [`middleware`](middleware.md), off until you tick it |
 | Needs | none |
 | After | [`middleware-rate-limit`](middleware-rate-limit.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

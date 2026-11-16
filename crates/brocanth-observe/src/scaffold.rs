@@ -23,7 +23,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 const LOGS: &str = "observability-logs";
@@ -54,14 +54,12 @@ impl Module for Observe {
         .category(Category::Middleware)
         .category(Category::Enhancer)
         .category(Category::Routes)
-        .adapts_to("config", "its settings are read from the config file, not written as a literal")
         .adapts_to("observability-logs", "the request log is compiled in and switched on")
         .adapts_to("observability-health", "`/up` and `/readyz` are answered, and shutdown drains")
         .adapts_to("observability-metrics", "a side listener serves `/metrics`")
         .adapts_to("observability-tracing", "spans are exported to a collector")
         .asked_in("operations", "Observability: logs, health probes, metrics (traces off)")
         .krate(krate())
-        .after("config")
         .absent(
             "brocanth-observe",
             "no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive",
@@ -83,9 +81,6 @@ impl Module for Observe {
         s.at(Slot::ServerWrap)
             .line("observability::serving::Serving");
         configurable(s, project, "observability", "Observe", settings(project));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 

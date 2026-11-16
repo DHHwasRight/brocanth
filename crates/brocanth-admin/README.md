@@ -213,11 +213,10 @@ cargo run -- serve --admin.site_url=/   # flags: on without `config`
 cargo run -- --admin.site_url=/
 ```
 
-- Precedence, lowest first: `Settings::default()`, the config files, the
-  environment, a flag.
-- With `config`, the binary refuses a flag until `flags_with_config: true`
-  in `src/modules/brocanth.rs`, or `flags: Flags::On` in
-  `src/modules/admin.rs`. `rename` in `src/modules/admin.rs` renames a flag.
+- Precedence, lowest first: `Settings::default()`, `set` in
+  `src/modules/admin.rs`, the config files, the environment, a flag.
+- The flags are on beside a config file too. `flags: Flags::Off` in
+  `src/modules/admin.rs` turns them off; `rename` there renames a flag.
 - `mount_at` in `src/modules/admin.rs` is where the backoffice answers,
   `/admin` by default. A tab of another module, such as analytics, is in
   the generated `plugins::admin_panels`.

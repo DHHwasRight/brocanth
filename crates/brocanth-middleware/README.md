@@ -119,11 +119,13 @@ MY_APP_RATE_LIMIT__IP_HEADER=fly-client-ip cargo run -- serve
 ```
 
 `serve` is the subcommand a project with `commands` starts the server
-with. Without `commands`, leave it out. With `config`, the flags are off
-until `flags_with_config: true` in `src/modules/brocanth.rs`.
+with. Without `commands`, leave it out. The flags are on beside a config
+file too.
 
-A list has no flag, so `exempt` and the rate-limit rules live in the file.
-Without `config`, the example rule is code beside the registration.
+A list of strings has a flag, the items joined by commas:
+`--csrf.exempt=/callbacks`. The rate-limit rules are records, so they
+have no flag: they live in the file, or, without `config`, in code beside
+the registration.
 
 The generated registration calls
 `plugin_hooking_from_config::<P>("<section>")` from `brocanth-config`.

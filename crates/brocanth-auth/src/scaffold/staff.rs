@@ -21,7 +21,7 @@
 //! first role. `superuser` also owns the function that reads the signed-in
 //! member of staff, which `roles` uses.
 
-use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, integration, settings_derive};
 use brocanth_scaffold::{
     AdminPanel, AgentsSection, Category, Contribution, Dep, Manifest, Module, PgPool, Project,
     Scaffold, Setting, Slot, Tab,
@@ -43,10 +43,6 @@ impl Module for Superuser {
         .needs(
             "auth",
             "a superuser is an account with a flag, and `auth` holds the accounts",
-        )
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
         )
         .adapts_to(
             "commands",
@@ -87,9 +83,6 @@ impl Module for Superuser {
         );
         s.at(Slot::PluginsMod).line("pub mod superuser;");
         configurable(s, project, "superuser", "Superuser", settings(project));
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         if project.has("admin") {
             integration(s, "superuser", "admin", Slot::AdminPanels, ADMIN_POLICY);
         }
@@ -98,10 +91,7 @@ impl Module for Superuser {
         // are asked, so each declared adaptation is asked in every project.
         let postgres = uses_postgres(project);
         if project.has("commands") && postgres {
-            s.file(
-                "src/commands/createsuperuser.rs",
-                command_rs(project.has("config")),
-            );
+            s.file("src/commands/createsuperuser.rs", COMMAND_RS);
             s.at(Slot::CommandsMod).line("pub mod createsuperuser;");
         }
         s.at(Slot::AgentsSections)
@@ -290,15 +280,6 @@ impl Plugin for Superuser {
 
 /// `src/commands/createsuperuser.rs`. The accounts are on the `db`
 /// plugin's database, so the command opens `[db]` as `migrate` does.
-fn command_rs(configured: bool) -> String {
-    let settings = if configured {
-        COMMAND_SETTINGS_FROM_CONFIG
-    } else {
-        COMMAND_SETTINGS_FROM_ENV
-    };
-    COMMAND_RS.replace("@SETTINGS@", settings)
-}
-
 const COMMAND_RS: &str = r#"//! `createsuperuser` -- an operator account that passes every check of the
 //! admin.
 //!
@@ -361,31 +342,15 @@ impl Command for Createsuperuser {
         Ok(())
     }
 }
-@SETTINGS@"#;
 
-const COMMAND_SETTINGS_FROM_CONFIG: &str = r#"
-/// `[db]` and `[superuser]`, through the loader the server uses.
+/// `[db]` and `[superuser]`, as the server reads them: every settings layer.
 fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
-    let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
     Ok((
-        loaded
-            .section::<crate::plugins::db::Settings>("db")?
-            .config(),
-        loaded.section("superuser")?,
-    ))
-}
-"#;
-
-const COMMAND_SETTINGS_FROM_ENV: &str = r#"
-/// `[db]` and `[superuser]` as the server reads them without a file: the
-/// defaults, then the variables, then the flags.
-fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
-    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
-    Ok((
-        crate::plugins::db_settings(&given)
+        crate::plugins::db_settings(&layers)
             .map_err(anyhow::Error::msg)?
             .config(),
-        crate::plugins::superuser_settings(&given).map_err(anyhow::Error::msg)?,
+        crate::plugins::superuser_settings(&layers).map_err(anyhow::Error::msg)?,
     ))
 }
 "#;

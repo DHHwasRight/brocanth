@@ -498,8 +498,8 @@ The list cannot drift from the chain, because one call writes both:
 
 ```rust
 // brocanth_scaffold::snippet
-pub fn plugin(s: &mut Scaffold, project: &Project, key: &str, ty: &str) {
-    s.at(Slot::AppPlugins).block(plugin_line(project, key, ty));
+pub fn plugin(s: &mut Scaffold, key: &str, ty: &str) {
+    s.at(Slot::AppPlugins).block(plugin_line(key, ty));
     s.at(Slot::PluginsInstalled).line(format!("crate::plugins::{key}::{ty}"));
 }
 ```

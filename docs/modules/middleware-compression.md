@@ -13,7 +13,7 @@ The wizard calls it: *Compress pages for the browsers that ask*.
 | Part of | [`middleware`](middleware.md), off until you tick it |
 | Needs | none |
 | After | [`middleware-conditional-get`](middleware-conditional-get.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-middleware` (features `compression`) |

@@ -13,7 +13,7 @@ The wizard calls it: *HTML pages for a missing page and a failure*.
 | Part of | nothing |
 | Needs | none |
 | After | [`rsx`](rsx.md) |
-| Adapts to | [`config`](config.md), [`rsx`](rsx.md), [`i18n-routing`](i18n-routing.md) |
+| Adapts to | [`rsx`](rsx.md), [`i18n-routing`](i18n-routing.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-errors` (feature `config` with [`config`](config.md)) |

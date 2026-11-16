@@ -27,10 +27,6 @@ impl Module for CacheRedis {
         .because("it is a backend for the cache, so there is nothing to store in it without one")
         .asked_in("data", "")
         .provides::<CacheStore>("the cache, on a Redis or Valkey server")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .krate(Dep::brocanth("brocanth-cache-redis").note("the cache's Redis backend"))
         .after("cache")
     }

@@ -16,7 +16,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{
-    configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
+    configurable, integration, module_ref, redact_secrets, settings_derive,
 };
 use brocanth_scaffold::{
     AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, Manifest, Module,
@@ -90,10 +90,6 @@ impl Module for OauthClient {
         .contributes::<ConfigCheck>(Contribution::new("oauth-client", "`deploy/migrate` for `[oauth_client]`, while the tokens are in Postgres"), true)
         .contributes::<AgentsSection>(Contribution::new("oauth-client", "how to connect an account and call its API without reading a token"), true)
         .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
-        .adapts_to(
             "middleware-csrf",
             "the Connect and Disconnect forms carry the CSRF token",
         )
@@ -124,7 +120,6 @@ impl Module for OauthClient {
                 .feature_with("admin", "admin"),
         )
         .after("auth")
-        .after("config")
         .absent(
             "oauth-client",
             "no connected accounts; nothing calls a provider's API for a person",
@@ -147,9 +142,6 @@ impl Module for OauthClient {
             "OauthClientPlugin",
             settings(project.has("oauth-client-memory")),
         );
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         s.at(Slot::RouterMounts).line(format!(
             "    crate::plugins::oauth_client::mount(routes, {})?;",
             module_ref("oauth-client", "mount_at")

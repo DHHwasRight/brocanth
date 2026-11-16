@@ -71,7 +71,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive};
 use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, SessionCookie, Setting, Slot,
 };
@@ -100,10 +100,6 @@ impl Module for Auth {
         )
         .category(Category::Middleware)
         .category(Category::Enhancer)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .uses::<PgPool>("accounts and sessions are rows on the project's pool, not in memory")
         .provides::<SessionCookie>("a signed session cookie, with sign-in and sign-out")
         .adapts_to(
@@ -112,12 +108,6 @@ impl Module for Auth {
         )
         .asked_in("doors", "Accounts and passwords. No OAuth provider")
         .krate(Dep::brocanth("brocanth-auth").feature_with("db", "postgres"))
-        // Only for the order of the `[auth]` section and the builder line:
-        // the cookie name and the key's variable come out of the file the
-        // config plugin loaded, so this belongs under it rather than above
-        // it. Not a requirement -- without the config plugin `main` builds
-        // the settings from a literal and the compiler checks it.
-        .after("config")
         .absent(
             "brocanth-auth",
             "no accounts; nothing hashes a password and nothing signs a session cookie",
@@ -159,13 +149,6 @@ impl Module for Auth {
             \x20   );"
                 .to_string(),
         );
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait
-            // method, so the trait has to be in scope. Every plugin
-            // module needs the same line, and `use` twice does not
-            // compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 

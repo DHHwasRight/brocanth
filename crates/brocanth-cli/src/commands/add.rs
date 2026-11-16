@@ -87,6 +87,11 @@ pub struct AddArgs {
     /// With --questions: print JSON instead of text
     #[arg(long, requires = "questions")]
     pub json: bool,
+    /// The build-time options, `--<module>.<option>=VALUE`, as `(module,
+    /// option, value)`. `main` adds one argument per declared option and
+    /// fills this from the matches.
+    #[arg(skip)]
+    pub options: Vec<(String, String, String)>,
 }
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
@@ -171,7 +176,15 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     let before: BTreeMap<String, String> = create::scaffold(&answers(project.enabled.clone()))?
         .into_iter()
         .collect();
-    let after = create::scaffold(&answers(after_picks.clone()))?;
+    let mut after = create::scaffold(&answers(after_picks.clone()))?;
+    // `--<module>.<option>=VALUE`: written into a module file this add
+    // writes, and refused for one the project already has.
+    crate::choices::set_options(
+        &create::module_shapes(&answers(after_picks.clone()))?,
+        &mut after,
+        &args.options,
+        |path| !root.join(path).exists(),
+    )?;
 
     ui.heading("add", adding.join(", "));
     for line in &added {
@@ -964,6 +977,7 @@ mod tests {
                 force,
                 questions: false,
                 json: false,
+                options: Vec::new(),
             },
         )
     }
@@ -1320,6 +1334,7 @@ mod tests {
                 force: false,
                 questions: false,
                 json: false,
+                options: Vec::new(),
             },
         )
     }

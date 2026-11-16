@@ -18,11 +18,10 @@
 
 use brocanth_scaffold::snippet::{
     configurable, configurable_hooking, integration, redact_secrets, settings_derive, Hooking,
-    PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    AdminPanel, AgentsSection, Category, ConfigCheck, Contribution, Dep, Hook, Manifest, Module,
-    PgPool, Project, Scaffold, Setting, Slot, Tab,
+    AdminPanel, AgentsSection, Category, ConfigCheck, ConfigSource, Contribution, Dep, Hook,
+    Manifest, Module, PgPool, Project, Scaffold, Setting, Slot, Tab,
 };
 
 /// The parent: the crate both directions are written in.
@@ -81,13 +80,12 @@ impl Module for WebhooksIn {
         .asked_in("doors", "Receive webhooks: signature, replay window, idempotency key")
         .part_of("webhooks")
         .because("it is the incoming half of `brocanth-webhooks`, which the parent brings")
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .uses::<PgPool>("the idempotency keys are rows every instance shares; without it they are in memory")
         .contributes::<ConfigCheck>(Contribution::new("webhooks-in", "`deploy/migrate` for `[webhooks_in]`, while the keys are in Postgres"), true)
         .contributes::<AgentsSection>(Contribution::new("webhooks-in", "how a source is verified, and what a handler must not do"), true)
+        .uses::<ConfigSource>(
+            "the development secret is in the development file, so the default is empty and production must set one",
+        )
         // The idempotency keys in the database, when there is one.
         .krate(krate().feature_with("db", "postgres"))
         // The example event derives `Deserialize`. The config plugin brings
@@ -97,7 +95,6 @@ impl Module for WebhooksIn {
                 .feature("derive")
                 .note("a webhook's event is decoded from JSON"),
         )
-        .after("config")
         // Required: the hook is the module. A project that receives no
         // webhook removes the module, which a toggle cannot do.
         .hook(
@@ -230,7 +227,7 @@ fn incoming_rs(project: &Project, db: bool) -> String {
     // only, so a production file with no `secret` starts with none and is
     // refused. Without one, the literal is the only place to set it, and the
     // start refuses it outside development.
-    let default_secret = if project.has("config") {
+    let default_secret = if project.provider::<ConfigSource>().is_some() {
         "String::new()".to_string()
     } else {
         "DEVELOPMENT_SECRET.to_string()".to_string()
@@ -507,10 +504,6 @@ impl Module for WebhooksOut {
         .requires::<PgPool>("the endpoints and the delivery log are rows in the `db` module's database")
         .contributes::<ConfigCheck>(Contribution::new("webhooks-out", "`deploy/migrate` for `[webhooks_out]`"), true)
         .contributes::<AgentsSection>(Contribution::new("webhooks-out", "how to emit an event inside the caller's transaction"), true)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .krate(
             krate()
                 .feature("out")
@@ -521,7 +514,6 @@ impl Module for WebhooksOut {
             Dep::version("serde_json", "1").note("an outgoing event's payload is JSON"),
         )
         .after("jobs")
-        .after("config")
         .contributes::<AdminPanel>(
             Tab::new(
                 "webhooks",
@@ -545,9 +537,6 @@ impl Module for WebhooksOut {
             "WebhooksOut",
             outgoing_settings(),
         );
-        if !project.has("config") {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
         if project.collector::<AdminPanel>().is_some() {
             integration(s, "webhooks-out", "admin", Slot::AdminPanels, ADMIN_TAB);
         }

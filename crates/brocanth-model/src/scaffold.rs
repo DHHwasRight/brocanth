@@ -7,7 +7,7 @@
 //! Compiled only under the `scaffold` feature, which is off. The CLI takes
 //! it with no default features, so it links none of the ORM.
 
-use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{plugin, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Slot};
 
 /// The model layer.
@@ -33,10 +33,6 @@ impl Module for Model {
         .category(Category::Renderer)
         .requires::<PgPool>(
             "the ORM runs over the pool the `db` plugin opens, and without `db` there is none",
-        )
-        .adapts_to(
-            "config",
-            "`migrate` reads `[db]` from the config file, not the default literal",
         )
         .adapts_to("commands", "a `migrate` subcommand is written")
         .asked_in("data", "An ORM with validations and migrations")
@@ -75,21 +71,14 @@ impl Module for Model {
         // `make` and `sync`. Without a command line the tool still runs:
         // `cargo run --bin migrate -- make <name>`.
         if project.has("commands") {
-            s.file("src/commands/migrate.rs", migrate_rs(project));
+            s.file("src/commands/migrate.rs", migrate_rs());
             s.at(Slot::CommandsMod).line("pub mod migrate;");
         }
         s.at(Slot::PluginsMod).line("pub mod model;");
         // No settings: the URL and the pool are `[db]`'s. The plugin is
         // still registered, so it can publish the ORM.
-        plugin(s, project, "model", "Model");
+        plugin(s, "model", "Model");
         s.at(Slot::PagesItems).block(CTX_ORM.to_string());
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait
-            // method, so the trait has to be in scope. Every plugin
-            // module needs the same line, and `use` twice does not
-            // compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 
@@ -267,32 +256,16 @@ fn main() -> std::process::ExitCode {
 /// `brocanth migrate up` hands over to this command. It lives in the
 /// project because the migrations are compiled into the project's binary,
 /// and a container that has the binary and no `brocanth` can still run it.
-fn migrate_rs(project: &Project) -> String {
-    let url = if project.has("config") {
-        URL_FROM_CONFIG
-    } else {
-        URL_FROM_LITERAL
-    };
-    MIGRATE_RS.replace("@URL@", url)
+fn migrate_rs() -> String {
+    MIGRATE_RS.replace("@URL@", URL)
 }
 
-const URL_FROM_CONFIG: &str = r#"/// The pool's configuration: `[db]`, through the loader the server uses, so
-/// the files, `$<APP>_ENV` and `$<APP>_DB__URL` agree with what the server
-/// sees.
+const URL: &str = r#"/// The pool's configuration: `[db]`, as the server reads it, through every
+/// settings layer: the default, the module file, the files, the
+/// environment and the flags.
 fn database() -> anyhow::Result<DbConfig> {
-    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok(config
-        .section::<crate::plugins::db::Settings>("db")?
-        .config())
-}
-"#;
-
-const URL_FROM_LITERAL: &str = r#"/// The pool's configuration, as the server reads `[db]` without a file:
-/// the defaults in `src/plugins/db/mod.rs`, then `$<APP>_DB__URL` and the
-/// other variables, then the flags.
-fn database() -> anyhow::Result<DbConfig> {
-    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
-    let settings = crate::plugins::db_settings(&given).map_err(anyhow::Error::msg)?;
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&layers).map_err(anyhow::Error::msg)?;
     Ok(settings.config())
 }
 "#;

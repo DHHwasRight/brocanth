@@ -57,8 +57,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
 use brocanth_scaffold::{
-    AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, Project, Scaffold, Setting,
-    Slot,
+    AgentsSection, Category, ConfigSource, Contribution, Dep, Hook, Manifest, Module, Project,
+    Scaffold, Setting, Slot,
 };
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
@@ -199,10 +199,6 @@ impl Module for Csrf {
             true,
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "doors",
             "Refuse a form post this application did not hand out",
@@ -227,14 +223,9 @@ impl Module for Csrf {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let exempt = if project.has("config") {
-            // Not `/webhooks`: the `webhooks` module answers before this
-            // check and needs no entry, and its path is its own setting.
-            "        //     exempt = [\"/callbacks\"]    under [csrf] in config/<env>.toml\n"
-        } else {
-            "        //     a list has no flag: `brocanth add config` gives `exempt`\n\
-             \x20       //     a home under [csrf] in config/<env>.toml\n"
-        };
+        // Not `/webhooks`: the `webhooks` module answers before this check
+        // and needs no entry, and its path is its own setting.
+        let exempt = "        //     --csrf.exempt=/callbacks    a comma between two paths\n";
         configurable_hooking(
             s,
             project,
@@ -274,7 +265,7 @@ impl Module for Csrf {
 }
 
 /// The comment above the registration. `@EXEMPT@` is where an exempt path
-/// goes, which depends on whether there is a file.
+/// goes: a flag, which every project has.
 const CSRF_PRELUDE: &str = r#"
         // -- brocanth-middleware: CSRF ------------------------------------
         //
@@ -332,10 +323,6 @@ impl Module for SecurityHeaders {
             "gtag",
             "the CSP allows the consent script by hash and Google's origins",
         )
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in("doors", "Send the headers a browser reads as policy")
         .part_of("middleware")
         .because(
@@ -367,11 +354,8 @@ impl Module for SecurityHeaders {
             adjust.push_str(".page_script(brocanth_gtag::SCRIPT, brocanth_gtag::CSP)");
         }
         let adjust = (!adjust.is_empty()).then_some(adjust);
-        let behind_tls = if project.has("config") {
-            "`behind_tls = true` under\n        // [security_headers] in config/<env>.toml"
-        } else {
-            "`--security_headers.behind_tls=true`,\n        // or the environment variable `--help` names"
-        };
+        let behind_tls =
+            "`--security_headers.behind_tls=true`,\n        // or the environment variable `--help` names";
         configurable_hooking(
             s,
             project,
@@ -441,7 +425,7 @@ impl Module for SecurityHeaders {
 }
 
 /// The comment above the registration. `@BEHIND_TLS@` says where to set
-/// `behind_tls`, which depends on whether there is a file.
+/// `behind_tls`: a flag, which every project has.
 const SECURITY_HEADERS_PRELUDE: &str = r#"
         // -- brocanth-middleware: security headers ------------------------
         //
@@ -485,9 +469,8 @@ impl Module for RateLimit {
         )
         .contributes::<AgentsSection>(Contribution::new("middleware-rate-limit", "the example rule, and that a limit is asked for, not invented"), true)
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
+        .uses::<ConfigSource>(
+            "the rules are records: in the file when there is one, else code beside the registration",
         )
         .adapts_to(
             "auth-screens",
@@ -527,7 +510,8 @@ impl Module for RateLimit {
         });
         // The rules are records, so they live in the file when there is
         // one. Without it they are code: a list of records has no flag.
-        let (prelude, adjust) = if project.has("config") {
+        let file = project.provider::<ConfigSource>().is_some();
+        let (prelude, adjust) = if file {
             (RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_FILE), None)
         } else if let Some(paths) = &screen_paths {
             (
@@ -577,7 +561,7 @@ impl Module for RateLimit {
                 ),
             ],
         );
-        if project.has("config") {
+        if file {
             let rules = if let Some(paths) = &screen_paths {
                 RULES_TOML.replace("@PATHS@", paths)
             } else {
@@ -724,10 +708,6 @@ impl Module for ConditionalGet {
         )
         .contributes::<AgentsSection>(Contribution::new("middleware-conditional-get", "how a page sets an ETag or Last-Modified"), true)
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in("doors", "Answer 304 when the browser already has the page")
         .part_of_but_off("middleware")
         .because(
@@ -828,10 +808,6 @@ impl Module for Compression {
                 .feature_with("config", "config")
                 .feature("compression"),
         )
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in("doors", "Compress pages for the browsers that ask")
         .part_of_but_off("middleware")
         .because(
@@ -852,11 +828,7 @@ impl Module for Compression {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let types = if project.has("config") {
-            "the list is `types` under [compression] in config/<env>.toml"
-        } else {
-            "a list has no flag: `brocanth add config` gives `types` a home"
-        };
+        let types = "the list is `--compression.types`, a comma between two types";
         configurable_hooking(
             s,
             project,
@@ -950,10 +922,6 @@ impl Module for Flash {
             true,
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in("doors", "Show \"Saved\" on the page a form redirects to")
         .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
         .hook(

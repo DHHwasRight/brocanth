@@ -13,7 +13,7 @@ The wizard calls it: *Show "Saved" on the page a form redirects to*.
 | Part of | nothing |
 | Needs | none |
 | After | [`middleware-rate-limit`](middleware-rate-limit.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-middleware` (feature `config` with `config`) |

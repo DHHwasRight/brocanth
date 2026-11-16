@@ -13,7 +13,7 @@ The wizard calls it: *Limit how often one caller may hit a route*.
 | Part of | [`middleware`](middleware.md), off until you tick it |
 | Needs | none |
 | After | [`middleware-security-headers`](middleware-security-headers.md) |
-| Adapts to | [`config`](config.md), [`auth-screens`](auth-screens.md) |
+| Adapts to | [`auth-screens`](auth-screens.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | none |

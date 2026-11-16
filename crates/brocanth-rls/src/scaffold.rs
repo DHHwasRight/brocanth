@@ -49,10 +49,6 @@ impl Module for Rls {
             "admin-model",
             "AGENTS.md says the admin queries as the login role, so a FORCE table shows it no row",
         )
-        .adapts_to(
-            "config",
-            "`rls check` reads `[db] url` through the config loader, not from the environment alone",
-        )
         .krate(
             Dep::brocanth("brocanth-rls")
                 .note("roles, grants and policies in Rust, diffed into migrations"),
@@ -90,11 +86,6 @@ fn command_rs(project: &Project) -> String {
     } else {
         "Sql"
     };
-    let url = if project.has("config") {
-        URL_FROM_CONFIG
-    } else {
-        URL_FROM_ENV
-    };
     let doc = if project.has("model") {
         "a SeaORM migration, because the project has `model`"
     } else {
@@ -109,7 +100,7 @@ fn command_rs(project: &Project) -> String {
         .replace("@NEXT@", next)
         .replace("@FORMAT_DOC@", doc)
         .replace("@FORMAT@", format)
-        .replace("@URL@", url)
+        .replace("@URL@", URL)
 }
 
 /// `src/plugins/rls/mod.rs`.
@@ -244,21 +235,13 @@ impl Command for Rls {
 }
 @URL@"#;
 
-const URL_FROM_CONFIG: &str = r#"
-/// The pool's configuration: `[db]`, through the loader the server uses.
+const URL: &str = r#"
+/// The pool's configuration: `[db]`, as the server reads it, through every
+/// settings layer: the default, the module file, the files, the
+/// environment and the flags.
 fn database() -> anyhow::Result<DbConfig> {
-    let config = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok(config
-        .section::<crate::plugins::db::Settings>("db")?
-        .config())
-}
-"#;
-
-const URL_FROM_ENV: &str = r#"
-/// The pool's configuration, as the server reads `[db]` without a file.
-fn database() -> anyhow::Result<DbConfig> {
-    let given = crate::plugins::given().map_err(anyhow::Error::msg)?;
-    let settings = crate::plugins::db_settings(&given).map_err(anyhow::Error::msg)?;
+    let layers = crate::plugins::layers().map_err(anyhow::Error::msg)?;
+    let settings = crate::plugins::db_settings(&layers).map_err(anyhow::Error::msg)?;
     Ok(settings.config())
 }
 "#;

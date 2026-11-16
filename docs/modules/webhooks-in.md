@@ -14,7 +14,7 @@ The wizard calls it: *Receive webhooks: signature, replay window, idempotency ke
 | Needs | none |
 | Uses | `PgPool`: the idempotency keys are rows every instance shares; without it they are in memory |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md) |
+| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-webhooks` (feature `postgres` with `db`), `serde` |

@@ -16,9 +16,10 @@
 //!
 //! [`Robots::render`]: crate::Robots::render
 
-use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, Mount, MountRole, Opt, Project, Scaffold, Setting, Slot,
+    Category, ConfigSource, Dep, Manifest, Module, Mount, MountRole, Opt, Project, Scaffold,
+    Setting, Slot,
 };
 
 pub use crate::scaffold_sitemap::Sitemap;
@@ -33,11 +34,10 @@ impl Module for Robots {
             "a robots.txt from your settings, served at /robots.txt; closed outside production",
         )
         .category(Category::Routes)
-        .outside_runtime()
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
+        .uses::<ConfigSource>(
+            "the per-crawler groups are records, written to the file; the development file opens the site",
         )
+        .outside_runtime()
         .uses::<Mount>(
             "every `Backoffice` mount, such as the admin, is disallowed, at the path its module file mounts it",
         )
@@ -62,7 +62,6 @@ impl Module for Robots {
         )
         .asked_in("pages", "A robots.txt that says what crawlers may read")
         .krate(Dep::brocanth("brocanth-robots"))
-        .after("config")
         // The `i18n` plugin puts its negotiator in the services at
         // `configure`; this one reads it there.
         .after("i18n")
@@ -80,12 +79,10 @@ impl Module for Robots {
         s.at(Slot::PagesRoutes).line("/robots.txt");
         s.at(Slot::PluginsMod).line("pub mod robots;");
         configurable(s, project, "robots", "Robots", settings(project));
-        if project.has("config") {
+        if project.provider::<ConfigSource>().is_some() {
             // Groups are records, so they are file-only, as every list of
             // records is. Written commented out: an example, not a choice.
             s.at(Slot::ConfigSections).block(GROUPS_TOML.to_string());
-        } else {
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
         }
     }
 }
@@ -221,7 +218,7 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 /// What a fresh project answers before anybody edits the settings: the
 /// file's values with `config`, the plugin's default without it.
 fn expected(project: &Project) -> String {
-    let open = !project.has("config") || index_in_file(project);
+    let open = project.provider::<ConfigSource>().is_none() || index_in_file(project);
     let text = if open {
         let text = disallowed(project)
             .iter()
@@ -370,7 +367,7 @@ const LOCALIZED_ROUTING: &str =
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "robots");
-    let group_derive = if project.has("config") {
+    let group_derive = if project.provider::<ConfigSource>().is_some() {
         "#[derive(Debug, Clone, Default, serde::Deserialize)]\n#[serde(default, deny_unknown_fields)]"
     } else {
         "#[derive(Debug, Clone, Default)]"

@@ -141,10 +141,10 @@ impl fmt::Display for Format {
 
 /// Where one value came from.
 ///
-/// Five origins, and they are exhaustive: a value in a loaded configuration is
-/// a plugin's default, a line in a file, an environment variable, a flag on
-/// the command line, or a document the application embedded in its own
-/// source.
+/// Six origins, and they are exhaustive: a value in a loaded configuration is
+/// a plugin's default, a value the application's code sets, a line in a file,
+/// an environment variable, a flag on the command line, or a document the
+/// application embedded in its own source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Provenance {
     /// A registered plugin's own default. The framework decided, and this says
@@ -152,6 +152,12 @@ pub enum Provenance {
     Default {
         /// The section name the plugin was registered under.
         plugin: Arc<str>,
+    },
+    /// A value the application's own code sets, under every file: a module
+    /// file in `src/modules/`.
+    Code {
+        /// The source file that sets it, as a report names it.
+        file: Arc<str>,
     },
     /// A line in a file.
     File {
@@ -186,6 +192,14 @@ impl Provenance {
     pub fn default_of(plugin: &str) -> Self {
         Provenance::Default {
             plugin: Arc::from(plugin),
+        }
+    }
+
+    /// A value set in the application's code, by the source file `file`.
+    #[must_use]
+    pub fn code(file: &str) -> Self {
+        Provenance::Code {
+            file: Arc::from(file),
         }
     }
 
@@ -234,6 +248,7 @@ impl fmt::Display for Provenance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Provenance::Default { plugin } => write!(f, "default ({plugin})"),
+            Provenance::Code { file } => f.write_str(file),
             Provenance::File { file, line, .. } => {
                 write!(f, "{}:{line}", file.path.display())
             }

@@ -30,7 +30,7 @@
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
-use brocanth_scaffold::snippet::{configurable, settings_derive, PLUGIN_TRAIT_USE};
+use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
 
 /// The validation vocabulary, as a choice on the `brocanth create` menu.
@@ -46,19 +46,11 @@ impl Module for Validation {
             "a zod-shaped vocabulary; a handler takes Valid<T> or does not compile",
         )
         .category(Category::Middleware)
-        .adapts_to(
-            "config",
-            "its settings are read from the config file, not written as a literal",
-        )
         .asked_in(
             "doors",
             "A handler takes `Valid<T>`, or it does not compile",
         )
         .krate(Dep::brocanth("brocanth-schema"))
-        // Only for the order of the `[validation]` section and the builder
-        // line: the report style comes from the file the config plugin
-        // loaded, so this belongs under it rather than above it.
-        .after("config")
         .absent(
             "brocanth-schema",
             "no schema vocabulary; a body is checked by hand, or it is not checked",
@@ -79,12 +71,6 @@ impl Module for Validation {
             \x20   crate::plugins::say!(info, \"validation: reports as {style:?}\"; ?style);"
                 .to_string(),
         );
-        if !project.has("config") {
-            // The literal form calls `Plugin::new`, which is a trait method,
-            // so the trait has to be in scope. Every plugin module needs the
-            // same line, and `use` twice does not compile.
-            s.at(Slot::AppUses).once(PLUGIN_TRAIT_USE);
-        }
     }
 }
 
