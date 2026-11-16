@@ -1651,6 +1651,15 @@ pub const SETTINGS: &[Setting] = &[
         env: "MY_BLOG_DB__STATEMENT_TIMEOUT",
     },
     Setting {
+        path: "db.lock_timeout",
+        help: "Seconds a migration statement waits for a table lock. 0 waits forever.",
+        flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_DB__LOCK_TIMEOUT",
+    },
+    Setting {
         path: "db.search_path",
         help: "The schemas for a table name with no schema. Empty is the server's default.",
         flag: true,
@@ -2146,6 +2155,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.lock_timeout", format!("{:?}", db.lock_timeout)),
         ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
@@ -2251,6 +2261,7 @@ pub fn db_settings(given: &[Given]) -> Result<crate::plugins::db::Settings, Stri
             "db.acquire_timeout" => settings.acquire_timeout = parsed(given)?,
             "db.idle_timeout" => settings.idle_timeout = parsed(given)?,
             "db.statement_timeout" => settings.statement_timeout = parsed(given)?,
+            "db.lock_timeout" => settings.lock_timeout = parsed(given)?,
             "db.search_path" => settings.search_path = listed(given)?,
             "db.read_only" => settings.read_only = parsed(given)?,
             "db.application_name" => settings.application_name = parsed(given)?,
@@ -2314,6 +2325,7 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.lock_timeout", format!("{:?}", db.lock_timeout)),
         ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
@@ -2514,7 +2526,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 7e92f2b0a4f8d0d0
+// brocanth-digest: 9cc2aab4c58e6c1c
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2617,6 +2629,7 @@ pub mod db {
         AcquireTimeout,
         IdleTimeout,
         StatementTimeout,
+        LockTimeout,
         SearchPath,
         ReadOnly,
         ApplicationName,
@@ -2632,6 +2645,7 @@ pub mod db {
                 Key::AcquireTimeout => "db.acquire_timeout",
                 Key::IdleTimeout => "db.idle_timeout",
                 Key::StatementTimeout => "db.statement_timeout",
+                Key::LockTimeout => "db.lock_timeout",
                 Key::SearchPath => "db.search_path",
                 Key::ReadOnly => "db.read_only",
                 Key::ApplicationName => "db.application_name",
@@ -2773,7 +2787,7 @@ pub mod analytics {
     }
 }
 
-// brocanth-digest: 3bfbed316a788ba0
+// brocanth-digest: e9350fb7be8c0831
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2954,6 +2968,9 @@ pub struct Settings {
     pub idle_timeout: u64,
     /// Seconds before the server cancels a statement. 0 is no limit.
     pub statement_timeout: u64,
+    /// Seconds a migration statement waits for a table lock. 0 waits
+    /// forever. Only `migrate` sets it.
+    pub lock_timeout: u64,
     /// The schemas for a table name with no schema. Empty is the server's
     /// default.
     pub search_path: Vec<String>,
@@ -2978,6 +2995,7 @@ impl std::fmt::Debug for Settings {
             .field("acquire_timeout", &self.acquire_timeout)
             .field("idle_timeout", &self.idle_timeout)
             .field("statement_timeout", &self.statement_timeout)
+            .field("lock_timeout", &self.lock_timeout)
             .field("search_path", &self.search_path)
             .field("read_only", &self.read_only)
             .field("application_name", &self.application_name)
@@ -2995,6 +3013,7 @@ impl Default for Settings {
             acquire_timeout: 30,
             idle_timeout: 600,
             statement_timeout: 30,
+            lock_timeout: 10,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -3013,6 +3032,7 @@ impl Settings {
         config.acquire_timeout = Duration::from_secs(self.acquire_timeout);
         config.idle_timeout = seconds(self.idle_timeout);
         config.statement_timeout = seconds(self.statement_timeout);
+        config.lock_timeout = seconds(self.lock_timeout);
         config.search_path = self.search_path.clone();
         config.read_only = self.read_only;
         config.application_name =

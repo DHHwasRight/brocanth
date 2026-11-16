@@ -48,8 +48,9 @@ pub const TABLE: &str = "brocanth_migrations";
 const LOCK: i64 = 0x6272_6f63_616e_7468;
 
 /// How long a statement of a migration waits for a table lock before it
-/// fails. [`Migrator::lock_timeout`] changes it.
-pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+/// fails. [`Migrator::lock_timeout`] changes it, and `[db] lock_timeout`
+/// ([`crate::DbConfig::lock_timeout`]) sets it in a generated project.
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The line that separates the statements that apply a migration from the
 /// statements that undo it.

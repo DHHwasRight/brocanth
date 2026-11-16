@@ -1656,6 +1656,15 @@ pub const SETTINGS: &[Setting] = &[
         env: "MY_BLOG_DB__STATEMENT_TIMEOUT",
     },
     Setting {
+        path: "db.lock_timeout",
+        help: "Seconds a migration statement waits for a table lock. 0 waits forever.",
+        flag: true,
+        file: "src/modules/db.rs",
+        flags: crate::modules::db::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_DB__LOCK_TIMEOUT",
+    },
+    Setting {
         path: "db.search_path",
         help: "The schemas for a table name with no schema. Empty is the server's default.",
         flag: true,
@@ -2032,6 +2041,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.lock_timeout", format!("{:?}", db.lock_timeout)),
         ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
@@ -2104,6 +2114,7 @@ pub fn db_settings(given: &[Given]) -> Result<crate::plugins::db::Settings, Stri
             "db.acquire_timeout" => settings.acquire_timeout = parsed(given)?,
             "db.idle_timeout" => settings.idle_timeout = parsed(given)?,
             "db.statement_timeout" => settings.statement_timeout = parsed(given)?,
+            "db.lock_timeout" => settings.lock_timeout = parsed(given)?,
             "db.search_path" => settings.search_path = listed(given)?,
             "db.read_only" => settings.read_only = parsed(given)?,
             "db.application_name" => settings.application_name = parsed(given)?,
@@ -2142,6 +2153,7 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
             "db.statement_timeout",
             format!("{:?}", db.statement_timeout),
         ),
+        ("db.lock_timeout", format!("{:?}", db.lock_timeout)),
         ("db.search_path", format!("{:?}", db.search_path)),
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
@@ -2293,7 +2305,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 01c3fc50e5cab24d
+// brocanth-digest: 22441f9e3ec10197
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2396,6 +2408,7 @@ pub mod db {
         AcquireTimeout,
         IdleTimeout,
         StatementTimeout,
+        LockTimeout,
         SearchPath,
         ReadOnly,
         ApplicationName,
@@ -2411,6 +2424,7 @@ pub mod db {
                 Key::AcquireTimeout => "db.acquire_timeout",
                 Key::IdleTimeout => "db.idle_timeout",
                 Key::StatementTimeout => "db.statement_timeout",
+                Key::LockTimeout => "db.lock_timeout",
                 Key::SearchPath => "db.search_path",
                 Key::ReadOnly => "db.read_only",
                 Key::ApplicationName => "db.application_name",
@@ -2473,7 +2487,7 @@ pub mod rls {
     }
 }
 
-// brocanth-digest: 9625008ef5c622f2
+// brocanth-digest: 5c32ed60395f6c0b
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2742,7 +2756,7 @@ use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
-use brocanth_model::Orm;
+use brocanth_model::{migrating, Orm};
 
 use crate::migrations::Migrator;
 
@@ -2819,8 +2833,10 @@ fn apply(what: Apply) -> anyhow::Result<()> {
     let mut config = database()?;
     // The server's limits are not a migration's: a long `ALTER TABLE` must
     // not hit the statement timeout, and a read-only pool cannot migrate.
+    // `lock_timeout` is the migration's own: `[db] lock_timeout`.
     config.statement_timeout = None;
     config.read_only = false;
+    let lock_timeout = config.lock_timeout;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
@@ -2834,24 +2850,23 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             Apply::Down(_) => "migrate down",
             Apply::Status => "migrate status",
         };
-        let before = orm
-            .migrate_locked(async |txn| {
-                let before = Migrator::get_migration_with_status(txn).await?;
-                match what {
-                    Apply::Up => Migrator::up(txn, None).await?,
-                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
-                    Apply::Status => {}
-                }
-                Ok(before)
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "{verb} failed, and nothing of it was kept\n\
-                     help: read the database error below, fix the migration it names, then \
-                     run `{verb}` again; `migrate status` lists what is applied"
-                )
-            })?;
+        let before = migrating::locked(orm.connection(), lock_timeout, async |txn| {
+            let before = Migrator::get_migration_with_status(txn).await?;
+            match what {
+                Apply::Up => Migrator::up(txn, None).await?,
+                Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                Apply::Status => {}
+            }
+            Ok(before)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "{verb} failed, and nothing of it was kept\n\
+                 help: read the database error below, fix the migration it names, then \
+                 run `{verb}` again; `migrate status` lists what is applied"
+            )
+        })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()
@@ -3246,6 +3261,9 @@ pub struct Settings {
     pub idle_timeout: u64,
     /// Seconds before the server cancels a statement. 0 is no limit.
     pub statement_timeout: u64,
+    /// Seconds a migration statement waits for a table lock. 0 waits
+    /// forever. Only `migrate` sets it.
+    pub lock_timeout: u64,
     /// The schemas for a table name with no schema. Empty is the server's
     /// default.
     pub search_path: Vec<String>,
@@ -3270,6 +3288,7 @@ impl std::fmt::Debug for Settings {
             .field("acquire_timeout", &self.acquire_timeout)
             .field("idle_timeout", &self.idle_timeout)
             .field("statement_timeout", &self.statement_timeout)
+            .field("lock_timeout", &self.lock_timeout)
             .field("search_path", &self.search_path)
             .field("read_only", &self.read_only)
             .field("application_name", &self.application_name)
@@ -3287,6 +3306,7 @@ impl Default for Settings {
             acquire_timeout: 30,
             idle_timeout: 600,
             statement_timeout: 30,
+            lock_timeout: 10,
             search_path: Vec::new(),
             read_only: false,
             application_name: "my-blog".to_string(),
@@ -3305,6 +3325,7 @@ impl Settings {
         config.acquire_timeout = Duration::from_secs(self.acquire_timeout);
         config.idle_timeout = seconds(self.idle_timeout);
         config.statement_timeout = seconds(self.statement_timeout);
+        config.lock_timeout = seconds(self.lock_timeout);
         config.search_path = self.search_path.clone();
         config.read_only = self.read_only;
         config.application_name =

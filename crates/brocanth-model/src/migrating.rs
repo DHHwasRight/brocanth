@@ -33,8 +33,9 @@ use sea_orm::{
 pub const LOCK: i64 = 0x6272_6f63_6d6f_646c; // "brocmodl"
 
 /// How long a statement of a migration waits for a table lock before it
-/// fails, unless the caller passes another value.
-pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+/// fails, unless the caller passes another value: a generated `migrate`
+/// passes `[db] lock_timeout`. The same as `brocanth-db`'s.
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs `f` in a transaction that holds the migration lock.
 ///
@@ -83,7 +84,28 @@ pub async fn locked<T>(
             // The error of `f` says why. A failed rollback closes the
             // connection, and its transaction does not commit.
             let _ = txn.rollback().await;
-            Err(e)
+            Err(with_lock_help(e))
         }
     }
+}
+
+/// A `lock_timeout` failure (SQLSTATE `55P03`), with a `help:` line that
+/// names the setting. Any other error comes back unchanged.
+fn with_lock_help(e: DbErr) -> DbErr {
+    let timed_out = match &e {
+        DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(sqlx)) => sqlx
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code == "55P03"),
+        _ => false,
+    };
+    if !timed_out {
+        return e;
+    }
+    DbErr::Custom(format!(
+        "{e}\nhelp: a migration statement waited longer than `lock_timeout` for a table \
+         another session holds; run `migrate` again when that session ends, or raise \
+         `[db] lock_timeout`"
+    ))
 }
