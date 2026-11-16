@@ -35,24 +35,26 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {path} in the project"))
 }
 
-/// Alone, the cache opens a pool of its own from `[cache] url`, and
-/// `brocanth-cache` takes its `postgres` feature.
+/// The Postgres cache requires the project's pool and opens none of its
+/// own. The generator does not add `db` (the front doors do), so a
+/// selection without it is refused with the fix.
 #[test]
-fn the_cache_alone_opens_its_own_pool() {
-    let files = shape("cache", &["config", "cache"]);
-    let plugin = file(&files, "src/plugins/cache/mod.rs");
-    assert!(plugin.contains("PgCache::connect_lazy(&self.settings.url)"));
-    assert!(plugin.contains("Sweeper::spawn"));
-    assert!(file(&files, "Cargo.toml").contains("\"postgres\""));
+fn the_cache_alone_requires_the_pool() {
+    let wrong = brocanth_cli::testing::generate("my-app", &["config", "cache"], &[&Cache])
+        .expect_err("refused without a pool");
+    assert!(wrong.contains("`cache` requires PgPool"), "{wrong}");
+    assert!(wrong.contains("db"), "{wrong}");
 }
 
-/// With `db`, the cache reads the `db` pool, has no `url` of its own, and
-/// with `admin` adds its tab behind `integrate.admin`.
+/// The cache reads the `db` pool, has no `url` of its own, and with
+/// `admin` adds its tab behind `integrate.admin`.
 #[test]
 fn with_db_the_cache_reuses_the_pool_and_the_admin_gets_a_tab() {
     let files = shape("cache-db", &["config", "db", "cache", "admin"]);
     let plugin = file(&files, "src/plugins/cache/mod.rs");
     assert!(plugin.contains("PgCache::from_pool(db.pool().clone())"));
+    assert!(plugin.contains("Sweeper::spawn"));
+    assert!(file(&files, "Cargo.toml").contains("\"postgres\""));
     assert!(!plugin.contains("pub url: String"));
     assert!(!file(&files, "config/development.toml").contains("[cache]\nurl"));
     let plugins = file(&files, "src/plugins/mod.rs");

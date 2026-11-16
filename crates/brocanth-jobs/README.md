@@ -50,8 +50,9 @@ The module writes `src/plugins/jobs/mod.rs`: a plugin that opens the
 queue, starts a worker in the process, and puts the `Queue` on the request
 context. Where the jobs live depends on the other modules:
 
-- with `db`, the queue runs on the `db` pool, and `[jobs]` has no `url`;
-- without `db`, the queue opens its own pool from `[jobs] url`;
+- in Postgres, the queue requires the project's pool (`PgPool`), so
+  `brocanth create --with jobs` adds `db`. It runs on the `db` database,
+  and `[jobs]` has no `url`;
 - with `jobs-memory` (a child of `jobs`, off by default), the queue lives
   in the process. `brocanth check --deploy` reports it as an error
   (`deploy/development-only`).

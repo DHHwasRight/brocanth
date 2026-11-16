@@ -18,7 +18,9 @@
 use brocanth_scaffold::snippet::{
     configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// The built-in providers this module declares settings for.
 pub const PROVIDERS: &[&str] = &["github", "google", "microsoft", "gitlab"];
@@ -79,10 +81,7 @@ impl Module for OauthClient {
             "auth",
             "a connection belongs to a signed-in account, and `auth` holds the sessions",
         )
-        .needs(
-            "db",
-            "the tokens are rows in the `db` module's database; a restart must not drop them",
-        )
+        .requires::<PgPool>("the tokens are rows in the `db` module's database; a restart must not drop them")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -111,7 +110,6 @@ impl Module for OauthClient {
                 .feature_with("admin", "admin"),
         )
         .after("auth")
-        .after("db")
         .after("config")
         .absent(
             "oauth-client",

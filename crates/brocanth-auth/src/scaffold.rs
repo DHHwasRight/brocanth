@@ -62,15 +62,19 @@
 //!
 //! # Where the store lives
 //!
-//! `MemoryStore` alone, and `PgStore` when the project has a Postgres module
-//! ([`POSTGRES_WITH`]): the `postgres` feature is declared on the `Dep`
-//! with `feature_with`, so the CLI holds no rule for this crate.
+//! `MemoryStore` alone, and `PgStore` on the project's one pool when it has
+//! one (`uses::<PgPool>`): the plugin reads `brocanth_db::Db` from the
+//! services the `db` plugin fills, and opens no pool of its own. The
+//! `postgres` feature is declared on the `Dep` with `feature_with`, so the
+//! CLI holds no rule for this crate.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
 //! dependency comment in `Cargo.toml`.
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 mod lockout;
 mod oauth;
@@ -100,33 +104,19 @@ impl Module for Auth {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "jobs",
-            "accounts live in the queue's Postgres, not in memory",
-        )
-        .adapts_to(
-            "cache",
-            "accounts live in the cache's Postgres, not in memory",
-        )
-        .adapts_to(
-            "db",
-            "with jobs or cache, accounts use the pool the db plugin opens, and [auth] has no url",
-        )
+        .uses::<PgPool>("accounts and sessions are rows on the project's pool, not in memory")
         .adapts_to(
             "auth-oauth",
             "the session cookie is SameSite=Lax, so the provider callback sees who is signed in",
         )
         .asked_in("doors", "Accounts and passwords. No OAuth provider")
-        .krate(postgres_with(Dep::brocanth("brocanth-auth")))
+        .krate(Dep::brocanth("brocanth-auth").feature_with("db", "postgres"))
         // Only for the order of the `[auth]` section and the builder line:
         // the cookie name and the key's variable come out of the file the
         // config plugin loaded, so this belongs under it rather than above
         // it. Not a requirement -- without the config plugin `main` builds
         // the settings from a literal and the compiler checks it.
         .after("config")
-        // With `db`, `before_start` reads the pool the db plugin published,
-        // so that plugin registers first.
-        .after("db")
         .absent(
             "brocanth-auth",
             "no accounts; nothing hashes a password and nothing signs a session cookie",
@@ -178,31 +168,16 @@ impl Module for Auth {
     }
 }
 
-/// The modules that put a Postgres database in a project.
-///
-/// With one of them, accounts and sessions go to Postgres too: the
-/// generated plugin is `PgStore`, and this crate's `postgres` feature is on
-/// (see [`postgres_with`]). Without one, the store stays `MemoryStore`.
-/// `model` needs `db`, so `db` covers it.
-pub const POSTGRES_WITH: &[&str] = &["jobs", "cache", "db"];
-
-/// `dep` with the `postgres` feature on for each key of [`POSTGRES_WITH`],
-/// so the CLI needs no rule of its own for this crate.
-fn postgres_with(dep: Dep) -> Dep {
-    POSTGRES_WITH
-        .iter()
-        .fold(dep, |dep, key| dep.feature_with(key, "postgres"))
-}
-
-/// Whether this project's accounts live in Postgres. See [`POSTGRES_WITH`].
+/// Whether this project's accounts live in Postgres: on the project's one
+/// pool, when it has one.
 pub fn uses_postgres(project: &Project) -> bool {
-    // Every key is asked, not the first that answers yes: a module that
-    // declares each one as an adaptation must read each one in every run.
-    POSTGRES_WITH.iter().filter(|key| project.has(key)).count() > 0
+    project.provider::<PgPool>().is_some()
 }
 
-/// The plugin over `PgStore`: the `MemoryStore` file, with the store opened
-/// and migrated in `before_start`, and a sweep of dead rows.
+/// The plugin over `PgStore`: the `MemoryStore` file, with the store on
+/// the pool the `db` plugin opened, migrated by the readiness check, and a
+/// sweep of dead rows. No URL of its own and no second pool: one set of
+/// connections that `[db] max_connections` sizes.
 ///
 /// Written as edits of [`plugin_rs`], so the two files cannot drift on the
 /// parts they share. Each edit is checked: a pattern that is gone is a
@@ -213,68 +188,8 @@ fn postgres_plugin_rs(project: &Project) -> String {
         assert!(text.contains(from), "the auth scaffold lost `{from}`");
         text = text.replacen(from, to, 1);
     }
-    if project.has("db") {
-        text = on_the_db_pool(&text);
-    }
     text
 }
-
-/// The `PgStore` file on the pool the `db` plugin opened: no `[auth] url`,
-/// no second pool, and one set of connections that `[db] max_connections`
-/// sizes, as `jobs` and `cache` do with `db`.
-fn on_the_db_pool(text: &str) -> String {
-    let mut text = text.to_string();
-    for (from, to) in DB_EDITS {
-        assert!(text.contains(from), "the auth scaffold lost `{from}`");
-        text = text.replacen(from, to, 1);
-    }
-    // `configure` checked only the URL, so with no URL it goes.
-    let configure = "    fn configure(&mut self, _lc: &mut Lifecycle<'_>)";
-    let start = text
-        .find(configure)
-        .expect("the auth scaffold lost its `configure`");
-    let end = start
-        + text[start..]
-            .find("    fn before_start(")
-            .expect("the auth scaffold lost its `before_start`");
-    text.replace_range(start..end, "");
-    // The pool: the `db` plugin's, not a new one.
-    let open = "        // The hooks are synchronous and opening a pool is not";
-    let start = text.find(open).expect("the auth scaffold lost its pool");
-    let close = "        };\n";
-    let end = start
-        + text[start..]
-            .find(close)
-            .expect("the auth scaffold lost its pool")
-        + close.len();
-    text.replace_range(
-        start..end,
-        "        // The pool the `db` plugin opened, which registers before this one:\n\
-         \x20       // one set of connections for the pages and the accounts.\n\
-         \x20       let db = lc.require_service::<brocanth_db::Db>()?;\n\
-         \x20       let store = PgStore::from_pool(db.pool().clone());\n",
-    );
-    text
-}
-
-const DB_EDITS: &[(&str, &str)] = &[
-    (
-        "`brocanth_auth_*` tables of `[auth] url`, so they survive a restart and",
-        "`brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and",
-    ),
-    (
-        "/// Postgres, at `[auth] url`. See the file header.",
-        "/// Postgres, on the pool the `db` plugin opened. See the file header.",
-    ),
-    (
-        "    /// The Postgres database the accounts and sessions live in.\n    pub url: String,\n",
-        "",
-    ),
-    (
-        "            url: \"postgres://localhost/development\".to_string(),\n",
-        "",
-    ),
-];
 
 const POSTGRES_EDITS: &[(&str, &str)] = &[
     (
@@ -283,12 +198,11 @@ const POSTGRES_EDITS: &[(&str, &str)] = &[
 //!    for everybody and a deploy loses every account. That is the one thing
 //!    in this file to replace before anybody else uses this application.
 //!    Do not write a store: `brocanth-auth` has `PgStore` behind its
-//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
-//!    and generate again, and this file is written over `PgStore`, with the
-//!    pool opened lazily in `before_start` and the tables made by a
-//!    readiness check.",
+//!    `postgres` feature. Add the `db` module (`brocanth add db`), and
+//!    this file is written over `PgStore`, on the pool `db` opens, with the
+//!    tables made by a readiness check.",
         "//! 1. **`Store = PgStore`.** Accounts and sessions are rows in the\n\
-//!    `brocanth_auth_*` tables of `[auth] url`, so they survive a restart and\n\
+//!    `brocanth_auth_*` tables of the `db` plugin's database, so they survive a restart and\n\
 //!    a deploy. The pool is built in `before_start` with no connection, and\n\
 //!    the readiness check that `serve` awaits before it listens runs\n\
 //!    `migrate` once (it is idempotent and takes an advisory lock). To review\n\
@@ -307,23 +221,8 @@ const POSTGRES_EDITS: &[(&str, &str)] = &[
     (
         "/// In memory, for now. See the file header: this is the line to change first.
 pub type Store = MemoryStore;",
-        "/// Postgres, at `[auth] url`. See the file header.
+        "/// Postgres, on the pool the `db` plugin opened. See the file header.
 pub type Store = PgStore;",
-    ),
-    (
-        "pub struct Settings {
-",
-        "pub struct Settings {
-    /// The Postgres database the accounts and sessions live in.
-    pub url: String,
-",
-    ),
-    (
-        "        Self {
-            signing_key_env:",
-        "        Self {
-            url: \"postgres://localhost/development\".to_string(),
-            signing_key_env:",
     ),
     (
         "    /// Built at `configure`, so this is an `Option` for exactly the length of
@@ -352,17 +251,7 @@ pub type Store = PgStore;",
     (
         "    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {",
-        "    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        if self.settings.url.is_empty() {
-            return Err(PluginError::new(
-                \"[auth] url is required; accounts live in a Postgres database\\n\\
-                 help: set `url` under [auth] in the config file, or the variable for `auth.url`\",
-            ));
-        }
-        Ok(())
-    }
-
-    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        "    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
         if self.settings.cookie_name.is_empty() {",
     ),
     (
@@ -373,21 +262,10 @@ pub type Store = PgStore;",
         // `before_start`, where it builds the pool lazily and registers a
         // readiness check that `serve` awaits. `brocanth-cache` does that.
         self.services = Some(",
-        "        // The hooks are synchronous and opening a pool is not, so the pool
-        // opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                \"[auth] needs a Tokio runtime at startup to open its pool ({e})\\n\\
-                 help: build the application inside the runtime that serves it\"
-            ))
-        })?;
-        let store = {
-            let _entered = runtime.enter();
-            PgStore::connect_lazy(&self.settings.url)
-                .map_err(|e| PluginError::new(format!(\"[auth] {e}\")))?
-        };
+        "        // The pool the `db` plugin opened, which registers before this one:
+        // one set of connections for the pages and the accounts.
+        let db = lc.require_service::<brocanth_db::Db>()?;
+        let store = PgStore::from_pool(db.pool().clone());
         let store = Arc::new(store);
         self.store = Some(Arc::clone(&store));
         // Ready when the database answers. The first check also creates the
@@ -480,21 +358,6 @@ const LAX: &str = "            // Lax, because `auth-oauth` is on. The provider 
 fn settings(project: &Project) -> Vec<Setting> {
     let var = env_var(project);
     let mut out = Vec::new();
-    // With `db`, the accounts use its pool and `[auth]` has no URL.
-    if uses_postgres(project) && !project.has("db") {
-        out.push(
-            Setting::text(
-                "url",
-                "postgres://localhost/development",
-                "The Postgres database for accounts and sessions.",
-            )
-            .note(
-                "The tables are created at startup, named brocanth_auth_*. A URL can\n\
-                 carry a password, so no flag sets it.",
-            )
-            .secret(),
-        );
-    }
     out.push(
         Setting::text(
             "signing_key_env",
@@ -634,10 +497,9 @@ fn plugin_rs(project: &Project) -> String {
 //!    for everybody and a deploy loses every account. That is the one thing
 //!    in this file to replace before anybody else uses this application.
 //!    Do not write a store: `brocanth-auth` has `PgStore` behind its
-//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
-//!    and generate again, and this file is written over `PgStore`, with the
-//!    pool opened lazily in `before_start` and the tables made by a
-//!    readiness check.
+//!    `postgres` feature. Add the `db` module (`brocanth add db`), and
+//!    this file is written over `PgStore`, on the pool `db` opens, with the
+//!    tables made by a readiness check.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is

@@ -1465,6 +1465,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (flags requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2105,7 +2106,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 048a4e10c8c0a838
+// brocanth-digest: 4c6b28016ce964e5
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3294,6 +3295,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "db", "admin", "flags"]
 
+[bindings]
+PgPool = { provider = "db", why = "flags requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3326,4 +3330,4 @@ config = ["flags"]
 crates = ["brocanth-flags"]
 adapted_to = ["config", "admin"]
 
-# brocanth-digest: 8bf63380df1fd2fb
+# brocanth-digest: 762ec3821a7fb0fe

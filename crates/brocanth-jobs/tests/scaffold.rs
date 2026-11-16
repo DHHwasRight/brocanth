@@ -28,7 +28,7 @@ fn shape(name: &str, picks: &[&'static str]) {
 /// environment.
 #[test]
 fn the_queue_without_a_config_file() {
-    shape("jobs-flags", &["jobs"]);
+    shape("jobs-flags", &["db", "jobs"]);
 }
 
 /// The queue on the `db` pool, with a command line and no admin: no `url`

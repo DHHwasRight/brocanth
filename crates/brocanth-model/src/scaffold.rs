@@ -8,7 +8,7 @@
 //! it with no default features, so it links none of the ORM.
 
 use brocanth_scaffold::snippet::{plugin, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Slot};
 
 /// The model layer.
 ///
@@ -31,8 +31,7 @@ impl Module for Model {
         // `ctx.orm()` is an `impl Ctx` in `src/pages/mod.rs`, a slot the
         // renderers own.
         .category(Category::Renderer)
-        .needs(
-            "db",
+        .requires::<PgPool>(
             "the ORM runs over the pool the `db` plugin opens, and without `db` there is none",
         )
         .adapts_to(

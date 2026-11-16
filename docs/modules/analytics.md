@@ -11,8 +11,9 @@ The wizard calls it: *Count page views on the server: no cookie, no script, no t
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`db`](db.md): the views are rows in the database the `db` module opens |
-| After | [`db`](db.md) |
+| Needs | none |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | none |
 | Adapts to | [`config`](config.md), [`admin`](admin.md) |
 | Conflicts | [`beacon`](beacon.md): both would count one page: the hook on the server, and the beacon in the browser; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

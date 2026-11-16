@@ -1525,6 +1525,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (oauth-client requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2443,7 +2444,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: cd576ddfc641fee8
+// brocanth-digest: 6ca5fb29db0a491b
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4746,6 +4747,9 @@ title = "My App"
 [modules]
 enabled = ["config", "db", "auth", "middleware", "middleware-csrf", "admin", "oauth", "oauth-client"]
 
+[bindings]
+PgPool = { provider = "db", why = "oauth-client requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -4810,4 +4814,4 @@ config = ["oauth_client"]
 crates = ["brocanth-oauth-client"]
 adapted_to = ["config", "middleware-csrf", "admin"]
 
-# brocanth-digest: 4707b4a77cefd4b1
+# brocanth-digest: b1874a8ae7df05a4

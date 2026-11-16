@@ -1624,6 +1624,7 @@ macro_rules! register {
         // environment, then the flags.
         let given = crate::plugins::given()?;
         let builder = $builder;
+        // PgPool <- db (search requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::db::Database::new(
             crate::plugins::db_settings(&given)?,
         ));
@@ -2237,7 +2238,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: a9a197b1cfa5ac13
+// brocanth-digest: 79a971eb2530177f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3655,6 +3656,9 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "db", "policy", "pagination", "filters", "search"]
 
+[bindings]
+PgPool = { provider = "db", why = "search requires PgPool" }
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -3703,4 +3707,4 @@ config = []
 crates = ["brocanth-search"]
 adapted_to = ["rsx"]
 
-# brocanth-digest: 97bc00e34cae4a89
+# brocanth-digest: 8339b1645ef8d7c1

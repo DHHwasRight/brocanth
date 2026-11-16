@@ -1447,6 +1447,7 @@ macro_rules! register {
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
         let builder = $builder.with_config(config);
+        // PgPool <- db (jobs requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2025,7 +2026,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 566001afc6555808
+// brocanth-digest: 076bddd80ce44fca
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3570,6 +3571,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "db", "jobs", "commands"]
 
+[bindings]
+PgPool = { provider = "db", why = "jobs requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3592,7 +3596,7 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config", "db"]
+adapted_to = ["config"]
 
 [modules.commands]
 version = "0.1.0"
@@ -3602,4 +3606,4 @@ config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: 4f801167a8d46e3f
+# brocanth-digest: f3d3e394d18a13d5

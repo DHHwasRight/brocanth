@@ -1466,6 +1466,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (jobs requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2201,7 +2202,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 2cff9239ce1d75e5
+// brocanth-digest: 7625045b3634605b
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3810,6 +3811,9 @@ title = "My Shop"
 [modules]
 enabled = ["config", "db", "jobs", "admin", "webhooks", "webhooks-out"]
 
+[bindings]
+PgPool = { provider = "db", why = "jobs requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3832,7 +3836,7 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config", "db", "admin"]
+adapted_to = ["config", "admin"]
 
 [modules.admin]
 version = "0.1.0"
@@ -3858,4 +3862,4 @@ config = ["webhooks_out"]
 crates = ["brocanth-webhooks", "serde_json"]
 adapted_to = ["config", "admin"]
 
-# brocanth-digest: a2215d63818ca0ef
+# brocanth-digest: 24e7674499171b61

@@ -40,7 +40,7 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, Opt, Project, Scaffold, Setting, Slot,
+    Category, Dep, Hook, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
@@ -66,8 +66,7 @@ impl Module for FileStorage {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "db",
+        .uses::<PgPool>(
             "the objects live in the `db` database, on its pool, and not on one machine's disk",
         )
         .asked_in(
@@ -79,9 +78,6 @@ impl Module for FileStorage {
         // the store reads its root and its secret from the file the config
         // plugin loaded, so it belongs under it rather than above it.
         .after("config")
-        // With `db`, the plugin reads the pool the `db` plugin publishes in
-        // its `before_start`, so it registers after it.
-        .after("db")
         .absent(
             "brocanth-storage",
             "no file storage; an upload has nowhere to go and no address to be read back from",
@@ -89,7 +85,7 @@ impl Module for FileStorage {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let db = project.has("db");
+        let db = project.provider::<PgPool>().is_some();
         s.file(
             "src/plugins/storage/mod.rs",
             redact_secrets(&plugin_rs(project, db), &settings(db)),

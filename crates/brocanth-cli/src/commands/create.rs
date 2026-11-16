@@ -37,6 +37,7 @@ use clap::Args;
 use crate::tui::{Choice, Draft};
 
 use crate::commands::Outcome;
+use crate::resolve::Added;
 use crate::ui::{Cell, Diagnostic, Table, Ui, ACCENT, DIM, STRONG};
 
 /// Where the generated `Cargo.toml` points for the framework itself.
@@ -276,7 +277,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
     }
     // A name on the command line means nobody was asked: see `ask`.
     let driven = args.name.is_some();
-    let answers = ask(ui, &args)?;
+    let (answers, added) = ask(ui, &args)?;
     // `-C` is where to create it. Everywhere else it means "the package root",
     // and here there is no package yet, so it is the directory to put one in.
     let root = dir.unwrap_or(Path::new(".")).join(&answers.name);
@@ -289,6 +290,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
     }
 
     ui.heading("create", &answers.name);
+    // A module a requirement brought, said before anything is written: the
+    // flags did not name it, so the reader learns it here.
+    for line in &added {
+        ui.note(format!("  {}", line.line()));
+    }
 
     let files = scaffold(&answers)?;
     let mut table = Table::new();
@@ -346,6 +352,16 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
                 ]);
             }
         }
+        // And the Kinds it uses that have a provider here.
+        let bound = crate::resolve::bindings(&answers.picks);
+        for (kind, what) in &about(pick).uses {
+            if let Some((_, provider)) = bound.iter().find(|(k, _)| *k == kind.name) {
+                contents.row(vec![
+                    Cell::styled("", DIM),
+                    Cell::styled(format!("with {kind} from {provider}: {what}"), DIM),
+                ]);
+            }
+        }
     }
     for pick in available().iter().filter(|p| !answers.has(p)) {
         contents.row(vec![
@@ -398,9 +414,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
 
 // -- the answers ------------------------------------------------------------
 
-fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
+fn ask(ui: &Ui, args: &CreateArgs) -> Result<(Answers, Vec<Added>), Vec<Diagnostic>> {
     let local = local_checkout(args)?;
-    selection(&picked(args), Door::Create)?;
+    let (picks, added) = crate::resolve::resolve(&picked(args), Door::Create)?;
+    selection(&picks, Door::Create)?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -420,10 +437,14 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
                  --core-only, --git/--no-git",
             )]);
         }
-        let answers = chooser(ui, args, local)?;
+        let mut answers = chooser(ui, args, local)?;
         check_title(&answers.title)?;
+        // The chooser ticks the provider of a requirement it can see; a
+        // requirement a child lifts is resolved here, and said.
+        let (picks, added) = crate::resolve::resolve(&answers.picks, Door::Create)?;
+        answers.picks = picks;
         selection(&answers.picks, Door::Create)?;
-        return Ok(answers);
+        return Ok((answers, added));
     }
 
     let name = args.name.clone().expect("the None arm returned above");
@@ -434,15 +455,19 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<Answers, Vec<Diagnostic>> {
         .unwrap_or_else(|| crate::ui::title_case(&name));
     check_title(&title)?;
 
-    Ok(Answers {
-        name,
-        title,
-        picks: picked(args),
-        local,
-        // Neither flag means no repository. Stated, not guessed: the receipt
-        // this command prints names `--git` as the way to change it.
-        git: args.git,
-    })
+    Ok((
+        Answers {
+            name,
+            title,
+            picks,
+            local,
+            // Neither flag means no repository. Stated, not guessed: the
+            // receipt this command prints names `--git` as the way to
+            // change it.
+            git: args.git,
+        },
+        added,
+    ))
 }
 
 /// What the flags alone say goes in the binary.
@@ -482,7 +507,7 @@ pub enum Door {
 
 impl Door {
     /// The help line that brings `missing` into a selection of `picks`.
-    fn bring(self, picks: &[&str], missing: &str, pick: &str) -> String {
+    pub fn bring(self, picks: &[&str], missing: &str, pick: &str) -> String {
         match self {
             Door::Create => {
                 let mut with: Vec<&str> = picks.iter().copied().chain([missing]).collect();
@@ -502,11 +527,29 @@ impl Door {
 /// can write a project that a refusal would have stopped. A child without
 /// its parent and a module without what it needs are refused, never filled
 /// in: a flag that quietly adds a module is a flag nobody can read.
-pub fn selection(picks: &[&str], door: Door) -> Result<(), Vec<Diagnostic>> {
+///
+/// A requirement on a Kind is the one exception, and it is not made here:
+/// the front doors call [`crate::resolve::resolve`] first, which adds the
+/// single provider and prints why. What reaches this point with a Kind
+/// unprovided had no single provider to add.
+pub fn selection(picks: &[&'static str], door: Door) -> Result<(), Vec<Diagnostic>> {
     unavailable(picks)?;
     orphans(picks, door)?;
     unmet(picks, door)?;
+    kinds(picks, door)?;
     exclusive(picks)
+}
+
+/// A requirement on a Kind that no chosen module provides, and two chosen
+/// providers of a Kind that takes one.
+fn kinds(picks: &[&'static str], door: Door) -> Result<(), Vec<Diagnostic>> {
+    let mut bad = crate::resolve::refusals(picks, door);
+    bad.extend(crate::resolve::doubled(picks));
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
 }
 
 /// A choice this CLI lists and cannot make.
@@ -593,7 +636,10 @@ pub fn unmet(picks: &[&str], door: Door) -> Result<(), Vec<Diagnostic>> {
 
 /// The full-screen route. Returns the same [`Answers`] the flags produce.
 fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers, Vec<Diagnostic>> {
-    let preset = picked(args);
+    // Opens with the provider of each requirement ticked, as the flags
+    // would add it.
+    let preset = crate::resolve::resolve(&picked(args), Door::Create)
+        .map_or_else(|_| picked(args), |(picks, _)| picks);
     let mut clashes = crate::tui::clashes(&all()).into_iter();
     let draft = Draft {
         name: String::new(),
@@ -632,14 +678,25 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
                 // because every row it changed is still on the screen.
                 // Each one carries its own reason, because the chooser
                 // prints it the moment the row it names changes under you.
+                // A requirement on a Kind with one provider to add is a
+                // need on that provider here, so the screen and the flags
+                // agree. One a child lifts is left to the resolver.
                 needs: about(pick)
                     .needs
                     .iter()
+                    .map(|(need, why)| (*need, *why))
+                    .chain(about(pick).requires.iter().filter_map(|r| {
+                        if !r.unless.is_empty() {
+                            return None;
+                        }
+                        let provider = crate::resolve::single_provider(r.kind.name)?;
+                        Some((provider, r.why))
+                    }))
                     .filter_map(|(need, why)| {
                         all()
                             .iter()
-                            .position(|p| p == need)
-                            .map(|at| (at, (*why).to_string()))
+                            .position(|p| *p == need)
+                            .map(|at| (at, why.to_string()))
                     })
                     .collect(),
             })
@@ -865,16 +922,19 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
                 .map(move |option| (key, option.key))
         })
         .collect();
-    let project =
-        brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known).with_mounts(&mounts);
-    let order = brocanth_scaffold::order(&a.picks, |key| about(key).after).map_err(|stuck| {
-        vec![Diagnostic::error(
-            "cycle",
-            format!("these modules wait for each other: {}", stuck.join(", ")),
-        )
-        .note("a module's `after` list says which other modules write first")
-        .help("remove one of these modules from the list, and report the cycle to brocanth")]
-    })?;
+    let bindings = crate::resolve::bindings(&a.picks);
+    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
+        .with_mounts(&mounts)
+        .with_bindings(&bindings);
+    let order = brocanth_scaffold::order(&a.picks, |key| crate::resolve::after(key, &a.picks))
+        .map_err(|stuck| {
+            vec![Diagnostic::error(
+                "cycle",
+                format!("these modules wait for each other: {}", stuck.join(", ")),
+            )
+            .note("a module's `after` list says which other modules write first")
+            .help("remove one of these modules from the list, and report the cycle to brocanth")]
+        })?;
 
     let mut built = brocanth_scaffold::Scaffold::new();
     for key in order {
@@ -1267,6 +1327,19 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
             .collect::<Vec<_>>()
             .join(", "),
     );
+    // The provider of each Kind, and why it is here: the resolver's
+    // decision, so `add`, `remove` and a reader see it without resolving
+    // again. Derived from the selection, never stored apart from it.
+    let bindings = crate::resolve::bindings(&a.picks);
+    if !bindings.is_empty() {
+        out.push_str("\n[bindings]\n");
+        for (kind, provider) in &bindings {
+            out.push_str(&format!(
+                "{kind} = {{ provider = {provider:?}, why = {why:?} }}\n",
+                why = crate::resolve::why(&a.picks, kind),
+            ));
+        }
+    }
     for key in &a.picks {
         // `adapted_to` is the optional dependencies that were present, so
         // the file says which other choice shaped this one's code: removing
@@ -1287,6 +1360,14 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
                     .iter()
                     .filter(|(other, _)| a.has(other))
                     .map(|(other, _)| other.to_string())
+                    // A Kind it uses counts as its provider: removing that
+                    // module changes what this one wrote.
+                    .chain(m.uses.iter().filter_map(|(kind, _)| {
+                        bindings
+                            .iter()
+                            .find(|(k, _)| *k == kind.name)
+                            .map(|(_, provider)| provider.to_string())
+                    }))
                     .collect::<Vec<_>>()
             ),
             files = quoted(&attributed(a, files, key)),
@@ -4119,7 +4200,22 @@ fn plugins_mod_rs(a: &Answers, built: &Built) -> String {
     // registration, the hooks its module file turns off.
     let owners: Vec<&str> = built.slot_owners(Slot::AppPlugins).collect();
     let mut off_written: Vec<&str> = Vec::new();
+    // Each Kind's binding, over the first registration of its provider: the
+    // resolver's decision, written where the chain shows it (ADR 1).
+    let mut bindings = crate::resolve::bindings(&a.picks);
     for (line, owner) in registrations.iter().zip(owners) {
+        if line.lines().any(registers) {
+            bindings.retain(|(kind, provider)| {
+                if *provider != owner {
+                    return true;
+                }
+                out.push_str(&format!(
+                    "        // {kind} <- {provider} ({}). `brocanth.toml` [bindings] records it.\n",
+                    crate::resolve::why(&a.picks, kind)
+                ));
+                false
+            });
+        }
         out.push_str(line);
         if off_written.contains(&owner) || !line.contains("plugin_hooking") {
             continue;
@@ -5621,9 +5717,6 @@ mod tests {
                 "realtime-websocket",
                 vec!["config", "realtime", "realtime-websocket"],
             ),
-            // The queue, with a config file, which is the shape that opens
-            // a pool and starts a worker from a TOML section.
-            ("jobs", vec!["config", "jobs"]),
             // The queue on the `db` pool, with the admin: `[jobs]` has no
             // `url`, and the admin mounts the jobs tab.
             ("jobs-db", vec!["config", "db", "jobs", "admin"]),
@@ -6339,7 +6432,9 @@ mod tests {
     /// end.
     fn project(picks: &'static [&'static str]) -> brocanth_scaffold::Project<'static> {
         let known: &'static [&'static str] = Box::leak(all().into_boxed_slice());
-        brocanth_scaffold::Project::new("my-blog", "My Blog", picks, known)
+        let bindings: &'static [(&str, &str)] =
+            Box::leak(crate::resolve::bindings(picks).into_boxed_slice());
+        brocanth_scaffold::Project::new("my-blog", "My Blog", picks, known).with_bindings(bindings)
     }
 
     /// What the modules contributed, for a generator that takes it.
@@ -7062,6 +7157,9 @@ mod tests {
                 i += 1;
             }
             let with: Vec<&'static str> = all().into_iter().filter(|k| with.contains(k)).collect();
+            // And the provider of each Kind it requires, as the front doors add it.
+            let (with, _) = crate::resolve::resolve(&with, Door::Create)
+                .unwrap_or_else(|e| panic!("`{}` with {with:?}: {e:?}", child.key));
             selection(&with, Door::Create)
                 .unwrap_or_else(|e| panic!("`{}` with {with:?}: {e:?}", child.key));
         }

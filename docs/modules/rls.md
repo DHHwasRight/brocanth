@@ -11,8 +11,9 @@ The wizard calls it: *Row-level security: Postgres hides the rows of other tenan
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`db`](db.md): the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal; [`commands`](commands.md): the migration is written by `rls make`, a command of the project's binary that runs `schema()` |
-| After | [`db`](db.md), [`commands`](commands.md), [`model`](model.md) |
+| Needs | [`commands`](commands.md): the migration is written by `rls make`, a command of the project's binary that runs `schema()` |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | [`commands`](commands.md), [`model`](model.md) |
 | Adapts to | [`model`](model.md), [`admin-model`](admin-model.md), [`config`](config.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

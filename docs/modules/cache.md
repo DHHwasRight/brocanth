@@ -12,8 +12,9 @@ The wizard calls it: *A cache, in the database you already have*.
 | Presets | Something that does work |
 | Part of | nothing |
 | Needs | none |
-| After | [`config`](config.md), [`db`](db.md) |
-| Adapts to | [`config`](config.md), [`db`](db.md), [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md), [`admin`](admin.md) |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so; not with [`cache-memory`](cache-memory.md) or [`cache-redis`](cache-redis.md) |
+| After | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-cache` (no default features; `postgres` without a backend child, `admin` with `admin`) |
@@ -32,9 +33,10 @@ The two children conflict: a project has one cache backend. A child is a
 module and not a setting, because a backend changes `Cargo.toml`: with a
 child, `brocanth-cache` loses its `postgres` feature.
 
-With [`db`](db.md), the Postgres cache reuses the `db` pool and has no
-`url` of its own: one set of connections to size, not two against one
-database.
+The Postgres cache requires the project's pool (`PgPool`), so
+`brocanth create --with cache` adds [`db`](db.md) and says so. It reuses
+the `db` pool and has no `url` of its own: one set of connections to size,
+not two against one database. A backend child lifts the requirement.
 
 With [`admin`](admin.md), a tab at `/admin/cache`, in the generated
 `plugins::admin_panels`: purge expired entries, and clear each namespace
@@ -62,11 +64,8 @@ Section `[cache]`. Environment variable: `$<APP>_CACHE__<KEY>`. Flag: `--cache.<
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `url` | text | `"postgres://localhost/development"` | none (secret) | The Postgres URL the cache lives in. |
 | `migrate` | bool | `true` | `--cache.migrate` | Create the unlogged cache table at startup if it is absent. |
 | `sweep_every` | integer | `300` | `--cache.sweep_every` | Seconds between two sweeps of expired entries; 0 turns the sweep off. |
-
-With `db`, `url` is not declared: the cache uses the `db` pool.
 
 The plugin deletes expired rows itself, from `start` to `shutdown`, with a
 random quarter of jitter on each wait. See [the sweep](../cache.md#5-the-sweep).

@@ -20,7 +20,9 @@
 //! [`sink`]: https://docs.rs/brocanth-audit
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// The change history, as a choice on the `brocanth create` menu.
 pub struct Audit;
@@ -43,10 +45,7 @@ impl Module for Audit {
             "operations",
             "Change history: who changed which row, and when",
         )
-        .needs(
-            "db",
-            "the history is rows in the database the `db` module opens; in memory a restart would lose it",
-        )
+        .requires::<PgPool>("the history is rows in the database the `db` module opens; in memory a restart would lose it")
         .needs(
             "model",
             "it records the changes the model layer publishes, and without `model` there are none",
@@ -57,9 +56,6 @@ impl Module for Audit {
                 .feature_with("admin", "admin")
                 .note("the change history, its model hook and its Postgres store"),
         )
-        // The plugin reads the pool from the services the `db` plugin
-        // fills, so it registers after it.
-        .after("db")
         .hook(
             "record",
             "record each change the model layer publishes through `HookSink`",

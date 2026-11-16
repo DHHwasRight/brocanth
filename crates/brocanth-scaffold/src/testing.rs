@@ -71,8 +71,11 @@ use std::sync::{Mutex, PoisonError};
 /// Then it checks that the manifest names a category, that each slot written
 /// is open to one ([`crate::Scaffold::check_slots`]), that each `has` asked
 /// is declared with `adapts_to`, `needs` or `parent`, and that each
-/// `adapts_to` is asked. Each returned line is one broken rule; empty means
-/// none.
+/// `adapts_to` is asked. The same two-way rule holds for Kinds: each
+/// `project.provider::<K>()` asked is declared with `uses` or `requires`,
+/// and each `uses` is asked. In the first run every Kind the module names
+/// is bound; in the second only what it requires. Each returned line is one
+/// broken rule; empty means none.
 ///
 /// ```ignore
 /// let known: Vec<&str> = brocanth_cli::testing::modules()
@@ -104,15 +107,56 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
     alone.extend(m.needs.iter().map(|(need, _)| *need));
     alone.extend(m.parent);
 
+    wrong.extend(kind_declarations(&m, &everything));
+    // The provider's key is not known here, and a module must not depend on
+    // it: it asks whether the Kind is bound, not who binds it.
+    const SOME_PROVIDER: &str = "(provider)";
+    let mut all_bound: Vec<(&str, &str)> = m
+        .may_ask_kinds()
+        .into_iter()
+        .map(|kind| (kind, SOME_PROVIDER))
+        .collect();
+    let mut required: Vec<(&str, &str)> = m
+        .requirements(&alone)
+        .map(|r| (r.kind.name, SOME_PROVIDER))
+        .collect();
+    for (kind, _) in &m.provides {
+        all_bound.push((kind.name, m.key));
+        required.push((kind.name, m.key));
+    }
+
     let mut asked: Vec<String> = Vec::new();
-    for on in [&everything, &alone] {
-        let project = crate::Project::new("my-blog", "My Blog", on, &everything);
+    let mut asked_kinds: Vec<&str> = Vec::new();
+    for (on, bound) in [(&everything, &all_bound), (&alone, &required)] {
+        let project =
+            crate::Project::new("my-blog", "My Blog", on, &everything).with_bindings(bound);
         let mut s = crate::Scaffold::new();
         s.now_writing(m.key);
         module.contribute(&project, &mut s);
         s.check_slots(m.key, &m.categories);
         wrong.extend(s.problems().iter().cloned());
         asked.extend(project.asked_keys());
+        asked_kinds.extend(project.asked_kinds());
+    }
+    asked_kinds.sort_unstable();
+    asked_kinds.dedup();
+    let may_kinds = m.may_ask_kinds();
+    for kind in &asked_kinds {
+        if !may_kinds.contains(kind) && !m.gives(kind) {
+            wrong.push(format!(
+                "`{}` asks `project.provider::<{kind}>()` and does not declare it: \
+                 add `.uses::<{kind}>(\"<what changes>\")` to its manifest",
+                m.key
+            ));
+        }
+    }
+    for (kind, _) in &m.uses {
+        if !asked_kinds.contains(&kind.name) {
+            wrong.push(format!(
+                "`{}` declares `uses::<{kind}>()` and never asks `project.provider::<{kind}>()`",
+                m.key
+            ));
+        }
     }
     asked.sort();
     asked.dedup();
@@ -135,6 +179,46 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         }
     }
     wrong.dedup();
+    wrong
+}
+
+/// The rules on a manifest's Kinds that need no run: each reason is
+/// written, a Kind is declared once per module, and a requirement is lifted
+/// only by a key that exists.
+fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    let mut named: Vec<(&str, &str)> = Vec::new();
+    let declared = m
+        .provides
+        .iter()
+        .map(|(k, why)| ("provides", k.name, *why))
+        .chain(m.requires.iter().map(|r| ("requires", r.kind.name, r.why)))
+        .chain(m.uses.iter().map(|(k, why)| ("uses", k.name, *why)));
+    for (how, kind, why) in declared {
+        if why.is_empty() {
+            wrong.push(format!(
+                "`{}` declares `{how}::<{kind}>` and does not say why",
+                m.key
+            ));
+        }
+        if let Some((first, _)) = named.iter().find(|(_, k)| *k == kind) {
+            wrong.push(format!(
+                "`{}` declares `{first}::<{kind}>` and `{how}::<{kind}>`: keep one",
+                m.key
+            ));
+        }
+        named.push((how, kind));
+    }
+    for r in &m.requires {
+        for key in r.unless {
+            if !known.contains(key) {
+                wrong.push(format!(
+                    "`{}` requires {} unless `{key}`, which no module declares",
+                    m.key, r.kind
+                ));
+            }
+        }
+    }
     wrong
 }
 
@@ -398,6 +482,99 @@ pub fn build(files: &Files) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Category, Manifest, Module, PgPool, Project, Scaffold};
+
+    /// A module for the Kind rules: a manifest, and a `contribute` that asks
+    /// for the pool or not.
+    struct Asks {
+        manifest: fn() -> Manifest,
+        asks: bool,
+    }
+
+    impl Module for Asks {
+        fn manifest(&self) -> Manifest {
+            (self.manifest)()
+        }
+        fn contribute(&self, project: &Project, _: &mut Scaffold) {
+            if self.asks {
+                let _ = project.provider::<PgPool>();
+            }
+        }
+    }
+
+    fn base() -> Manifest {
+        Manifest::new("thing", "a test module").category(Category::Enhancer)
+    }
+
+    fn check(manifest: fn() -> Manifest, asks: bool) -> Vec<String> {
+        check_module(&Asks { manifest, asks }, &["thing", "thing-memory"])
+    }
+
+    #[test]
+    fn a_kind_asked_must_be_declared_and_a_kind_used_must_be_asked() {
+        let wrong = check(base, true);
+        assert!(
+            wrong[0].contains("asks `project.provider::<PgPool>()` and does not declare it"),
+            "{wrong:?}"
+        );
+        let wrong = check(|| base().uses::<PgPool>("rows"), false);
+        assert!(wrong[0].contains("never asks"), "{wrong:?}");
+        assert!(check(|| base().uses::<PgPool>("rows"), true).is_empty());
+        // A requirement may be asked, and need not be.
+        assert!(check(|| base().requires::<PgPool>("rows"), true).is_empty());
+        assert!(check(|| base().requires::<PgPool>("rows"), false).is_empty());
+    }
+
+    #[test]
+    fn a_kind_is_declared_once_with_a_reason_and_lifted_by_a_known_key() {
+        let wrong = check(
+            || base().requires::<PgPool>("rows").uses::<PgPool>("rows"),
+            true,
+        );
+        assert!(wrong.iter().any(|w| w.contains("keep one")), "{wrong:?}");
+        let wrong = check(|| base().requires::<PgPool>(""), false);
+        assert!(
+            wrong.iter().any(|w| w.contains("does not say why")),
+            "{wrong:?}"
+        );
+        let wrong = check(
+            || base().requires_unless::<PgPool>(&["nope"], "rows"),
+            false,
+        );
+        assert!(
+            wrong.iter().any(|w| w.contains("unless `nope`")),
+            "{wrong:?}"
+        );
+        assert!(check(
+            || base().requires_unless::<PgPool>(&["thing-memory"], "rows"),
+            false
+        )
+        .is_empty());
+    }
+
+    /// The pool is bound in the second run only when it is required there,
+    /// so a module sees both branches of a `uses`.
+    #[test]
+    fn a_used_kind_is_seen_bound_and_unbound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BOUND: AtomicUsize = AtomicUsize::new(0);
+        static UNBOUND: AtomicUsize = AtomicUsize::new(0);
+        struct Counts;
+        impl Module for Counts {
+            fn manifest(&self) -> Manifest {
+                base().uses::<PgPool>("rows")
+            }
+            fn contribute(&self, project: &Project, _: &mut Scaffold) {
+                match project.provider::<PgPool>() {
+                    Some(_) => BOUND.fetch_add(1, Ordering::SeqCst),
+                    None => UNBOUND.fetch_add(1, Ordering::SeqCst),
+                };
+            }
+        }
+        assert!(check_module(&Counts, &["thing"]).is_empty());
+        assert_eq!(BOUND.load(Ordering::SeqCst), 1);
+        assert_eq!(UNBOUND.load(Ordering::SeqCst), 1);
+    }
 
     fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

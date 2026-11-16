@@ -43,7 +43,9 @@
 //!   the request with no change to the page.
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// Mail, as a choice on the `brocanth create` menu.
 pub struct Mail;
@@ -63,14 +65,7 @@ impl Module for Mail {
             "jobs",
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
         )
-        .adapts_to(
-            "db",
-            "the application opens Postgres, so the test that starts it is left out",
-        )
-        .adapts_to(
-            "jobs-memory",
-            "a memory queue opens no database, so the test that starts the application stays",
-        )
+        .uses::<PgPool>("the application opens Postgres, so the test that starts it is left out")
         .asked_in("behaviour", "Send mail")
         .krate(
             Dep::brocanth("brocanth-mail")
@@ -192,12 +187,10 @@ fn plugin_rs(project: &Project) -> String {
         assert!(text.contains(marker), "the mail scaffold lost `{marker}`");
         text = text.replace(marker, if jobs { with } else { without });
     }
-    // When the application opens Postgres -- the `db` module, or a `jobs`
-    // queue in Postgres -- a build needs a database: that test is left out.
-    // A memory queue (`jobs-memory`) opens none, so the test stays.
-    // Both asked every time, so the manifest check sees both questions.
-    let memory_queue = project.has("jobs-memory");
-    let postgres = project.has("db") || (jobs && !memory_queue);
+    // When the application has the shared pool, a build needs a database:
+    // that test is left out. A queue in Postgres requires the pool, so this
+    // is the one question; a memory queue (`jobs-memory`) brings none.
+    let postgres = project.provider::<PgPool>().is_some();
     text.replace("@APP_TEST@", if postgres { "" } else { APP_TEST })
 }
 

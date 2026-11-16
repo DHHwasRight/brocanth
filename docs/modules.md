@@ -716,11 +716,49 @@ without editing the CLI.
   manifest can. A recommendation that clashes with a static site is
   dropped; one that conflicts with a chosen module says it replaces it.
 
-**One check for a selection.** `create::selection` runs the four rules in
+### Kinds — `provides`, `requires`, `uses`
+
+A module names what it needs by the thing, not by the module that gives
+it (`docs/module-capabilities.md`). A Kind is a marker type in
+`brocanth_scaffold::kind`, so a typo does not compile. Stage 1 has one:
+`PgPool`, the project's one shared Postgres pool, which `db` provides.
+
+- **`provides::<K>(what)`.** This module gives K. `db` is the only
+  provider of `PgPool`; no other module opens a pool.
+- **`requires::<K>(why)`.** This module cannot be written without K. It
+  implies "after the provider". `requires_unless::<K>(&[children], why)`
+  lifts it while a child that replaces the backend is chosen: `jobs`
+  requires `PgPool` unless `jobs-memory`.
+- **`uses::<K>(what_changes)`.** The Kind form of `adapts_to`.
+  `contribute` asks `project.provider::<K>()`, never `has("db")`;
+  `check_module` holds the two to each other, as it does for `adapts_to`.
+
+The resolver (`crates/brocanth-cli/src/resolve.rs`) runs at the front
+doors, before `selection`. A requirement with no chosen provider and one
+provider in the registry that is not `development_only` adds that
+provider and prints why: `added db: jobs requires PgPool (a Postgres
+pool)`. Several providers, or only development-only ones, is an error
+whose `help:` line lists them. Two chosen providers is a conflict.
+`remove db` is refused while a staying module requires `PgPool`. The
+binding is written as a comment over the provider's line in the plugin
+chain and in `brocanth.toml`:
+
+```toml
+[bindings]
+PgPool = { provider = "db", why = "jobs requires PgPool" }
+```
+
+The `why` is derived from the selection, so `add` and `remove` re-resolve
+it and keep no state of their own.
+
+**One check for a selection.** `create::selection` runs the rules in
 order: not available, a child without its parent, a module without what it
-`needs`, and a clash. `create` (flags and chooser), `add` and
-`create::scaffold` itself call it. A missing parent or need is refused,
-never added: a flag that quietly adds a module is a flag nobody can read.
+`needs`, a Kind with no provider or two, and a clash. `create` (flags and
+chooser), `add` and `create::scaffold` itself call it. A missing parent or
+need is refused, never added: a flag that quietly adds a module is a flag
+nobody can read. A Kind is the one exception, and the front doors make it
+before `selection` runs: there is one provider to add, and the output says
+so.
 The `help:` line names what to type at the door the selection came in
 through (`--with …` or `brocanth add …`). Before this, `scaffold` trusted
 its caller, and a caller that skipped the flag checks wrote a

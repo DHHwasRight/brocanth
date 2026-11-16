@@ -1489,6 +1489,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (cache requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2246,7 +2247,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 473a4cfd28ef1da5
+// brocanth-digest: 766b872e6c51343b
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -5106,6 +5107,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "commands", "db", "cache", "admin", "auth", "superuser", "roles"]
 
+[bindings]
+PgPool = { provider = "db", why = "cache requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -5125,7 +5129,7 @@ adapted_to = []
 [modules.db]
 version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
-files = ["src/modules/db.rs", "src/commands/dbshell.rs", "src/commands/migrate.rs", "src/plugins/db/"]
+files = ["src/modules/db.rs", "src/commands/createsuperuser.rs", "src/commands/dbshell.rs", "src/commands/migrate.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
 adapted_to = ["config", "commands"]
@@ -5136,7 +5140,7 @@ kind = ["enhancer"]
 files = ["src/modules/cache.rs", "src/plugins/cache/"]
 config = ["cache"]
 crates = ["brocanth-cache"]
-adapted_to = ["config", "db", "admin"]
+adapted_to = ["config", "admin"]
 
 [modules.admin]
 version = "0.1.0"
@@ -5152,7 +5156,7 @@ kind = ["middleware", "enhancer"]
 files = ["src/modules/auth.rs", "src/plugins/auth/"]
 config = ["auth"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "cache", "db"]
+adapted_to = ["config", "db"]
 
 [modules.superuser]
 version = "0.1.0"
@@ -5160,7 +5164,7 @@ kind = ["enhancer"]
 files = ["src/modules/superuser.rs", "src/commands/createsuperuser.rs", "src/plugins/superuser/"]
 config = ["superuser"]
 crates = ["brocanth-auth"]
-adapted_to = ["config", "commands", "cache", "db", "admin"]
+adapted_to = ["config", "commands", "admin", "db"]
 
 [modules.roles]
 version = "0.1.0"
@@ -5170,4 +5174,4 @@ config = []
 crates = ["brocanth-auth"]
 adapted_to = ["admin"]
 
-# brocanth-digest: bba974da1fe1b9ee
+# brocanth-digest: 880ea7f4d2b7a40d

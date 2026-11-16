@@ -12,8 +12,9 @@ The wizard calls it: *Background jobs, with retries and a dead letter*.
 | Presets | Something that does work |
 | Part of | nothing |
 | Needs | none |
-| After | [`config`](config.md), [`db`](db.md) |
-| Adapts to | [`config`](config.md), [`db`](db.md), [`jobs-memory`](jobs-memory.md), [`observability`](observability.md), [`observability-metrics`](observability-metrics.md), [`admin`](admin.md) |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so; not with [`jobs-memory`](jobs-memory.md) |
+| After | [`config`](config.md) |
+| Adapts to | [`config`](config.md), [`jobs-memory`](jobs-memory.md), [`observability`](observability.md), [`observability-metrics`](observability-metrics.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-jobs` (feature `admin` with `admin`), `serde` (features `derive`) |
@@ -41,7 +42,6 @@ Section `[jobs]`. Environment variable: `$<APP>_JOBS__<KEY>`. Flag: `--jobs.<key
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `url` | text | `"postgres://localhost/development"` | none (secret) | The database the queue lives in. Absent with `db` or `jobs-memory`. |
 | `migrate` | bool | `true` | `--jobs.migrate` | Create the queue's tables at startup if they are absent. Absent with `jobs-memory`. |
 | `worker` | bool | `true` | `--jobs.worker` | Run a worker in this process. |
 | `queues` | list | `["default"]` | none (a list) | Which queues the worker claims from. |
@@ -51,8 +51,7 @@ Section `[jobs]`. Environment variable: `$<APP>_JOBS__<KEY>`. Flag: `--jobs.<key
 
 The jobs run on the `brocanth-queue` engine (`brocanth-queue/docs/DECISIONS.md`, Part 6).
 
-- With `db`: the queue uses the pool the `db` plugin opened (`Queue::from_pool`). One set of connections, and `[jobs]` has no `url`.
-- Without `db`: the queue opens its own pool from `[jobs] url`.
+- In Postgres: the queue requires `PgPool`, so `brocanth create --with jobs` adds `db` and prints `added db: jobs requires PgPool (a Postgres pool)`. The queue runs on the `db` database, through a small control pool of its own (`Queue::beside`), so a running job never holds the connection its heartbeat needs. `[jobs]` has no `url`.
 - With [`jobs-memory`](jobs-memory.md): the queue lives in the process (`Queue::memory()`). For development and tests only.
 
 ## Choices

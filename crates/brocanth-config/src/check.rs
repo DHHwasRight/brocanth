@@ -316,13 +316,18 @@ struct Project {
     app: AppName,
     /// `[modules] enabled` in `brocanth.toml`, empty when it says nothing.
     modules: Vec<String>,
+    /// The Kinds `[bindings]` in `brocanth.toml` binds to a provider:
+    /// `PgPool` when the project has its one shared pool.
+    bound: Vec<String>,
 }
 
 impl Project {
     fn read(app: AppName, root: &Path) -> Self {
-        let modules = std::fs::read_to_string(root.join("brocanth.toml"))
+        let marker = std::fs::read_to_string(root.join("brocanth.toml"))
             .ok()
-            .and_then(|text| Config::from_toml(app.clone(), "marker", &text).ok())
+            .and_then(|text| Config::from_toml(app.clone(), "marker", &text).ok());
+        let modules = marker
+            .as_ref()
             .and_then(|marker| {
                 let enabled = marker.root().at("modules.enabled")?.as_array()?;
                 Some(
@@ -333,15 +338,30 @@ impl Project {
                 )
             })
             .unwrap_or_default();
+        let bound = marker
+            .as_ref()
+            .and_then(|marker| {
+                let bindings = marker.root().at("bindings")?.as_table()?;
+                Some(bindings.keys().map(|k| k.to_owned()).collect())
+            })
+            .unwrap_or_default();
         Self {
             root: root.to_path_buf(),
             app,
             modules,
+            bound,
         }
     }
 
     fn has(&self, module: &str) -> bool {
         self.modules.iter().any(|m| m == module)
+    }
+
+    /// Whether `[bindings]` binds the Kind `kind`: the generator's record of
+    /// which module provides it, so a check names the thing and not the
+    /// module that gives it.
+    fn binds(&self, kind: &str) -> bool {
+        self.bound.iter().any(|k| k == kind)
     }
 
     /// Whether a file under `deploy/` names the variable `var`: the
@@ -636,7 +656,7 @@ fn deploy(
     }
     out.extend(migrate(project, config, &file));
     out.extend(observability(project, config, &file));
-    if project.has("storage") && !project.has("db") {
+    if project.has("storage") && !project.binds("PgPool") {
         let mut d = Finding::warning(
             "deploy/storage-local",
             "file storage is a directory on this machine's disk",
@@ -900,6 +920,12 @@ mod tests {
             root: PathBuf::from("/p"),
             app: AppName::new("shop"),
             modules: modules.iter().map(|m| (*m).to_owned()).collect(),
+            // The generator binds the pool exactly when `db` is chosen.
+            bound: if modules.contains(&"db") {
+                vec!["PgPool".to_owned()]
+            } else {
+                Vec::new()
+            },
         }
     }
 

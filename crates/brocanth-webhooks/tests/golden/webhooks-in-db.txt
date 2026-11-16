@@ -1436,6 +1436,7 @@ macro_rules! register {
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
         let builder = $builder.with_config(config);
+        // PgPool <- db (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2055,7 +2056,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 17194fbe952b24eb
+// brocanth-digest: 4c668cf7a15f0f54
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3136,6 +3137,9 @@ title = "My Shop"
 [modules]
 enabled = ["config", "db", "webhooks", "webhooks-in"]
 
+[bindings]
+PgPool = { provider = "db", why = "chosen" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3168,4 +3172,4 @@ config = ["webhooks_in"]
 crates = ["brocanth-webhooks", "serde"]
 adapted_to = ["config", "db"]
 
-# brocanth-digest: 86cc4d032a6679da
+# brocanth-digest: b7803598827dc15f

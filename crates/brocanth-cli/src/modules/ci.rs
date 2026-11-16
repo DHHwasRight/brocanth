@@ -8,7 +8,7 @@
 //! The parent writes nothing on its own. It is the line in the chooser that
 //! says "check every push"; the provider under it writes the file.
 
-use brocanth_scaffold::{Category, Manifest, Module, Project, Scaffold};
+use brocanth_scaffold::{Category, Manifest, Module, PgPool, Project, Scaffold};
 
 pub struct Ci;
 
@@ -37,9 +37,9 @@ impl Module for GitHub {
         .category(Category::External)
         .adapts_to("static", "CI keeps the exported site as an artifact")
         .adapts_to("docker", "CI builds the image")
-        .adapts_to("db", POSTGRES)
-        .adapts_to("jobs", POSTGRES)
-        .adapts_to("cache", POSTGRES)
+        // A queue or a cache in Postgres requires the pool, so the pool is
+        // the one question: no key list to keep in step.
+        .uses::<PgPool>("CI starts a database for the tests")
         .outside_runtime()
         .asked_in("operations", "GitHub Actions")
         .part_of("ci")
@@ -51,18 +51,10 @@ impl Module for GitHub {
     }
 }
 
-/// What the manifest says to a module that stores rows.
-const POSTGRES: &str = "CI starts a database for the tests";
-
-/// Whether the project's tests want a database: anything that stores rows.
-/// Read off the manifest, so the keys that start the service are the keys
-/// the docs list, in one place.
+/// Whether the project's tests want a database: it has the shared pool,
+/// which every module that stores rows in Postgres requires.
 fn wants_postgres(project: &Project) -> bool {
-    GitHub
-        .manifest()
-        .adapts_to
-        .iter()
-        .any(|(key, what)| *what == POSTGRES && project.has(key))
+    project.provider::<PgPool>().is_some()
 }
 
 fn workflow(project: &Project) -> String {
@@ -107,18 +99,16 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
 "#,
         );
-        if project.has("db") {
-            // `[db] url`, as the config loader reads it from the
-            // environment. A test that loads the configuration the way
-            // the server does opens this database.
-            out.push_str(&format!(
-                "    env:\n      \
-                 # `[db] url` for the config loader, so a test that loads the\n      \
-                 # configuration as the server does reaches this service.\n      \
-                 {}_DB__URL: postgres://postgres:postgres@localhost:5432/postgres\n",
-                project.ident().to_uppercase()
-            ));
-        }
+        // `[db] url`, as the config loader reads it from the environment. A
+        // test that loads the configuration the way the server does opens
+        // this database.
+        out.push_str(&format!(
+            "    env:\n      \
+             # `[db] url` for the config loader, so a test that loads the\n      \
+             # configuration as the server does reaches this service.\n      \
+             {}_DB__URL: postgres://postgres:postgres@localhost:5432/postgres\n",
+            project.ident().to_uppercase()
+        ));
     }
     out.push_str(
         r#"    steps:
@@ -170,9 +160,10 @@ jobs:
 mod tests {
     use super::*;
 
-    fn written(on: &[&str]) -> String {
+    fn written(on: &[&'static str]) -> String {
         let known = crate::modules::keys();
-        workflow(&Project::new("my-blog", "My Blog", on, &known))
+        let bindings = crate::resolve::bindings(on);
+        workflow(&Project::new("my-blog", "My Blog", on, &known).with_bindings(&bindings))
     }
 
     #[test]

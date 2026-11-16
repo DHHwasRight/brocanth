@@ -241,6 +241,9 @@ fn to_text(defaults: &[&str], installed: Option<&[&str]>) -> String {
             for (k, why) in &m.needs {
                 out.push_str(&format!("{pad}needs {k}: {why}\n"));
             }
+            for r in &m.requires {
+                out.push_str(&format!("{pad}requires {}: {}\n", r.kind, r.why));
+            }
             for (k, why) in &m.conflicts {
                 out.push_str(&format!("{pad}conflicts with {k}: {why}\n"));
             }
@@ -298,6 +301,20 @@ fn to_json(defaults: &[&str], installed: Option<&[&str]>) -> String {
                         format!("\"blocked\":{}", opt(m.blocked)),
                         format!("\"absent\":{}", opt(m.absent.map(|(_, why)| why))),
                         format!("\"needs\":{}", pairs(&m.needs)),
+                        format!(
+                            "\"requires\":[{}]",
+                            m.requires
+                                .iter()
+                                .map(|r| format!(
+                                    "{{\"kind\":{},\"why\":{},\"unless\":{},\"providers\":{}}}",
+                                    s(r.kind.name),
+                                    s(r.why),
+                                    keys(r.unless),
+                                    keys(&crate::resolve::providers(r.kind.name)),
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
                         format!("\"conflicts\":{}", pairs(&m.conflicts)),
                         format!("\"recommends\":{}", pairs(&m.recommends)),
                     ]);

@@ -18,8 +18,10 @@
 //! not a setting because a backend changes `Cargo.toml`: `brocanth-cache`
 //! takes its `postgres` feature only when no child replaces Postgres.
 //!
-//! With `db`, the Postgres cache reuses the `db` plugin's pool and has no
-//! `url` of its own: one set of connections to size, not two against one
+//! The Postgres cache requires the project's pool (`requires::<PgPool>`,
+//! so `brocanth create --cache` adds `db`) and has no `url` of its own: one
+//! set of connections to size, not two against one database. A child that
+//! replaces Postgres lifts the requirement, so `cache-memory` brings no
 //! database.
 //!
 //! Compiled only under the `scaffold` feature, which is off. See the
@@ -28,7 +30,9 @@
 use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// The cache, as a choice on the `brocanth create` menu.
 ///
@@ -51,9 +55,9 @@ impl Module for Cache {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "db",
-            "the cache reuses the `db` pool and has no `url` of its own",
+        .requires_unless::<PgPool>(
+            &BACKENDS,
+            "the cache is an unlogged table on the project's pool; without a child backend there is nowhere else to keep it",
         )
         .adapts_to(
             "cache-memory",
@@ -85,9 +89,6 @@ impl Module for Cache {
         // the cache reads its URL from the file the config plugin loaded, so
         // it belongs under it rather than above it.
         .after("config")
-        // With `db`, the plugin reads the pool the `db` plugin publishes in
-        // its `before_start`, so it registers after it.
-        .after("db")
         .absent(
             "brocanth-cache",
             "no cache; every read does the work a hit would have skipped",
@@ -107,11 +108,7 @@ impl Module for Cache {
         if memory || redis {
             return;
         }
-        if project.has("db") {
-            write_plugin(s, project, postgres_on_db());
-        } else {
-            write_plugin(s, project, postgres());
-        }
+        write_plugin(s, project, postgres_on_db());
     }
 }
 
@@ -297,40 +294,6 @@ fn sweep_setting() -> Setting {
     )
 }
 
-/// Postgres, on a pool of its own, from `[cache] url`.
-fn postgres() -> Backend {
-    Backend {
-        doc: PG_DOC,
-        cache_items: &["CacheReadiness", "PgCache"],
-        uses: "",
-        settings: vec![
-            url_setting(
-                "postgres://localhost/development",
-                "The Postgres URL the cache lives in.",
-            ),
-            migrate_setting(),
-            sweep_setting(),
-        ],
-        fields: concat!(
-            "    /// The Postgres URL the cache lives in. Brocanth supports Postgres only.\n",
-            "    pub url: String,\n",
-            "    /// Create the unlogged cache table at startup if it is absent.\n",
-            "    pub migrate: bool,\n",
-            "    /// Seconds between two sweeps of expired entries; 0 turns the sweep off.\n",
-            "    pub sweep_every: u64,\n",
-        ),
-        defaults: concat!(
-            "            url: \"postgres://localhost/development\".to_string(),\n",
-            "            migrate: true,\n",
-            "            sweep_every: 300,\n",
-        ),
-        configure: CONFIGURE_URL,
-        open: PG_OPEN,
-        ready: PG_READY.replace("@HELP@", "[cache] url"),
-        sweep: true,
-    }
-}
-
 /// Postgres, on the pool the `db` plugin opened.
 fn postgres_on_db() -> Backend {
     Backend {
@@ -374,15 +337,6 @@ fn memory() -> Backend {
     }
 }
 
-const PG_DOC: &str = "\
-//! The cache is a table, and the table is `UNLOGGED`: Postgres writes no
-//! write-ahead log for it, ships it to no replica, and truncates it on crash
-//! recovery. For any other table that is a catastrophe. For a cache it is the
-//! only state you can reason about, and it is what makes a cache in a
-//! relational database defensible at all. A deployment that already runs
-//! Postgres therefore gets a cache without running Redis.
-";
-
 const PG_DB_DOC: &str = "\
 //! The cache is a table, and the table is `UNLOGGED`: Postgres writes no
 //! write-ahead log for it, ships it to no replica, and truncates it on crash
@@ -404,24 +358,6 @@ const MEMORY_DOC: &str = "\
 //! `brocanth remove cache-memory`, and the cache goes back to Postgres.
 ";
 
-const PG_OPEN: &str = r#"        // The lifecycle hooks are synchronous and opening a pool is not, so
-        // the pool opens lazily and nothing here waits. Waiting would hang a
-        // current-thread runtime, where this thread drives the I/O. The pool
-        // spawns its upkeep task, so it needs the runtime entered.
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            PluginError::new(format!(
-                "[cache] needs a Tokio runtime at startup to open its pool ({e})\n\
-                 help: build the application inside the runtime that serves it"
-            ))
-        })?;
-        let cache = {
-            let _entered = runtime.enter();
-            PgCache::connect_lazy(&self.settings.url)
-                .map_err(|e| PluginError::new(format!("[cache] {e}")))?
-        };
-        let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
-"#;
-
 const PG_DB_OPEN: &str = r#"        // The pool the `db` plugin opened in its own `before_start`, which
         // runs first because that plugin is registered first.
         let db = lc.services().get::<brocanth_db::Db>().ok_or_else(|| {
@@ -438,7 +374,7 @@ const MEMORY_OPEN: &str = r#"        let cache: Arc<dyn brocanth_cache::Cache> =
 "#;
 
 /// The Postgres readiness check, with `@HELP@` for the setting that names
-/// the database: `[cache] url`, or `[db] url` on the `db` pool.
+/// the database: `[db] url`, on the `db` pool.
 const PG_READY: &str = r#"        // Ready when one read of the table answers: `CacheReadiness` is the
         // check `CachePlugin` registers. With `migrate`, the first check
         // creates the table, so a new project starts; a project with

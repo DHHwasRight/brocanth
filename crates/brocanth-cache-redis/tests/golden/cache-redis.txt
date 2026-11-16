@@ -1466,6 +1466,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2092,7 +2093,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 1b3611a91f9303dc
+// brocanth-digest: 2ff2326a04f93167
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3328,6 +3329,9 @@ title = "My App"
 [modules]
 enabled = ["config", "db", "cache", "cache-redis", "admin"]
 
+[bindings]
+PgPool = { provider = "db", why = "chosen" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3350,7 +3354,7 @@ kind = ["enhancer"]
 files = ["src/modules/cache.rs"]
 config = []
 crates = ["brocanth-cache"]
-adapted_to = ["config", "db", "cache-redis", "admin"]
+adapted_to = ["config", "cache-redis", "admin"]
 
 [modules.cache-redis]
 version = "0.1.0"
@@ -3368,4 +3372,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: 93ebe9e20c707b6c
+# brocanth-digest: 803e3d66e921a515

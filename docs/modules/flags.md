@@ -11,8 +11,9 @@ The wizard calls it: *Feature flags: turn code on for some users without a deplo
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`db`](db.md): the rules are rows in the database the `db` module opens |
-| After | [`db`](db.md) |
+| Needs | none |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | none |
 | Adapts to | [`config`](config.md), [`auth`](auth.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

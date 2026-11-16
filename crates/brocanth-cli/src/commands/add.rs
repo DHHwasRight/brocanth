@@ -144,6 +144,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         .into_iter()
         .filter(|key| project.enabled.contains(key) || adding.contains(key))
         .collect();
+    // The provider of a Kind a new module requires comes with it, and is
+    // said: `added db: jobs requires PgPool`.
+    let (after_picks, added) = crate::resolve::resolve(&after_picks, create::Door::Add)?;
     create::selection(&after_picks, create::Door::Add)?;
 
     // Where this project's brocanth comes from. Read back out of its own
@@ -171,6 +174,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     let after = create::scaffold(&answers(after_picks.clone()))?;
 
     ui.heading("add", adding.join(", "));
+    for line in &added {
+        ui.note(format!("  {}", line.line()));
+    }
 
     // Nothing is written until every file has been accounted for. A command
     // that half-adds a module leaves a project in a state neither `add` nor
@@ -980,10 +986,11 @@ mod tests {
         let root = project("worky", &["logging", "config"]);
         add(&root, "cache", false).expect("cache goes in");
 
+        // The cache requires the pool, so `db` came with it.
         let both = Answers {
             name: "worky".to_string(),
             title: "Worky".to_string(),
-            picks: vec!["logging", "config", "cache"],
+            picks: vec!["logging", "config", "db", "cache"],
             local: None,
             git: false,
         };
@@ -1008,10 +1015,10 @@ mod tests {
 
         assert!(depends_on(&root, "brocanth-cache"), "{after}");
         // Every line the manifest had is still there, except the receipt's
-        // own line about the cache being absent -- which is the one line
-        // that stopped being true.
+        // own lines about the cache and the pool it requires being absent --
+        // the lines that stopped being true.
         for line in before.lines() {
-            if line.contains("brocanth-cache") {
+            if line.contains("brocanth-cache") || line.contains("brocanth-db") {
                 continue;
             }
             assert!(after.contains(line), "{line:?} went missing:\n{after}");
@@ -1246,7 +1253,11 @@ mod tests {
         if let Err(e) = add(&root, "jobs", false) {
             panic!("{}", said(&e));
         }
-        for (path, want) in as_created("queue", &with(DEFAULT, "jobs")) {
+        // The queue requires the pool, so `add` brings `db` too.
+        let picks = with(&with(DEFAULT, "jobs"), "db");
+        assert!(read(&root, "brocanth.toml")
+            .contains("PgPool = { provider = \"db\", why = \"jobs requires PgPool\" }"));
+        for (path, want) in as_created("queue", &picks) {
             assert_eq!(read(&root, &path), want, "{path}");
         }
         let _ = std::fs::remove_dir_all(&root);
