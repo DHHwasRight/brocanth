@@ -1,7 +1,9 @@
 # Module capabilities: kinds, providers and contribution points
 
-Status: **proposal**, revised 2026-11-16 with the owner's answers and
-corrections (§4, §5, §6). Nothing here is built. Base:
+Status: accepted (2026-11-16)
+
+The owner's answers and corrections are in §4, §5, §6 and §13. Nothing
+here is built yet. Base:
 `8f546fc`. Read first: PLAN.md §8 and ADR 1, `docs/module-config.md` §9,
 `docs/module-flags.md`.
 
@@ -87,9 +89,11 @@ It names the owner in `explain` and in docs; lookup ignores it.
 **No version per Kind.** Reason: Kubernetes needs versions because one API
 server serves several versions of a resource and converts between them.
 brocanth crates release together, and a project pins one release, so
-there is no second version to serve. A generated project records one
+there is no second version to serve. A generated project will record one
 **edition** in `brocanth.toml` instead (`edition = "2026-11"`), which
 `brocanth upgrade` reads to choose codemods for the files it generated.
+The edition arrives with the first codemod that needs it, not before
+(§13, decision 4).
 
 **Kinds are generation-time types.** The CLI does not link the core
 (`e305bc6`). A Kind names its runtime type (a trait or a handle) as a
@@ -165,6 +169,9 @@ A request hook declares a **phase**, and orders itself inside it:
 | `Guard` | rate-limit count, csrf check, auth |
 | `Cache` | conditional-get, route cache |
 | `Encode` (response) | compression, security headers, RateLimit headers |
+
+These four names are final, and an `after` across phases is a build
+error (§13, decision 2).
 
 The core runs phases in this order; `Order::after` / `before` stays for an
 edge inside one phase. **Reason:** `after_if_present("proxy-headers.read")`
@@ -439,7 +446,7 @@ the two declarations stay: `Opt` (build time, `brocanth` flags) and
 `Setting` (run time, binary flags, env, file).
 
 Lists of records (rate-limit rules, robots groups) have no flag form.
-They stay in code or in the file (open question 1).
+They stay in code or in the file (§13, decision 1).
 
 ## 7. How it keeps ADR 1
 
@@ -449,7 +456,9 @@ filled by whatever links. This model adds none.
 - The CLI resolves kinds **once, at generation time**. The output is the
   same explicit chain as today, each plugin named in `src/plugins/mod.rs`.
 - The binding is written as a comment over the chain and in `brocanth.toml`
-  (`[bindings] JobQueue = "jobs"`). `add` and `remove` re-resolve it.
+  (`[bindings]`: the provider chosen per Kind and why, for example
+  `JobQueue = { provider = "jobs", why = "chosen" }`). `add` and
+  `remove` re-resolve it (§13, decision 3).
 - Runtime lookups stay typed: `Services::get::<T>()`, by trait handle.
 - Spring evaluates conditions at start. The CLI evaluates them and
   `explain` prints them: the conditions report is a command, not a log.
@@ -583,8 +592,10 @@ the registrar and `.hook` take it. Exit: cross-plugin
 key>)` 6 -> 0; ADR 11 records the phases.
 
 **Stage 5 — capability Kinds and exports (2-3 days).** `JobQueue`,
-`CacheStore`, `SessionCookie`, `ConfigCheck`; exports for `auth-screens`.
-Exit: no caller names a provider type; `MIGRATES`, the `sessions || auth`
+`CacheStore`, `SessionCookie`, `ConfigCheck`, and AGENTS.md sections as a
+contribution point; exports for `auth-screens`. Exit: no caller names a
+provider type; each module's AGENTS.md section comes from its
+contribution; `MIGRATES`, the `sessions || auth`
 line and `SCREEN_PATHS` are gone; `has` on another crate's key 159 ->
 ≤ 30.
 
@@ -598,18 +609,35 @@ manifest edit without a re-bless fails `docs_check`.
 Total: 15-21 days (first draft: 10-13). Stage 1b is new; stages 2 and 3
 grew with RBAC and the settings layers.
 
-## 13. Open questions for the owner
+## 13. Decisions on the former open questions (owner, 2026-11-16)
 
-1. Lists of records (rate-limit rules, robots groups): code and file only,
-   or a flag form (a JSON value)?
-2. Phases: are the four names right, and is a cross-phase `after` a build
-   error or a warning?
-3. `brocanth check` reads `ConfigCheck` entries from where:
-   `brocanth.toml`, or generated code? And does `brocanth.toml` record
-   `[bindings]`, or does `explain` recompute them each time?
-4. Edition: add `edition` now, or with the first codemod that needs it?
-5. Outside modules: core Kinds only, as proposed, or may an outside crate
-   define a Kind?
-6. AGENTS.md sections as a contribution point: in stage 5 or later?
-7. RBAC `owner`: may an owner grant `owner` to another person, or only a
-   superuser (as proposed)?
+No question is open.
+
+1. **Lists of records have no flag form.** Rate-limit rules and robots
+   groups live in code or in the config file. **Reason:** a record list
+   on a command line is a JSON string nobody reads or quotes correctly;
+   code and file already hold it with types and line numbers.
+2. **The phases are `Identify`, `Guard`, `Cache`, `Encode`, and an
+   `after` across phases is a build error.** **Reason:** a cross-phase
+   edge is the plugin-name coupling the phases remove. A warning would
+   let it come back one hook at a time.
+3. **`brocanth check` reads config-check entries from generated code;
+   `brocanth.toml` records the bindings** (the provider chosen per Kind,
+   and why: chosen, or added for a requirement). **Reason:** the code is
+   what runs, so a check on it cannot drift from the binary. The bindings
+   are a decision of the generator, and `add`, `remove` and `explain`
+   need it without a second resolution that could disagree.
+4. **The project `edition` arrives with the first codemod that needs
+   it.** **Reason:** a field that nothing reads is a promise with no test.
+   The first codemod defines what an edition boundary means.
+5. **Modules outside the workspace use the core Kinds and define none,
+   for now.** **Reason:** each Kind is a word in the shared vocabulary
+   and a seam the resolver and `explain` must know. Opening it waits for
+   a real outside module that needs one.
+6. **AGENTS.md sections become a contribution point in stage 5.**
+   **Reason:** it is a many-to-one seam like the admin tabs, and stage 5
+   already adds the other contribution Kinds.
+7. **Only a superuser grants `owner`; an `owner` grants `read` and `edit`
+   on its own tab only** (§5.2). **Reason:** this keeps the rule "only a
+   superuser changes roles" and limits delegation to one tab, so no
+   owner can raise itself or reach past its tab.
