@@ -2250,6 +2250,8 @@ title = "My Blog"
 [modules]
 enabled = ["beacon"]
 
+[bindings]
+
 [modules.beacon]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2258,4 +2260,4 @@ config = ["beacon"]
 crates = ["brocanth-analytics"]
 adapted_to = []
 
-# brocanth-digest: f5e056cfd0facbc2
+# brocanth-digest: aa6de66d69765714

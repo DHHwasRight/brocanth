@@ -3572,6 +3572,8 @@ title = "My Blog"
 [modules]
 enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "config", "commands", "docker", "ci", "ci-github", "middleware", "middleware-security-headers"]
 
+[bindings]
+
 [modules.observability]
 version = "0.1.0"
 kind = ["middleware", "enhancer", "routes"]
@@ -3660,4 +3662,4 @@ config = ["security_headers", "security_headers.hsts", "security_headers.csp"]
 crates = []
 adapted_to = ["config"]
 
-# brocanth-digest: 825d65f1ee55f80b
+# brocanth-digest: 58079cdb0cff5c39

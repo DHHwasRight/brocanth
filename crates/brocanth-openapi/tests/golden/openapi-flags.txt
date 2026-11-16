@@ -2494,6 +2494,8 @@ title = "My Blog"
 [modules]
 enabled = ["openapi"]
 
+[bindings]
+
 [modules.openapi]
 version = "0.1.0"
 kind = ["routes", "enhancer"]
@@ -2502,4 +2504,4 @@ config = ["openapi"]
 crates = ["brocanth-openapi"]
 adapted_to = []
 
-# brocanth-digest: 22c79dfacf79f49c
+# brocanth-digest: d9e602cb27ef5d06

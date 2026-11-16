@@ -2878,6 +2878,8 @@ title = "My Blog"
 [modules]
 enabled = ["admin", "sitemap"]
 
+[bindings]
+
 [modules.admin]
 version = "0.1.0"
 kind = ["routes", "enhancer"]
@@ -2894,4 +2896,4 @@ config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["admin"]
 
-# brocanth-digest: 486fb6940a99225a
+# brocanth-digest: b81169d3a2a7f568

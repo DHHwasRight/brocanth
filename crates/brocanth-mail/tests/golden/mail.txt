@@ -2726,6 +2726,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "mail"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2742,4 +2744,4 @@ config = ["mail"]
 crates = ["brocanth-mail"]
 adapted_to = ["config"]
 
-# brocanth-digest: 368edc4f734126c7
+# brocanth-digest: 1ee8f7bae1065add

@@ -2463,6 +2463,8 @@ title = "My Blog"
 [modules]
 enabled = ["gtag"]
 
+[bindings]
+
 [modules.gtag]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2471,4 +2473,4 @@ config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
 adapted_to = []
 
-# brocanth-digest: 59cb0872e73964fc
+# brocanth-digest: 11015e489e86c8a2

@@ -2084,4 +2084,6 @@ title = "My Blog"
 [modules]
 enabled = []
 
-# brocanth-digest: fd4167984feb624e
+[bindings]
+
+# brocanth-digest: d190b37d93977b60

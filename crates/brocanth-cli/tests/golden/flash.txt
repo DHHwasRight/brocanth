@@ -2582,6 +2582,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "flash"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2598,4 +2600,4 @@ config = ["flash"]
 crates = ["brocanth-middleware"]
 adapted_to = []
 
-# brocanth-digest: 0fb7182aa5827556
+# brocanth-digest: f8a7ecee70925ba8

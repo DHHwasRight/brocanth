@@ -2296,6 +2296,8 @@ title = "My Blog"
 [modules]
 enabled = ["input"]
 
+[bindings]
+
 [modules.input]
 version = "0.1.0"
 kind = ["enhancer", "renderer"]
@@ -2304,4 +2306,4 @@ config = []
 crates = ["brocanth-input", "zod"]
 adapted_to = []
 
-# brocanth-digest: 2d1e45097a177194
+# brocanth-digest: c44c484cadd64432

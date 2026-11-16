@@ -2400,6 +2400,8 @@ title = "My Blog"
 [modules]
 enabled = ["policy"]
 
+[bindings]
+
 [modules.policy]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2408,4 +2410,4 @@ config = []
 crates = ["brocanth-policy"]
 adapted_to = []
 
-# brocanth-digest: 6d7d376e1ee3788b
+# brocanth-digest: f62edd075aa907a5

@@ -2903,6 +2903,8 @@ title = "My Blog"
 [modules]
 enabled = ["middleware", "middleware-security-headers", "gtag"]
 
+[bindings]
+
 [modules.middleware]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2927,4 +2929,4 @@ config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
 adapted_to = []
 
-# brocanth-digest: 76b749c61e6cfabc
+# brocanth-digest: 2c87ea0fba0ed81e

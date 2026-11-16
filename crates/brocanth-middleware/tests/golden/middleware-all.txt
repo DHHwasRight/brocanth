@@ -3421,6 +3421,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3485,4 +3487,4 @@ config = ["flash"]
 crates = ["brocanth-middleware"]
 adapted_to = ["config"]
 
-# brocanth-digest: 2944e2203050860d
+# brocanth-digest: 5e222fc6125007b7

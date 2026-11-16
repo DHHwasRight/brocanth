@@ -3007,6 +3007,8 @@ title = "My Blog"
 [modules]
 enabled = ["middleware", "middleware-csrf", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression"]
 
+[bindings]
+
 [modules.middleware]
 version = "0.1.0"
 kind = ["middleware"]
@@ -3047,4 +3049,4 @@ config = ["compression"]
 crates = ["brocanth-middleware"]
 adapted_to = []
 
-# brocanth-digest: f025e415f6a8d558
+# brocanth-digest: 9c5b88f32469a21e

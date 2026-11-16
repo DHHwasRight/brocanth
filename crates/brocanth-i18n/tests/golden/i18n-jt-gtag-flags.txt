@@ -2983,6 +2983,8 @@ title = "My Blog"
 [modules]
 enabled = ["jt", "gtag", "i18n"]
 
+[bindings]
+
 [modules.jt]
 version = "0.1.0"
 kind = ["renderer", "routes"]
@@ -3007,4 +3009,4 @@ config = ["i18n"]
 crates = ["brocanth-i18n"]
 adapted_to = ["gtag", "jt"]
 
-# brocanth-digest: 7dceb4aece4a24ca
+# brocanth-digest: b14907fb026d88ac

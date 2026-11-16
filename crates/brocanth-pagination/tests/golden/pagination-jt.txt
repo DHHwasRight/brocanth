@@ -2338,6 +2338,8 @@ title = "My Blog"
 [modules]
 enabled = ["jt", "pagination"]
 
+[bindings]
+
 [modules.jt]
 version = "0.1.0"
 kind = ["renderer", "routes"]
@@ -2354,4 +2356,4 @@ config = []
 crates = ["brocanth-pagination"]
 adapted_to = ["jt"]
 
-# brocanth-digest: 694a8125203dec9d
+# brocanth-digest: 852ed3bf1b964a2f

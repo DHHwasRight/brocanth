@@ -2894,6 +2894,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "rsx", "errors"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2918,4 +2920,4 @@ config = ["errors"]
 crates = ["brocanth-errors"]
 adapted_to = ["config", "rsx"]
 
-# brocanth-digest: 6512fda78d598d2d
+# brocanth-digest: 19f1fa40fb9b8a03

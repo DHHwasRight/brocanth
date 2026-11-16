@@ -2534,6 +2534,8 @@ title = "My Blog"
 [modules]
 enabled = ["jt", "rsx"]
 
+[bindings]
+
 [modules.jt]
 version = "0.1.0"
 kind = ["renderer", "routes"]
@@ -2550,4 +2552,4 @@ config = []
 crates = ["rsx"]
 adapted_to = []
 
-# brocanth-digest: 58a9a68e16349cc0
+# brocanth-digest: 1ae9322d6ca05d46

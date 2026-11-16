@@ -2657,6 +2657,8 @@ title = "My Blog"
 [modules]
 enabled = ["static", "config", "commands", "beacon"]
 
+[bindings]
+
 [modules.static]
 version = "0.1.0"
 kind = ["external", "enhancer"]
@@ -2689,4 +2691,4 @@ config = ["beacon"]
 crates = ["brocanth-analytics"]
 adapted_to = ["config"]
 
-# brocanth-digest: 3f576870bbc9fd92
+# brocanth-digest: 7475ad22b6196684

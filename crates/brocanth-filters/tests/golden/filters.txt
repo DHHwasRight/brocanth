@@ -2922,6 +2922,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "policy", "pagination", "filters"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2954,4 +2956,4 @@ config = []
 crates = ["brocanth-filters"]
 adapted_to = ["pagination"]
 
-# brocanth-digest: 74caceffe58c03c6
+# brocanth-digest: 70760efc574f4980

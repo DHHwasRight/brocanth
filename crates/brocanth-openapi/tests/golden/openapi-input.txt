@@ -2766,6 +2766,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "input", "openapi"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2790,4 +2792,4 @@ config = ["openapi"]
 crates = ["brocanth-openapi"]
 adapted_to = ["config", "input"]
 
-# brocanth-digest: 4609d1db2548d4f0
+# brocanth-digest: 54e0e7987bb5e25e

@@ -2976,6 +2976,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "admin", "robots"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3000,4 +3002,4 @@ config = ["robots"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "admin"]
 
-# brocanth-digest: 9bd3c78ab00ce861
+# brocanth-digest: 6e0aa2fd71b14837

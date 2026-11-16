@@ -3297,6 +3297,8 @@ title = "My Blog"
 [modules]
 enabled = ["static", "config", "commands", "robots", "sitemap"]
 
+[bindings]
+
 [modules.static]
 version = "0.1.0"
 kind = ["external", "enhancer"]
@@ -3337,4 +3339,4 @@ config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "static"]
 
-# brocanth-digest: ce1c561a072895cc
+# brocanth-digest: 69143acaa7317d16

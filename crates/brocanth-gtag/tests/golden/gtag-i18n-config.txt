@@ -3271,6 +3271,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "middleware", "middleware-security-headers", "i18n", "gtag"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3311,4 +3313,4 @@ config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
 adapted_to = ["config", "i18n"]
 
-# brocanth-digest: 98baabb5a1cdcc74
+# brocanth-digest: 711a7cbfd3b39152

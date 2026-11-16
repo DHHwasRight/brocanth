@@ -2208,6 +2208,8 @@ title = "My Blog"
 [modules]
 enabled = ["jt"]
 
+[bindings]
+
 [modules.jt]
 version = "0.1.0"
 kind = ["renderer", "routes"]
@@ -2216,4 +2218,4 @@ config = []
 crates = ["jt"]
 adapted_to = []
 
-# brocanth-digest: fcc1c869666ca4d6
+# brocanth-digest: 14a770bd5dc26e7c

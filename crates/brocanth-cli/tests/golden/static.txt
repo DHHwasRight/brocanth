@@ -3716,6 +3716,8 @@ title = "My Blog"
 [modules]
 enabled = ["static", "config", "commands", "rsx", "rsx-tailwind", "rsx-htmx", "ci", "ci-github", "gtag"]
 
+[bindings]
+
 [modules.static]
 version = "0.1.0"
 kind = ["external", "enhancer"]
@@ -3788,4 +3790,4 @@ config = ["gtag", "gtag.banner"]
 crates = ["brocanth-gtag"]
 adapted_to = ["config"]
 
-# brocanth-digest: 3104f1280463c4b1
+# brocanth-digest: 9bff5fcf4fc6059f

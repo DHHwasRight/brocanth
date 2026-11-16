@@ -2210,6 +2210,8 @@ title = "My Blog"
 [modules]
 enabled = ["resource"]
 
+[bindings]
+
 [modules.resource]
 version = "0.1.0"
 kind = ["routes"]
@@ -2218,4 +2220,4 @@ config = []
 crates = ["brocanth-resource"]
 adapted_to = []
 
-# brocanth-digest: 18694a9a9b9c4457
+# brocanth-digest: c3951449f0cf2fb5

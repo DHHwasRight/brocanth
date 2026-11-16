@@ -2627,6 +2627,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "input"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2643,4 +2645,4 @@ config = []
 crates = ["brocanth-input", "zod"]
 adapted_to = ["rsx"]
 
-# brocanth-digest: ea581f28bef36959
+# brocanth-digest: 7f8e4d15a5f90053

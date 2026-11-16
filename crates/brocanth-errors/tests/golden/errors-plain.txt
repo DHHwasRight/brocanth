@@ -2496,6 +2496,8 @@ title = "My Blog"
 [modules]
 enabled = ["errors"]
 
+[bindings]
+
 [modules.errors]
 version = "0.1.0"
 kind = ["renderer", "middleware"]
@@ -2504,4 +2506,4 @@ config = ["errors"]
 crates = ["brocanth-errors"]
 adapted_to = []
 
-# brocanth-digest: efb08bfdfdaae7a6
+# brocanth-digest: 059b97d41c440600

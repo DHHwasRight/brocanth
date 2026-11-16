@@ -14,6 +14,7 @@
 //!
 //! | Id | Severity | When |
 //! |---|---|---|
+//! | `check/bindings-missing` | warning | `brocanth.toml` lists modules and has no `[bindings]` table, or a table older than a Kind a check reads; the checks read module names instead |
 //! | `check/db-url` | error | `[db] url` is not a `postgres://` or `postgresql://` URL |
 //! | `deploy/env` | warning | `--deploy` on `development` or `test` |
 //! | `deploy/no-config` | warning | no file and no variable configures this environment |
@@ -286,9 +287,25 @@ struct Project {
     modules: Vec<String>,
     /// The Kinds `[bindings]` in `brocanth.toml` binds to a provider:
     /// `PgPool` when the project has its one shared pool, `SessionCookie`
-    /// when it has a session cookie.
-    bound: Vec<String>,
+    /// when it has a session cookie. `None` when the file has no
+    /// `[bindings]` table: a project written before the generator recorded
+    /// them, read through [`BEFORE_BINDINGS`].
+    bound: Option<Vec<String>>,
 }
+
+/// The modules that provided each Kind a check reads, before the generator
+/// recorded the provider in `[bindings]`.
+///
+/// Read for a `brocanth.toml` with no `[bindings]` table, and for a table
+/// written before a Kind existed (stage 1 recorded `PgPool` only), so
+/// such a project does not lose `deploy/csrf-off` in silence.
+/// `check/bindings-missing` says how to record the bindings. A table the
+/// current generator wrote binds the Kind whenever one of these modules is
+/// chosen, so for it this list changes nothing.
+const BEFORE_BINDINGS: &[(&str, &[&str])] = &[
+    ("PgPool", &["db"]),
+    ("SessionCookie", &["sessions", "auth"]),
+];
 
 impl Project {
     fn read(app: AppName, root: &Path) -> Self {
@@ -307,13 +324,10 @@ impl Project {
                 )
             })
             .unwrap_or_default();
-        let bound = marker
-            .as_ref()
-            .and_then(|marker| {
-                let bindings = marker.root().at("bindings")?.as_table()?;
-                Some(bindings.keys().map(|k| k.to_owned()).collect())
-            })
-            .unwrap_or_default();
+        let bound = marker.as_ref().and_then(|marker| {
+            let bindings = marker.root().at("bindings")?.as_table()?;
+            Some(bindings.keys().map(|k| k.to_owned()).collect())
+        });
         Self {
             root: root.to_path_buf(),
             app,
@@ -329,8 +343,36 @@ impl Project {
     /// Whether `[bindings]` binds the Kind `kind`: the generator's record of
     /// which module provides it, so a check names the thing and not the
     /// module that gives it.
+    ///
+    /// When the table is missing or does not record `kind`, a module that
+    /// provided `kind` before the bindings were recorded answers too
+    /// ([`BEFORE_BINDINGS`]).
     fn binds(&self, kind: &str) -> bool {
-        self.bound.iter().any(|k| k == kind)
+        self.recorded(kind) || self.provided_before_bindings(kind)
+    }
+
+    fn recorded(&self, kind: &str) -> bool {
+        self.bound
+            .as_ref()
+            .is_some_and(|bound| bound.iter().any(|k| k == kind))
+    }
+
+    fn provided_before_bindings(&self, kind: &str) -> bool {
+        BEFORE_BINDINGS
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .flat_map(|(_, keys)| keys.iter())
+            .any(|key| self.has(key))
+    }
+
+    /// The Kinds a check reads that a chosen module provides and the table
+    /// does not record: the table is missing, or older than the Kind.
+    fn unrecorded(&self) -> Vec<&'static str> {
+        BEFORE_BINDINGS
+            .iter()
+            .map(|(kind, _)| *kind)
+            .filter(|kind| self.provided_before_bindings(kind) && !self.recorded(kind))
+            .collect()
     }
 
     /// Whether a file under `deploy/` names the variable `var`: the
@@ -466,6 +508,28 @@ fn always(project: &Project, config: &Config) -> Vec<Finding> {
                 )),
             );
         }
+    }
+    // A marker with no `[bindings]` table, or one older than a Kind a
+    // check reads: written before the generator recorded them. The checks
+    // fall back to module names, and this says how to stop that.
+    let unrecorded = project.unrecorded();
+    let missing = project.bound.is_none() && !project.modules.is_empty();
+    if missing || !unrecorded.is_empty() {
+        let what = if project.bound.is_none() {
+            "brocanth.toml has no `[bindings]` table, so the checks fall back to module names"
+                .to_owned()
+        } else {
+            format!(
+                "`[bindings]` in brocanth.toml does not record {}, so the checks fall back to module names",
+                unrecorded.join(", ")
+            )
+        };
+        out.push(
+            Finding::warning("check/bindings-missing", what)
+            .at("brocanth.toml")
+            .note("the generator records which module provides each Kind there, and the checks read it")
+            .help("run `brocanth add` or `brocanth remove` once with this CLI: it rewrites brocanth.toml with `[bindings]`"),
+        );
     }
     out
 }
@@ -891,17 +955,19 @@ mod tests {
             modules: modules.iter().map(|m| (*m).to_owned()).collect(),
             // The generator binds the pool exactly when `db` is chosen,
             // and the session cookie when `sessions` or `auth` is.
-            bound: [
-                ("PgPool", modules.contains(&"db")),
-                (
-                    "SessionCookie",
-                    modules.contains(&"sessions") || modules.contains(&"auth"),
-                ),
-            ]
-            .into_iter()
-            .filter(|(_, bound)| *bound)
-            .map(|(kind, _)| kind.to_owned())
-            .collect(),
+            bound: Some(
+                [
+                    ("PgPool", modules.contains(&"db")),
+                    (
+                        "SessionCookie",
+                        modules.contains(&"sessions") || modules.contains(&"auth"),
+                    ),
+                ]
+                .into_iter()
+                .filter(|(_, bound)| *bound)
+                .map(|(kind, _)| kind.to_owned())
+                .collect(),
+            ),
         }
     }
 
@@ -1217,6 +1283,89 @@ drain_delay_secs = 5
         )
         .is_empty());
         assert!(found("[observability]\nmetrics_path = \"\"\nready_path = \"\"\n").is_empty());
+    }
+
+    #[test]
+    fn a_marker_with_no_bindings_falls_back_to_module_names_and_says_so() {
+        let config = Config::from_toml("shop", "production", "").unwrap();
+        let src = sources(&[]);
+        let mut old = project(&["config", "sessions"]);
+        old.bound = None;
+        let found = always(&old, &config);
+        assert_eq!(ids(&found), ["check/bindings-missing"]);
+        let said = found[0].to_string();
+        assert!(
+            said.contains("help: run `brocanth add` or `brocanth remove`"),
+            "{said}"
+        );
+        let found = deploy(&old, &config, &src, &|_| None, &[]);
+        assert!(
+            ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+        // Storage without `db`, read from the module names too.
+        let mut old = project(&["storage", "db"]);
+        old.bound = None;
+        let found = deploy(&old, &config, &src, &|_| None, &[]);
+        assert!(!ids(&found).contains(&"deploy/storage-local"));
+
+        // A table from stage 1, before `SessionCookie`: the same fallback.
+        let mut stage1 = project(&["config", "db", "sessions"]);
+        stage1.bound = Some(vec!["PgPool".to_owned()]);
+        let said = always(&stage1, &config)[0].to_string();
+        assert!(said.contains("does not record SessionCookie"), "{said}");
+        let found = deploy(&stage1, &config, &src, &|_| None, &[]);
+        assert!(
+            ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+
+        // A table that records the Kind: the binding answers, whichever
+        // module provides it, and nothing is said.
+        let mut new = project(&["config", "cookie-module"]);
+        new.bound = Some(vec!["SessionCookie".to_owned()]);
+        assert!(always(&new, &config).is_empty());
+        let found = deploy(&new, &config, &src, &|_| None, &[]);
+        assert!(ids(&found).contains(&"deploy/csrf-off"));
+        new.bound = Some(Vec::new());
+        assert!(always(&new, &config).is_empty());
+        let found = deploy(&new, &config, &src, &|_| None, &[]);
+        assert!(
+            !ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+    }
+
+    #[test]
+    fn a_run_reads_the_marker_with_and_without_bindings() {
+        let root = std::env::temp_dir().join(format!("brocanth-check-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let options = Options {
+            deploy: true,
+            env: None,
+            allow: Vec::new(),
+        };
+        let run_ids = |marker: &str| {
+            std::fs::write(root.join("brocanth.toml"), marker).unwrap();
+            let report = run("shop", &root, &options).unwrap();
+            report.findings.iter().map(|f| f.id).collect::<Vec<_>>()
+        };
+        let modules = "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"config\", \"auth\"]\n";
+        // Old style: no table. The CSRF check still runs, from `auth`.
+        let old = run_ids(modules);
+        assert!(old.contains(&"deploy/csrf-off"), "{old:?}");
+        assert!(old.contains(&"check/bindings-missing"), "{old:?}");
+        // New style: the table records the session cookie.
+        let bound = run_ids(&format!(
+            "{modules}\n[bindings]\nSessionCookie = {{ provider = \"auth\", why = \"chosen\" }}\n"
+        ));
+        assert!(bound.contains(&"deploy/csrf-off"), "{bound:?}");
+        assert!(!bound.contains(&"check/bindings-missing"), "{bound:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

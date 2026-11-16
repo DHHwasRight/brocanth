@@ -2915,6 +2915,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "rsx", "i18n", "i18n-routing"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2947,4 +2949,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: 3651df9fdae61abd
+# brocanth-digest: e6a7fd7a716c4ad7

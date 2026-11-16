@@ -1385,15 +1385,16 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
     // The provider of each Kind, and why it is here: the resolver's
     // decision, so `add`, `remove` and a reader see it without resolving
     // again. Derived from the selection, never stored apart from it.
+    //
+    // Written even when empty: `brocanth check` reads a missing table as a
+    // project from before the bindings, and falls back to module keys.
     let bindings = crate::resolve::bindings(&a.picks);
-    if !bindings.is_empty() {
-        out.push_str("\n[bindings]\n");
-        for (kind, provider) in &bindings {
-            out.push_str(&format!(
-                "{kind} = {{ provider = {provider:?}, why = {why:?} }}\n",
-                why = crate::resolve::why(&a.picks, kind),
-            ));
-        }
+    out.push_str("\n[bindings]\n");
+    for &(kind, provider) in &bindings {
+        out.push_str(&format!(
+            "{kind} = {{ provider = {provider:?}, why = {why:?} }}\n",
+            why = crate::resolve::why(&a.picks, kind),
+        ));
     }
     for key in &a.picks {
         // `adapted_to` is the optional dependencies that were present, so

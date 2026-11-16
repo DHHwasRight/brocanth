@@ -2541,6 +2541,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "admin"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2557,4 +2559,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: 12ac232235986059
+# brocanth-digest: 764a376d79449d63

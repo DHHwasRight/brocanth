@@ -2411,6 +2411,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2419,4 +2421,4 @@ config = []
 crates = ["rsx"]
 adapted_to = []
 
-# brocanth-digest: 73fb81093c360f40
+# brocanth-digest: 33ee6161d4d80362

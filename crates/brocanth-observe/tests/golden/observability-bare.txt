@@ -2282,6 +2282,8 @@ title = "My Blog"
 [modules]
 enabled = ["observability"]
 
+[bindings]
+
 [modules.observability]
 version = "0.1.0"
 kind = ["middleware", "enhancer", "routes"]
@@ -2290,4 +2292,4 @@ config = []
 crates = ["brocanth-observe"]
 adapted_to = []
 
-# brocanth-digest: 9fe389fd2bd67f9b
+# brocanth-digest: 516ba5afb7819989
