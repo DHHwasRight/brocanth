@@ -6162,7 +6162,14 @@ mod tests {
                     let boom = localized(PANIC_PAGE, "/boom");
                     std::fs::write(root.join("src/pages/boom.rs"), boom).unwrap();
                     if has_db {
-                        let pinged = localized(DB_PAGE, "/pinged");
+                        // With `db-embedded` the pool opens on the server
+                        // the application starts, so the page answers.
+                        let page = if picks.contains(&"db-embedded") {
+                            DB_PAGE_EMBEDDED
+                        } else {
+                            DB_PAGE
+                        };
+                        let pinged = localized(page, "/pinged");
                         std::fs::write(root.join("src/pages/pinged.rs"), pinged).unwrap();
                         // Without a config file, the same values come from
                         // the environment; see `closed_db` above.
@@ -6348,6 +6355,39 @@ mod tests {
             .expect("the gate ends")
             .expect_err("no database answers");
         assert!(failed.to_string().contains("help:"), "{failed}");
+    }
+}
+"#;
+
+    /// [`DB_PAGE`] in a project with `db-embedded`: the application starts
+    /// its own server, whatever `[db] url` says, so the page answers. The
+    /// tests run in parallel and share the server.
+    const DB_PAGE_EMBEDDED: &str = r#"//! `/pinged`.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    ctx.db().ping().await?;
+    Ok("pong")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn with_the_embedded_database_the_page_answers() {
+        let app = crate::app::build().expect("the application builds");
+        let answer = tokio::time::timeout(
+            Duration::from_secs(20),
+            crate::app::handle(&app, Request::new(Verb::Get, "/pinged")),
+        )
+        .await
+        .expect("the request ends");
+        assert_eq!(answer.status, 200);
     }
 }
 "#;
