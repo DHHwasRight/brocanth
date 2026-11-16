@@ -1462,9 +1462,6 @@ macro_rules! register {
         //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
         //     ),
         // );
-        let builder = builder.plugin(crate::plugins::storage::Files::new(
-            crate::plugins::storage_settings(&given)?,
-        ));
 
         // -- brocanth-middleware: CSRF ------------------------------------
         //
@@ -1485,6 +1482,9 @@ macro_rules! register {
                 crate::plugins::csrf_settings(&given)?,
             ),
         );
+        let builder = builder.plugin(crate::plugins::storage::Files::new(
+            crate::plugins::storage_settings(&given)?,
+        ));
 
         // -- file routes ---------------------------------------------------
         //
@@ -1517,9 +1517,9 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-type WithStorage = After<crate::plugins::storage::Files, Base>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithStorage>;
-type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithMiddlewareCsrf>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, Base>;
+type WithStorage = After<crate::plugins::storage::Files, WithMiddlewareCsrf>;
+type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithStorage>;
 pub type Installed = WithStorageRoutes;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
@@ -1620,33 +1620,6 @@ pub struct Setting {
 /// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
-        path: "storage.root",
-        help: "Where uploads are stored.",
-        flag: true,
-        file: "src/modules/storage.rs",
-        flags: crate::modules::storage::MODULE.flags,
-        none_as: None,
-        env: "MY_PHOTOS_STORAGE__ROOT",
-    },
-    Setting {
-        path: "storage.secret",
-        help: "Signs file tokens and keys object addresses.",
-        flag: false,
-        file: "src/modules/storage.rs",
-        flags: Flags::Off,
-        none_as: None,
-        env: "MY_PHOTOS_STORAGE__SECRET",
-    },
-    Setting {
-        path: "storage.token_ttl",
-        help: "Seconds a file token lives.",
-        flag: true,
-        file: "src/modules/storage.rs",
-        flags: crate::modules::storage::MODULE.flags,
-        none_as: None,
-        env: "MY_PHOTOS_STORAGE__TOKEN_TTL",
-    },
-    Setting {
         path: "csrf.cookie",
         help: "The cookie this hook owns.",
         flag: true,
@@ -1681,6 +1654,33 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::middleware_csrf::MODULE.flags,
         none_as: None,
         env: "MY_PHOTOS_CSRF__SECURE",
+    },
+    Setting {
+        path: "storage.root",
+        help: "Where uploads are stored.",
+        flag: true,
+        file: "src/modules/storage.rs",
+        flags: crate::modules::storage::MODULE.flags,
+        none_as: None,
+        env: "MY_PHOTOS_STORAGE__ROOT",
+    },
+    Setting {
+        path: "storage.secret",
+        help: "Signs file tokens and keys object addresses.",
+        flag: false,
+        file: "src/modules/storage.rs",
+        flags: Flags::Off,
+        none_as: None,
+        env: "MY_PHOTOS_STORAGE__SECRET",
+    },
+    Setting {
+        path: "storage.token_ttl",
+        help: "Seconds a file token lives.",
+        flag: true,
+        file: "src/modules/storage.rs",
+        flags: crate::modules::storage::MODULE.flags,
+        none_as: None,
+        env: "MY_PHOTOS_STORAGE__TOKEN_TTL",
     },
     Setting {
         path: "storage_routes.max_bytes",
@@ -1898,18 +1898,18 @@ pub fn read_line() -> Result<bool, String> {
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
-    let storage = crate::plugins::storage::Settings::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
+    let storage = crate::plugins::storage::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
-        ("storage.root", format!("{:?}", storage.root)),
-        ("storage.secret", format!("{:?}", storage.secret)),
-        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         ("csrf.cookie", format!("{:?}", csrf.cookie)),
         ("csrf.field", format!("{:?}", csrf.field)),
         ("csrf.header", format!("{:?}", csrf.header)),
         ("csrf.secure", format!("{:?}", csrf.secure)),
+        ("storage.root", format!("{:?}", storage.root)),
+        ("storage.secret", format!("{:?}", storage.secret)),
+        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         (
             "storage_routes.max_bytes",
             format!("{:?}", storage_routes.max_bytes),
@@ -1951,21 +1951,6 @@ where
     }
 }
 
-/// `[storage]`, as this binary runs it without a file: the plugin's
-/// defaults, then the environment, then the flags.
-pub fn storage_settings(given: &[Given]) -> Result<crate::plugins::storage::Settings, String> {
-    let mut settings = crate::plugins::storage::Settings::default();
-    for given in given {
-        match given.setting.path {
-            "storage.root" => settings.root = parsed(given)?,
-            "storage.secret" => settings.secret = parsed(given)?,
-            "storage.token_ttl" => settings.token_ttl = parsed(given)?,
-            _ => {}
-        }
-    }
-    Ok(settings)
-}
-
 /// `[csrf]`, as this binary runs it without a file: the plugin's
 /// defaults, then the environment, then the flags.
 pub fn csrf_settings(given: &[Given]) -> Result<brocanth_middleware::CsrfConfig, String> {
@@ -1976,6 +1961,21 @@ pub fn csrf_settings(given: &[Given]) -> Result<brocanth_middleware::CsrfConfig,
             "csrf.field" => settings.field = parsed(given)?,
             "csrf.header" => settings.header = optional(given)?,
             "csrf.secure" => settings.secure = parsed(given)?,
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+/// `[storage]`, as this binary runs it without a file: the plugin's
+/// defaults, then the environment, then the flags.
+pub fn storage_settings(given: &[Given]) -> Result<crate::plugins::storage::Settings, String> {
+    let mut settings = crate::plugins::storage::Settings::default();
+    for given in given {
+        match given.setting.path {
+            "storage.root" => settings.root = parsed(given)?,
+            "storage.secret" => settings.secret = parsed(given)?,
+            "storage.token_ttl" => settings.token_ttl = parsed(given)?,
             _ => {}
         }
     }
@@ -2012,18 +2012,18 @@ pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings
 
 /// Each setting as the plugin holds it, after every layer.
 fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
-    let storage = storage_settings(given)?;
     let csrf = csrf_settings(given)?;
+    let storage = storage_settings(given)?;
     let storage_routes = storage_routes_settings(given)?;
     let server = server_settings(given)?;
     Ok(vec![
-        ("storage.root", format!("{:?}", storage.root)),
-        ("storage.secret", format!("{:?}", storage.secret)),
-        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         ("csrf.cookie", format!("{:?}", csrf.cookie)),
         ("csrf.field", format!("{:?}", csrf.field)),
         ("csrf.header", format!("{:?}", csrf.header)),
         ("csrf.secure", format!("{:?}", csrf.secure)),
+        ("storage.root", format!("{:?}", storage.root)),
+        ("storage.secret", format!("{:?}", storage.secret)),
+        ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
         (
             "storage_routes.max_bytes",
             format!("{:?}", storage_routes.max_bytes),
@@ -2171,7 +2171,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b01cd7c53f37f628
+// brocanth-digest: 10b0feb04f71069a
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2902,7 +2902,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage};
@@ -3010,21 +3010,13 @@ impl HookSource for StorageRoutes {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(routes) = &self.routes {
-            registrar.request_async(
-                "lift",
-                Order::new().before_if_present("csrf.check"),
-                routes.csrf_lift(),
-            );
-            // After the CSRF check, so an upload from another site stops
-            // there, and after the proxy reader and the rate limiter.
-            registrar.request_async(
-                "answer",
-                Order::new()
-                    .after_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                routes.clone(),
-            );
+            // `Guard`: the CSRF check refuses last in that phase, so the
+            // token this hook copies out of the form is there when it
+            // reads.
+            registrar.request_async("lift", Phase::Guard, Order::new(), routes.csrf_lift());
+            // `Cache`, after every guard: an upload from another site
+            // stops at the CSRF check, and a flood at the rate limiter.
+            registrar.request_async("answer", Phase::Cache, Order::new(), routes.clone());
         }
         Ok(())
     }

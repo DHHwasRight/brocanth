@@ -1522,13 +1522,6 @@ macro_rules! register {
         //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
         //     ),
         // );
-        let builder = builder
-            .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
-            .map_err(|e| e.to_string())?;
-        // PgPool <- db (oauth-client requires PgPool). `brocanth.toml` [bindings] records it.
-        let builder = builder
-            .plugin_from_config::<crate::plugins::db::Database>("db")
-            .map_err(|e| e.to_string())?;
 
         // -- brocanth-middleware: CSRF ------------------------------------
         //
@@ -1545,6 +1538,13 @@ macro_rules! register {
         // `token.hidden_field()` is the input a form carries.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
+            .map_err(|e| e.to_string())?;
+        // PgPool <- db (oauth-client requires PgPool). `brocanth.toml` [bindings] records it.
+        let builder = builder
+            .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
@@ -1567,10 +1567,10 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, Base>;
+type WithAdmin = After<crate::plugins::admin::AdminSettings, WithMiddlewareCsrf>;
 type WithDb = After<crate::plugins::db::Database, WithAdmin>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithDb>;
-type WithAuth = After<crate::plugins::auth::Auth, WithMiddlewareCsrf>;
+type WithAuth = After<crate::plugins::auth::Auth, WithDb>;
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithAuth>;
 pub type Installed = WithOauthClient;
 
@@ -1688,6 +1688,42 @@ pub struct Setting {
 /// Every setting the framework and the modules declared. `brocanth add`
 /// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
+    Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
     Setting {
         path: "admin.title",
         help: "The end of every <title>, and the header and index heading unless set.",
@@ -1813,42 +1849,6 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::db::MODULE.flags,
         none_as: None,
         text: true,
-    },
-    Setting {
-        path: "csrf.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.field",
-        help: "The form field the token comes back in.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.header",
-        help: "The header a fetch caller may send instead of the field. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: false,
     },
     Setting {
         path: "auth.signing_key_env",
@@ -2258,13 +2258,17 @@ pub fn read_line() -> Result<bool, String> {
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
+    let csrf = brocanth_middleware::CsrfConfig::default();
     let admin = crate::plugins::admin::Settings::default();
     let db = crate::plugins::db::Settings::default();
-    let csrf = brocanth_middleware::CsrfConfig::default();
     let auth = crate::plugins::auth::Settings::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("admin.title", format!("{:?}", admin.title)),
         ("admin.header", format!("{:?}", admin.header)),
         ("admin.index_title", format!("{:?}", admin.index_title)),
@@ -2282,10 +2286,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.read_only", format!("{:?}", db.read_only)),
         ("db.application_name", format!("{:?}", db.application_name)),
         ("db.ca_file", format!("{:?}", db.ca_file)),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "auth.signing_key_env",
             format!("{:?}", auth.signing_key_env),
@@ -2444,7 +2444,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6ca5fb29db0a491b
+// brocanth-digest: 3a55f2e7c52d0db7
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3122,6 +3122,20 @@ name = "My App"
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
 [admin]
 # The end of every <title>, and the header and index heading unless set.
 title = "My App admin"
@@ -3162,20 +3176,6 @@ application_name = "my-app"
 # certificate and can fall back to plain text: for a remote server, set
 # this or sslmode=verify-full in the URL.
 # ca_file = "/etc/ssl/certs/db-ca.pem"
-
-[csrf]
-# The cookie this hook owns.
-cookie = "csrf_token"
-# The form field the token comes back in.
-field = "_csrf_token"
-# The header a fetch caller may send instead of the field. Empty means none.
-# While it is set, the cookie is not HttpOnly: a script reads it.
-# header = "x-csrf-token"
-# Paths never checked, each with everything under it.
-# For a caller that is not a browser: a webhook, a device.
-exempt = []
-# Send the cookie over HTTPS only.
-secure = true
 
 [auth]
 # The name of the variable that holds the session signing key.
@@ -4600,6 +4600,24 @@ make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
 
+## CSRF
+
+`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
+is a double-submit cookie: the hook mints a token, sets it as its own
+cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
+unless the request sends the same value back -- in the `_csrf_token`
+field, or in the `X-CSRF-Token` header.
+
+So every form that posts carries the hidden field. In a page, read
+the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
+write `token.hidden_field()` inside the `<form>`. For HTML this
+project did not template, `token.stamp_forms(html)` adds the field to
+every posting form; the admin uses it.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
 ## The admin
 
 `src/plugins/admin/mod.rs` mounts the backoffice at `mount_at` in
@@ -4667,24 +4685,6 @@ ctx.db()
 A `brocanth_db::DbError` goes through `?` as a 500. Its message goes to the
 log, never to the client.
 
-## CSRF
-
-`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
-is a double-submit cookie: the hook mints a token, sets it as its own
-cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
-unless the request sends the same value back -- in the `_csrf_token`
-field, or in the `X-CSRF-Token` header.
-
-So every form that posts carries the hidden field. In a page, read
-the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
-write `token.hidden_field()` inside the `<form>`. For HTML this
-project did not template, `token.stamp_forms(html)` adds the field to
-every posting form; the admin uses it.
-
-A 403 from this hook is a form that lost its token, or a caller that
-is not a browser. Add that path to `exempt`; do not remove the
-registration.
-
 ## Connected accounts
 
 `src/plugins/oauth_client/mod.rs` mounts the connect pages at
@@ -4733,7 +4733,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: c73460caa416a434 -->
+<!-- brocanth-digest: 9c367d4ef56addb4 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

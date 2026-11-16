@@ -2161,6 +2161,103 @@ macro_rules! register {
         //     ),
         // );
 
+        // -- brocanth-middleware: CSRF ------------------------------------
+        //
+        // Not one of the five above. Each of those encodes a fact about
+        // this deployment; this one encodes a fact about browsers: any
+        // page on any site can post a form here, and the cookies ride
+        // along. That is true wherever this runs, so this hook is on, and
+        // the only thing to decide is which paths are exempt -- a webhook,
+        // or anything else whose caller is not a browser:
+        //
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
+        //
+        // The token for the request is `ctx.hooked::<CsrfToken>()`;
+        // `token.hidden_field()` is the input a form carries.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: security headers ------------------------
+        //
+        // HSTS (over HTTPS only), nosniff, Referrer-Policy, X-Frame-Options
+        // DENY, a Content-Security-Policy and a Permissions-Policy. The
+        // policy allows dp-swap's two inline scripts by their SHA-256, so
+        // there is no `'unsafe-inline'`. A script you inline yourself needs
+        // `.inline_script(TEXT)` on the configuration.
+        //
+        // HSTS goes out only when the request is known to be HTTPS. Behind
+        // a TLS terminator, say so: `behind_tls = true` under
+        // [security_headers] in config/<env>.toml.
+        let builder = builder
+            .plugin_hooking_from_config_with::<brocanth_middleware::SecurityHeaders>(
+                "security_headers",
+                |config| {
+                    config
+                        .inline_script(brocanth_admin::INLINE_SCRIPT)
+                        .page_script(brocanth_gtag::SCRIPT, brocanth_gtag::CSP)
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: rate limit ------------------------------
+        //
+        // A fixed window per key. Each rule is a group of routes, a limit
+        // and a window. THE EXAMPLE RULE IS FOR A LOGIN FORM, not a
+        // recommendation: replace it with numbers from your own traffic.
+        // The rules are `[[rate_limit.rules]]` in config/<env>.toml.
+        //
+        // The key is the client address. Behind a proxy, register
+        // `ProxyHeaders` above, or name the one header your edge sets and
+        // strips in `ip_header`. Without either, every client behind the
+        // balancer shares its address and one bucket; the limiter says so
+        // once on stderr.
+        //
+        // This counts in this process. With more than one process, use
+        // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::RateLimit>("rate_limit")
+            .map_err(|e| e.to_string())?;
+        let builder = builder.hooks_off_from(
+            "rate_limit",
+            "src/modules/middleware_rate_limit.rs",
+            crate::modules::middleware_rate_limit::MODULE.hooks.off(),
+        );
+
+        // -- brocanth-middleware: conditional GET -------------------------
+        //
+        // A weak ETag over the body of every GET that answers 200, and a
+        // 304 with no body when the browser sends the same tag back. A
+        // page that sets `Last-Modified` also answers If-Modified-Since.
+        // The page still renders: this saves the transfer, not the work.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::ConditionalGet>("conditional_get")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: compression -----------------------------
+        //
+        // gzip or brotli, as the browser's Accept-Encoding asks, on a
+        // buffered text body of `min_bytes` or more. Never on a stream:
+        // an SSE event must not wait for a compressor's window. The media
+        // types are an allow-list; the list is `types` under [compression] in config/<env>.toml.
+        //
+        // Behind a proxy or a CDN that compresses, turn this off: the
+        // work is done twice and the second pass finds nothing to gain.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Compression>("compression")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: flash -----------------------------------
+        //
+        // Messages for the next page, in a signed cookie. A page writes
+        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
+        // the next HTML page shows the messages inside the layout's
+        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
+        // configuration below.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
+            .map_err(|e| e.to_string())?;
+
         // -- brocanth-gtag: Google Analytics, after consent ----------
         //
         // A banner on every HTML page, and Google's tag only once the
@@ -2222,23 +2319,6 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
-
-        // -- brocanth-middleware: CSRF ------------------------------------
-        //
-        // Not one of the five above. Each of those encodes a fact about
-        // this deployment; this one encodes a fact about browsers: any
-        // page on any site can post a form here, and the cookies ride
-        // along. That is true wherever this runs, so this hook is on, and
-        // the only thing to decide is which paths are exempt -- a webhook,
-        // or anything else whose caller is not a browser:
-        //
-        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
-        //
-        // The token for the request is `ctx.hooked::<CsrfToken>()`;
-        // `token.hidden_field()` is the input a form carries.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
-            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::openapi::OpenApi>("openapi")
             .map_err(|e| e.to_string())?;
@@ -2295,28 +2375,6 @@ macro_rules! register {
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
 
-        // -- brocanth-middleware: security headers ------------------------
-        //
-        // HSTS (over HTTPS only), nosniff, Referrer-Policy, X-Frame-Options
-        // DENY, a Content-Security-Policy and a Permissions-Policy. The
-        // policy allows dp-swap's two inline scripts by their SHA-256, so
-        // there is no `'unsafe-inline'`. A script you inline yourself needs
-        // `.inline_script(TEXT)` on the configuration.
-        //
-        // HSTS goes out only when the request is known to be HTTPS. Behind
-        // a TLS terminator, say so: `behind_tls = true` under
-        // [security_headers] in config/<env>.toml.
-        let builder = builder
-            .plugin_hooking_from_config_with::<brocanth_middleware::SecurityHeaders>(
-                "security_headers",
-                |config| {
-                    config
-                        .inline_script(brocanth_admin::INLINE_SCRIPT)
-                        .page_script(brocanth_gtag::SCRIPT, brocanth_gtag::CSP)
-                },
-            )
-            .map_err(|e| e.to_string())?;
-
         // -- incoming webhooks ---------------------------------------------
         //
         // Answers POST /webhooks/{source} before the CSRF check: signature,
@@ -2366,30 +2424,6 @@ macro_rules! register {
             "src/modules/storage_routes.rs",
             crate::modules::storage_routes::MODULE.hooks.off(),
         );
-
-        // -- brocanth-middleware: rate limit ------------------------------
-        //
-        // A fixed window per key. Each rule is a group of routes, a limit
-        // and a window. THE EXAMPLE RULE IS FOR A LOGIN FORM, not a
-        // recommendation: replace it with numbers from your own traffic.
-        // The rules are `[[rate_limit.rules]]` in config/<env>.toml.
-        //
-        // The key is the client address. Behind a proxy, register
-        // `ProxyHeaders` above, or name the one header your edge sets and
-        // strips in `ip_header`. Without either, every client behind the
-        // balancer shares its address and one bucket; the limiter says so
-        // once on stderr.
-        //
-        // This counts in this process. With more than one process, use
-        // `SharedRateLimit` and `rate_limit::PgStore` (feature `postgres`).
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::RateLimit>("rate_limit")
-            .map_err(|e| e.to_string())?;
-        let builder = builder.hooks_off_from(
-            "rate_limit",
-            "src/modules/middleware_rate_limit.rs",
-            crate::modules::middleware_rate_limit::MODULE.hooks.off(),
-        );
         let builder = builder
             .plugin_from_config::<crate::plugins::oauth_client::OauthClientPlugin>("oauth_client")
             .map_err(|e| e.to_string())?;
@@ -2408,42 +2442,8 @@ macro_rules! register {
             "src/modules/errors.rs",
             crate::modules::errors::MODULE.hooks.off(),
         );
-
-        // -- brocanth-middleware: conditional GET -------------------------
-        //
-        // A weak ETag over the body of every GET that answers 200, and a
-        // 304 with no body when the browser sends the same tag back. A
-        // page that sets `Last-Modified` also answers If-Modified-Since.
-        // The page still renders: this saves the transfer, not the work.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::ConditionalGet>("conditional_get")
-            .map_err(|e| e.to_string())?;
-
-        // -- brocanth-middleware: flash -----------------------------------
-        //
-        // Messages for the next page, in a signed cookie. A page writes
-        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
-        // the next HTML page shows the messages inside the layout's
-        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
-        // configuration below.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
-            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::auth_screens::AuthScreens>("auth_screens")
-            .map_err(|e| e.to_string())?;
-
-        // -- brocanth-middleware: compression -----------------------------
-        //
-        // gzip or brotli, as the browser's Accept-Encoding asks, on a
-        // buffered text body of `min_bytes` or more. Never on a stream:
-        // an SSE event must not wait for a compressor's window. The media
-        // types are an allow-list; the list is `types` under [compression] in config/<env>.toml.
-        //
-        // Behind a proxy or a CDN that compresses, turn this off: the
-        // work is done twice and the second pass finds nothing to gain.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::Compression>("compression")
             .map_err(|e| e.to_string())?;
         builder
     }};
@@ -2463,15 +2463,23 @@ pub(crate) use register;
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
 type WithDbEmbedded = After<crate::plugins::db_embedded::DbEmbedded, WithSessions>;
 type WithPolicy = After<crate::plugins::policy::Policies, WithDbEmbedded>;
-type WithGtag = After<brocanth_gtag::Gtag, WithPolicy>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithPolicy>;
+type WithMiddlewareSecurityHeaders =
+    After<brocanth_middleware::SecurityHeaders, WithMiddlewareCsrf>;
+type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithMiddlewareSecurityHeaders>;
+type WithMiddlewareConditionalGet =
+    After<brocanth_middleware::ConditionalGet, WithMiddlewareRateLimit>;
+type WithMiddlewareCompression =
+    After<brocanth_middleware::Compression, WithMiddlewareConditionalGet>;
+type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareCompression>;
+type WithGtag = After<brocanth_gtag::Gtag, WithFlash>;
 type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
 type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
 type WithMeta = After<crate::plugins::meta::Meta, WithI18n>;
 type WithObservability = After<crate::plugins::observability::Observe, WithMeta>;
 type WithDb = After<crate::plugins::db::Database, WithObservability>;
 type WithJobs = After<crate::plugins::jobs::Jobs, WithDb>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithJobs>;
-type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithMiddlewareCsrf>;
+type WithOpenapi = After<crate::plugins::openapi::OpenApi, WithJobs>;
 type WithValidation = After<crate::plugins::validation::Validation, WithOpenapi>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithValidation>;
 type WithRobots = After<crate::plugins::robots::Robots, WithRealtime>;
@@ -2483,46 +2491,40 @@ type WithFlags = After<crate::plugins::flags::Flags, WithCache>;
 type WithMail = After<crate::plugins::mail::MailPlugin, WithFlags>;
 type WithAuth = After<crate::plugins::auth::Auth, WithMail>;
 type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
-type WithMiddlewareSecurityHeaders = After<brocanth_middleware::SecurityHeaders, WithStorage>;
-type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithMiddlewareSecurityHeaders>;
+type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithStorage>;
 type WithWebhooksOut = After<crate::plugins::webhooks_out::WebhooksOut, WithWebhooksIn>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithWebhooksOut>;
 type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithAudit>;
 type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithSuperuser>;
-type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithStorageRoutes>;
-type WithOauthClient =
-    After<crate::plugins::oauth_client::OauthClientPlugin, WithMiddlewareRateLimit>;
+type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithStorageRoutes>;
 type WithErrors = After<brocanth_errors::Errors, WithOauthClient>;
-type WithMiddlewareConditionalGet = After<brocanth_middleware::ConditionalGet, WithErrors>;
-type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareConditionalGet>;
-type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFlash>;
-type WithMiddlewareCompression = After<brocanth_middleware::Compression, WithAuthScreens>;
-pub type Installed = WithMiddlewareCompression;
+type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithErrors>;
+pub type Installed = WithAuthScreens;
 
-type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, NoHooks>;
-type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
-type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedCsrf>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
 type HookedSecurityHeaders =
-    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedAnalytics>;
+    Both<<brocanth_middleware::SecurityHeaders as HookSource>::Families, HookedCsrf>;
+type HookedRateLimit =
+    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
+type HookedConditionalGet =
+    Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedRateLimit>;
+type HookedCompression =
+    Both<<brocanth_middleware::Compression as HookSource>::Families, HookedConditionalGet>;
+type HookedFlashPlugin =
+    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedCompression>;
+type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, HookedFlashPlugin>;
+type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
+type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedI18n>;
 type HookedWebhooksIn =
-    Both<<crate::plugins::webhooks_in::WebhooksIn as HookSource>::Families, HookedSecurityHeaders>;
+    Both<<crate::plugins::webhooks_in::WebhooksIn as HookSource>::Families, HookedAnalytics>;
 type HookedAuditPlugin =
     Both<<brocanth_audit::AuditPlugin as HookSource>::Families, HookedWebhooksIn>;
 type HookedStorageRoutes = Both<
     <crate::plugins::storage_routes::StorageRoutes as HookSource>::Families,
     HookedAuditPlugin,
 >;
-type HookedRateLimit =
-    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedStorageRoutes>;
-type HookedErrors = Both<<brocanth_errors::Errors as HookSource>::Families, HookedRateLimit>;
-type HookedConditionalGet =
-    Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedErrors>;
-type HookedFlashPlugin =
-    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedConditionalGet>;
-type HookedCompression =
-    Both<<brocanth_middleware::Compression as HookSource>::Families, HookedFlashPlugin>;
+type HookedErrors = Both<<brocanth_errors::Errors as HookSource>::Families, HookedStorageRoutes>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2530,7 +2532,7 @@ type HookedCompression =
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedCompression;
+pub type Hooks = HookedErrors;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -2792,6 +2794,258 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/db_embedded.rs",
         flags: crate::modules::db_embedded::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.behind_tls",
+        help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.nosniff",
+        help: "Send `X-Content-Type-Options: nosniff`.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.referrer_policy",
+        help: "The `Referrer-Policy`. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.permissions_policy",
+        help: "The `Permissions-Policy`. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "security_headers.hsts.enabled",
+        help: "Send `Strict-Transport-Security`.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.max_age",
+        help: "How long the browser remembers HTTPS-only, in seconds.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.include_subdomains",
+        help: "The HSTS rule covers every subdomain too.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.hsts.preload",
+        help: "Ask to be on the browsers' built-in HSTS list.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.enabled",
+        help: "Send a `Content-Security-Policy`.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_only",
+        help: "Send the policy as `Content-Security-Policy-Report-Only`.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "security_headers.csp.report_uri",
+        help: "Where a browser reports what the policy blocked. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_security_headers.rs",
+        flags: crate::modules::middleware_security_headers::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.ip_header",
+        help: "A header that holds the client address, set by your edge. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.session_cookie",
+        help: "The session cookie, for a rule keyed by session. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "rate_limit.fail_open",
+        help: "Let a request through when the counter store fails.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "conditional_get.etag",
+        help: "Set a weak ETag over the body when the page set none.",
+        flag: true,
+        file: "src/modules/middleware_conditional_get.rs",
+        flags: crate::modules::middleware_conditional_get::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "conditional_get.last_modified",
+        help: "Answer If-Modified-Since from a Last-Modified the page set.",
+        flag: true,
+        file: "src/modules/middleware_conditional_get.rs",
+        flags: crate::modules::middleware_conditional_get::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.min_bytes",
+        help: "The smallest body that is compressed, in bytes.",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.gzip",
+        help: "Offer gzip.",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.brotli",
+        help: "Offer brotli (`br`).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.gzip_level",
+        help: "The gzip level, 1 (fast) to 9 (small).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "compression.brotli_quality",
+        help: "The brotli quality, 0 (fast) to 11 (small).",
+        flag: true,
+        file: "src/modules/middleware_compression.rs",
+        flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "flash.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.key_env",
+        help: "The environment variable that holds the signing key.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -3255,42 +3509,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "csrf.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.field",
-        help: "The form field the token comes back in.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.header",
-        help: "The header a fetch caller may send instead of the field. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "openapi.title",
         help: "The name of the API.",
         flag: true,
@@ -3660,105 +3878,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "security_headers.behind_tls",
-        help: "Every request arrives through a TLS terminator, so HSTS always goes out.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.nosniff",
-        help: "Send `X-Content-Type-Options: nosniff`.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.referrer_policy",
-        help: "The `Referrer-Policy`. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "security_headers.permissions_policy",
-        help: "The `Permissions-Policy`. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "security_headers.hsts.enabled",
-        help: "Send `Strict-Transport-Security`.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.hsts.max_age",
-        help: "How long the browser remembers HTTPS-only, in seconds.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.hsts.include_subdomains",
-        help: "The HSTS rule covers every subdomain too.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.hsts.preload",
-        help: "Ask to be on the browsers' built-in HSTS list.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.csp.enabled",
-        help: "Send a `Content-Security-Policy`.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.csp.report_only",
-        help: "Send the policy as `Content-Security-Policy-Report-Only`.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "security_headers.csp.report_uri",
-        help: "Where a browser reports what the policy blocked. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_security_headers.rs",
-        flags: crate::modules::middleware_security_headers::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
         path: "webhooks_in.path",
         help: "Where deliveries arrive: {path}/{source}.",
         flag: true,
@@ -4020,33 +4139,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "rate_limit.ip_header",
-        help: "A header that holds the client address, set by your edge. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "rate_limit.session_cookie",
-        help: "The session cookie, for a rule keyed by session. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "rate_limit.fail_open",
-        help: "Let a request through when the counter store fails.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "oauth_client.base_url",
         help: "The scheme and host the providers send the browser back to.",
         flag: true,
@@ -4155,51 +4247,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "conditional_get.etag",
-        help: "Set a weak ETag over the body when the page set none.",
-        flag: true,
-        file: "src/modules/middleware_conditional_get.rs",
-        flags: crate::modules::middleware_conditional_get::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "conditional_get.last_modified",
-        help: "Answer If-Modified-Since from a Last-Modified the page set.",
-        flag: true,
-        file: "src/modules/middleware_conditional_get.rs",
-        flags: crate::modules::middleware_conditional_get::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "flash.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "flash.key_env",
-        help: "The environment variable that holds the signing key.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "flash.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "auth_screens.base_url",
         help: "The address links in mail start with: scheme, host, port.",
         flag: true,
@@ -4216,51 +4263,6 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::auth_screens::MODULE.flags,
         none_as: None,
         text: true,
-    },
-    Setting {
-        path: "compression.min_bytes",
-        help: "The smallest body that is compressed, in bytes.",
-        flag: true,
-        file: "src/modules/middleware_compression.rs",
-        flags: crate::modules::middleware_compression::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "compression.gzip",
-        help: "Offer gzip.",
-        flag: true,
-        file: "src/modules/middleware_compression.rs",
-        flags: crate::modules::middleware_compression::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "compression.brotli",
-        help: "Offer brotli (`br`).",
-        flag: true,
-        file: "src/modules/middleware_compression.rs",
-        flags: crate::modules::middleware_compression::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "compression.gzip_level",
-        help: "The gzip level, 1 (fast) to 9 (small).",
-        flag: true,
-        file: "src/modules/middleware_compression.rs",
-        flags: crate::modules::middleware_compression::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "compression.brotli_quality",
-        help: "The brotli quality, 0 (fast) to 11 (small).",
-        flag: true,
-        file: "src/modules/middleware_compression.rs",
-        flags: crate::modules::middleware_compression::MODULE.flags,
-        none_as: None,
-        text: false,
     },
     Setting {
         path: "server.shutdown_grace_secs",
@@ -4592,6 +4594,12 @@ pub fn flag_args(
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
     let db_embedded = crate::plugins::db_embedded::Settings::default();
+    let csrf = brocanth_middleware::CsrfConfig::default();
+    let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
+    let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
+    let compression = brocanth_middleware::CompressionConfig::default();
+    let flash = brocanth_middleware::FlashConfig::default();
     let gtag = brocanth_gtag::GtagConfig::default();
     let admin = crate::plugins::admin::Settings::default();
     let i18n = brocanth_i18n::NegotiatorConfig::default();
@@ -4599,7 +4607,6 @@ fn defaults() -> Vec<(&'static str, String)> {
     let observability = crate::plugins::observability::Settings::default();
     let db = crate::plugins::db::Settings::default();
     let jobs = crate::plugins::jobs::Settings::default();
-    let csrf = brocanth_middleware::CsrfConfig::default();
     let openapi = crate::plugins::openapi::Settings::default();
     let validation = crate::plugins::validation::Settings::default();
     let realtime = crate::plugins::realtime::Settings::default();
@@ -4611,20 +4618,15 @@ fn defaults() -> Vec<(&'static str, String)> {
     let mail = crate::plugins::mail::Settings::default();
     let auth = crate::plugins::auth::Settings::default();
     let storage = crate::plugins::storage::Settings::default();
-    let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let webhooks_in = crate::plugins::webhooks_in::Settings::default();
     let webhooks_out = crate::plugins::webhooks_out::Settings::default();
     let audit = brocanth_audit::AuditConfig::default();
     let auth_oauth = crate::plugins::auth_oauth::Settings::default();
     let superuser = crate::plugins::superuser::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
-    let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
     let errors = brocanth_errors::ErrorsConfig::default();
-    let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
-    let flash = brocanth_middleware::FlashConfig::default();
     let auth_screens = crate::plugins::auth_screens::Settings::default();
-    let compression = brocanth_middleware::CompressionConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
@@ -4636,6 +4638,91 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", db_embedded.database),
         ),
         ("db_embedded.timeout", format!("{:?}", db_embedded.timeout)),
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
+        (
+            "security_headers.behind_tls",
+            format!("{:?}", security_headers.behind_tls),
+        ),
+        (
+            "security_headers.nosniff",
+            format!("{:?}", security_headers.nosniff),
+        ),
+        (
+            "security_headers.referrer_policy",
+            format!("{:?}", security_headers.referrer_policy),
+        ),
+        (
+            "security_headers.permissions_policy",
+            format!("{:?}", security_headers.permissions_policy),
+        ),
+        (
+            "security_headers.hsts.enabled",
+            format!("{:?}", security_headers.hsts.enabled),
+        ),
+        (
+            "security_headers.hsts.max_age",
+            format!("{:?}", security_headers.hsts.max_age),
+        ),
+        (
+            "security_headers.hsts.include_subdomains",
+            format!("{:?}", security_headers.hsts.include_subdomains),
+        ),
+        (
+            "security_headers.hsts.preload",
+            format!("{:?}", security_headers.hsts.preload),
+        ),
+        (
+            "security_headers.csp.enabled",
+            format!("{:?}", security_headers.csp.enabled),
+        ),
+        (
+            "security_headers.csp.report_only",
+            format!("{:?}", security_headers.csp.report_only),
+        ),
+        (
+            "security_headers.csp.report_uri",
+            format!("{:?}", security_headers.csp.report_uri),
+        ),
+        (
+            "rate_limit.ip_header",
+            format!("{:?}", rate_limit.ip_header),
+        ),
+        (
+            "rate_limit.session_cookie",
+            format!("{:?}", rate_limit.session_cookie),
+        ),
+        (
+            "rate_limit.fail_open",
+            format!("{:?}", rate_limit.fail_open),
+        ),
+        (
+            "conditional_get.etag",
+            format!("{:?}", conditional_get.etag),
+        ),
+        (
+            "conditional_get.last_modified",
+            format!("{:?}", conditional_get.last_modified),
+        ),
+        (
+            "compression.min_bytes",
+            format!("{:?}", compression.min_bytes),
+        ),
+        ("compression.gzip", format!("{:?}", compression.gzip)),
+        ("compression.brotli", format!("{:?}", compression.brotli)),
+        (
+            "compression.gzip_level",
+            format!("{:?}", compression.gzip_level),
+        ),
+        (
+            "compression.brotli_quality",
+            format!("{:?}", compression.brotli_quality),
+        ),
+        ("flash.cookie", format!("{:?}", flash.cookie)),
+        ("flash.key_env", format!("{:?}", flash.key_env)),
+        ("flash.secure", format!("{:?}", flash.secure)),
         ("gtag.enabled", format!("{:?}", gtag.enabled)),
         ("gtag.measurement_id", format!("{:?}", gtag.measurement_id)),
         ("gtag.consent_mode", format!("{:?}", gtag.consent_mode)),
@@ -4723,10 +4810,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("db.ca_file", format!("{:?}", db.ca_file)),
         ("jobs.worker", format!("{:?}", jobs.worker)),
         ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("openapi.title", format!("{:?}", openapi.title)),
         ("openapi.version", format!("{:?}", openapi.version)),
         ("validation.report", format!("{:?}", validation.report)),
@@ -4795,50 +4878,6 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("storage.migrate", format!("{:?}", storage.migrate)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
-        (
-            "security_headers.behind_tls",
-            format!("{:?}", security_headers.behind_tls),
-        ),
-        (
-            "security_headers.nosniff",
-            format!("{:?}", security_headers.nosniff),
-        ),
-        (
-            "security_headers.referrer_policy",
-            format!("{:?}", security_headers.referrer_policy),
-        ),
-        (
-            "security_headers.permissions_policy",
-            format!("{:?}", security_headers.permissions_policy),
-        ),
-        (
-            "security_headers.hsts.enabled",
-            format!("{:?}", security_headers.hsts.enabled),
-        ),
-        (
-            "security_headers.hsts.max_age",
-            format!("{:?}", security_headers.hsts.max_age),
-        ),
-        (
-            "security_headers.hsts.include_subdomains",
-            format!("{:?}", security_headers.hsts.include_subdomains),
-        ),
-        (
-            "security_headers.hsts.preload",
-            format!("{:?}", security_headers.hsts.preload),
-        ),
-        (
-            "security_headers.csp.enabled",
-            format!("{:?}", security_headers.csp.enabled),
-        ),
-        (
-            "security_headers.csp.report_only",
-            format!("{:?}", security_headers.csp.report_only),
-        ),
-        (
-            "security_headers.csp.report_uri",
-            format!("{:?}", security_headers.csp.report_uri),
-        ),
         ("webhooks_in.path", format!("{:?}", webhooks_in.path)),
         (
             "webhooks_in.tolerance",
@@ -4932,18 +4971,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", storage_routes.dedupe),
         ),
         (
-            "rate_limit.ip_header",
-            format!("{:?}", rate_limit.ip_header),
-        ),
-        (
-            "rate_limit.session_cookie",
-            format!("{:?}", rate_limit.session_cookie),
-        ),
-        (
-            "rate_limit.fail_open",
-            format!("{:?}", rate_limit.fail_open),
-        ),
-        (
             "oauth_client.base_url",
             format!("{:?}", oauth_client.base_url),
         ),
@@ -4986,35 +5013,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("errors.details", format!("{:?}", errors.details)),
         (
-            "conditional_get.etag",
-            format!("{:?}", conditional_get.etag),
-        ),
-        (
-            "conditional_get.last_modified",
-            format!("{:?}", conditional_get.last_modified),
-        ),
-        ("flash.cookie", format!("{:?}", flash.cookie)),
-        ("flash.key_env", format!("{:?}", flash.key_env)),
-        ("flash.secure", format!("{:?}", flash.secure)),
-        (
             "auth_screens.base_url",
             format!("{:?}", auth_screens.base_url),
         ),
         ("auth_screens.issuer", format!("{:?}", auth_screens.issuer)),
-        (
-            "compression.min_bytes",
-            format!("{:?}", compression.min_bytes),
-        ),
-        ("compression.gzip", format!("{:?}", compression.gzip)),
-        ("compression.brotli", format!("{:?}", compression.brotli)),
-        (
-            "compression.gzip_level",
-            format!("{:?}", compression.gzip_level),
-        ),
-        (
-            "compression.brotli_quality",
-            format!("{:?}", compression.brotli_quality),
-        ),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -5201,7 +5203,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ca2f117b32365425
+// brocanth-digest: 51ce7640d49d260f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -9622,6 +9624,102 @@ database = "my_blog"
 # Seconds initdb or pg_ctl may take, each.
 timeout = 60
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
+[security_headers]
+# Every request arrives through a TLS terminator, so HSTS always goes out.
+# False in development: HSTS from localhost pins the name in the browser.
+behind_tls = false
+# Send `X-Content-Type-Options: nosniff`.
+nosniff = true
+# The `Referrer-Policy`. Empty means none.
+# referrer_policy = "strict-origin-when-cross-origin"
+# The `Permissions-Policy`. Empty means none.
+# permissions_policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+
+[security_headers.hsts]
+# Send `Strict-Transport-Security`.
+enabled = true
+# How long the browser remembers HTTPS-only, in seconds.
+max_age = 31536000
+# The HSTS rule covers every subdomain too.
+# Only when the person who owns the domain says so.
+include_subdomains = false
+# Ask to be on the browsers' built-in HSTS list.
+# Hard to undo: removal takes months to reach users.
+preload = false
+
+[security_headers.csp]
+# Send a `Content-Security-Policy`.
+enabled = true
+# Send the policy as `Content-Security-Policy-Report-Only`.
+report_only = false
+# Where a browser reports what the policy blocked. Empty means none.
+# report_uri = "/csp-reports"
+
+[rate_limit]
+# A header that holds the client address, set by your edge. Empty means none.
+# Only a header the edge overwrites. Never `X-Forwarded-For` as the client sent it.
+# ip_header = "fly-client-ip"
+# The session cookie, for a rule keyed by session. Empty means none.
+# session_cookie = "_my_blog_session"
+# Let a request through when the counter store fails.
+fail_open = true
+
+# THE RULE BELOW IS AN EXAMPLE for a login form, not a recommendation.
+# One table per group of routes; a request counts against each that matches.
+# `key` is a list of "ip", "session" and "user", first found wins.
+[[rate_limit.rules]]
+name = "login"
+paths = ["/account/signin", "/account/code", "/account/elevate"]
+methods = ["POST"]
+limit = 5
+window_secs = 60
+
+[conditional_get]
+# Set a weak ETag over the body when the page set none.
+etag = true
+# Answer If-Modified-Since from a Last-Modified the page set.
+last_modified = true
+
+[compression]
+# The smallest body that is compressed, in bytes.
+min_bytes = 1024
+# Offer gzip.
+gzip = true
+# Offer brotli (`br`).
+brotli = true
+# The gzip level, 1 (fast) to 9 (small).
+gzip_level = 6
+# The brotli quality, 0 (fast) to 11 (small).
+# 4 or 5 per request; 11 is for files compressed once at build time.
+brotli_quality = 4
+# The media types that are compressed. `text/*` takes every text type.
+types = ["text/*", "application/json", "application/javascript", "application/xml", "application/rss+xml", "application/atom+xml", "application/manifest+json", "image/svg+xml"]
+
+[flash]
+# The cookie this hook owns.
+cookie = "flash"
+# The environment variable that holds the signing key.
+# The name, not the key, which is at least 32 bytes. Unset: a random key
+# per process and a warning, so a message can be lost when the next
+# request reaches another instance.
+key_env = "FLASH_KEY"
+# Send the cookie over HTTPS only.
+secure = true
+
 [gtag]
 # Insert the consent banner and the Google tag into every HTML page.
 # Off outside production, so a developer's visits are not counted.
@@ -9774,20 +9872,6 @@ worker = true
 queues = ["default"]
 # How many jobs the worker runs at once.
 concurrency = 5
-
-[csrf]
-# The cookie this hook owns.
-cookie = "csrf_token"
-# The form field the token comes back in.
-field = "_csrf_token"
-# The header a fetch caller may send instead of the field. Empty means none.
-# While it is set, the cookie is not HttpOnly: a script reads it.
-# header = "x-csrf-token"
-# Paths never checked, each with everything under it.
-# For a caller that is not a browser: a webhook, a device.
-exempt = []
-# Send the cookie over HTTPS only.
-secure = true
 
 [openapi]
 # The name of the API.
@@ -9982,37 +10066,6 @@ secret = "development only: replace before anything is uploaded in anger"
 # images and short enough to be dead before anyone clicks it.
 token_ttl = 120
 
-[security_headers]
-# Every request arrives through a TLS terminator, so HSTS always goes out.
-# False in development: HSTS from localhost pins the name in the browser.
-behind_tls = false
-# Send `X-Content-Type-Options: nosniff`.
-nosniff = true
-# The `Referrer-Policy`. Empty means none.
-# referrer_policy = "strict-origin-when-cross-origin"
-# The `Permissions-Policy`. Empty means none.
-# permissions_policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
-
-[security_headers.hsts]
-# Send `Strict-Transport-Security`.
-enabled = true
-# How long the browser remembers HTTPS-only, in seconds.
-max_age = 31536000
-# The HSTS rule covers every subdomain too.
-# Only when the person who owns the domain says so.
-include_subdomains = false
-# Ask to be on the browsers' built-in HSTS list.
-# Hard to undo: removal takes months to reach users.
-preload = false
-
-[security_headers.csp]
-# Send a `Content-Security-Policy`.
-enabled = true
-# Send the policy as `Content-Security-Policy-Report-Only`.
-report_only = false
-# Where a browser reports what the policy blocked. Empty means none.
-# report_uri = "/csp-reports"
-
 [webhooks_in]
 # Where deliveries arrive: {path}/{source}.
 path = "/webhooks"
@@ -10111,25 +10164,6 @@ dedupe = false
 # Wx0 and 0xH scale. Each size is rendered once per file and kept.
 thumb_sizes = ["150x150t", "300x200", "600x600f"]
 
-[rate_limit]
-# A header that holds the client address, set by your edge. Empty means none.
-# Only a header the edge overwrites. Never `X-Forwarded-For` as the client sent it.
-# ip_header = "fly-client-ip"
-# The session cookie, for a rule keyed by session. Empty means none.
-# session_cookie = "_my_blog_session"
-# Let a request through when the counter store fails.
-fail_open = true
-
-# THE RULE BELOW IS AN EXAMPLE for a login form, not a recommendation.
-# One table per group of routes; a request counts against each that matches.
-# `key` is a list of "ip", "session" and "user", first found wins.
-[[rate_limit.rules]]
-name = "login"
-paths = ["/account/signin", "/account/code", "/account/elevate"]
-methods = ["POST"]
-limit = 5
-window_secs = 60
-
 [oauth_client]
 # The providers to offer, by id: github, google, microsoft, gitlab.
 # Each one needs its client id and secret below. The server refuses to
@@ -10167,44 +10201,12 @@ allow_http = false
 # Turn it off to see error.rsx while you design it.
 details = true
 
-[conditional_get]
-# Set a weak ETag over the body when the page set none.
-etag = true
-# Answer If-Modified-Since from a Last-Modified the page set.
-last_modified = true
-
-[flash]
-# The cookie this hook owns.
-cookie = "flash"
-# The environment variable that holds the signing key.
-# The name, not the key, which is at least 32 bytes. Unset: a random key
-# per process and a warning, so a message can be lost when the next
-# request reaches another instance.
-key_env = "FLASH_KEY"
-# Send the cookie over HTTPS only.
-secure = true
-
 [auth_screens]
 # The address links in mail start with: scheme, host, port.
 # Never the request's Host header: a reset link must not go where a request says.
 base_url = "http://localhost:3000"
 # The name an authenticator app shows beside the code.
 issuer = "My Blog"
-
-[compression]
-# The smallest body that is compressed, in bytes.
-min_bytes = 1024
-# Offer gzip.
-gzip = true
-# Offer brotli (`br`).
-brotli = true
-# The gzip level, 1 (fast) to 9 (small).
-gzip_level = 6
-# The brotli quality, 0 (fast) to 11 (small).
-# 4 or 5 per request; 11 is for files compressed once at build time.
-brotli_quality = 4
-# The media types that are compressed. `text/*` takes every text type.
-types = ["text/*", "application/json", "application/javascript", "application/xml", "application/rss+xml", "application/atom+xml", "application/manifest+json", "image/svg+xml"]
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -19614,7 +19616,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage, VariantSpec};
@@ -19740,21 +19742,13 @@ impl HookSource for StorageRoutes {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(routes) = &self.routes {
-            registrar.request_async(
-                "lift",
-                Order::new().before_if_present("csrf.check"),
-                routes.csrf_lift(),
-            );
-            // After the CSRF check, so an upload from another site stops
-            // there, and after the proxy reader and the rate limiter.
-            registrar.request_async(
-                "answer",
-                Order::new()
-                    .after_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                routes.clone(),
-            );
+            // `Guard`: the CSRF check refuses last in that phase, so the
+            // token this hook copies out of the form is there when it
+            // reads.
+            registrar.request_async("lift", Phase::Guard, Order::new(), routes.csrf_lift());
+            // `Cache`, after every guard: an upload from another site
+            // stops at the CSRF check, and a flood at the rate limiter.
+            registrar.request_async("answer", Phase::Cache, Order::new(), routes.clone());
         }
         Ok(())
     }
@@ -20138,7 +20132,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_webhooks::{Delivery, Handler, Incoming, Receiver, Rejection, Scheme};
 
 // ---------------------------------------------------------------------------
@@ -20312,17 +20306,11 @@ impl HookSource for WebhooksIn {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(receiver) = &self.receiver {
-            // Before the CSRF check, which would refuse a POST with no
-            // token. After the proxy reader and the rate limiter, so the
-            // client's address is read and a flood is refused first.
-            registrar.request_async(
-                "receive",
-                Order::new()
-                    .before_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                receiver.clone(),
-            );
+            // `Guard`, so the client's address is read (`Identify`). The
+            // rate limiter counts first in `Guard`, so a flood is refused
+            // before this hook; the CSRF check, which would refuse a POST
+            // with no token, refuses last.
+            registrar.request_async("receive", Phase::Guard, Order::new(), receiver.clone());
         }
         Ok(())
     }
@@ -20605,6 +20593,97 @@ enable them as a set, and do not invent an address or an origin to
 make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
+
+## CSRF
+
+`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
+is a double-submit cookie: the hook mints a token, sets it as its own
+cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
+unless the request sends the same value back -- in the `_csrf_token`
+field, or in the `X-CSRF-Token` header.
+
+So every form that posts carries the hidden field. In a page, read
+the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
+write `token.hidden_field()` inside the `<form>`. For HTML this
+project did not template, `token.stamp_forms(html)` adds the field to
+every posting form; the admin uses it.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
+## Security headers
+
+`brocanth_middleware::SecurityHeaders` is registered in
+`src/plugins/mod.rs`. Its Content-Security-Policy
+allows inline scripts by hash only. To inline a new script, add
+`Csp::default().inline_script(TEXT)` with the exact text between the
+tags. Do not add `'unsafe-inline'` to `script-src`. A value that
+depends on the request goes in a `data-` attribute or a `<meta>` tag,
+not in the script.
+
+HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
+is in front. Set `include_subdomains` or `preload` only when the
+person who owns the domain says so.
+
+## Rate limit
+
+`brocanth_middleware::RateLimit` is registered in
+`src/plugins/mod.rs`. It has one example rule (`login`, 5 per 60 s,
+POST `/account/signin`).
+The numbers are an example. Do not invent limits: ask for the limit
+and the window of each route group.
+
+A request whose key cannot be found is not counted. Behind a proxy,
+the address comes from `ProxyHeaders` or from `ip_header`. Never set
+`ip_header` to a header the client can send, such as
+`X-Forwarded-For`, unless the edge overwrites it. Behind a load
+balancer with neither, every client has the balancer's address and
+shares one bucket: register `ProxyHeaders` trusting the balancer.
+
+## Conditional GET
+
+`brocanth_middleware::ConditionalGet` is registered in
+`src/plugins/mod.rs`. It tags every `200` answer to a GET with a weak
+ETag over the body and answers `304` when the browser already has it.
+So a page must render the same bytes for the same content: no
+timestamp or random value in the markup, or every tag differs and no
+request is ever a `304`.
+
+A page that knows when its data changed sets `Last-Modified` as an
+IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). A page whose answer is
+for one user only sets `Cache-Control: private`; one that must not be
+kept sets `no-store`, and gets no tag.
+
+## Compression
+
+`brocanth_middleware::Compression` is registered in
+`src/plugins/mod.rs`. Its response hook runs after every hook that
+reads or rewrites the body, so a page never compresses its own
+output. Do not set `Content-Encoding` in a page unless the body is
+already encoded; the hook then leaves it alone.
+
+A stream is never compressed. To keep a buffered body as it is, set
+`Cache-Control: no-transform`. A hook of your own that rewrites the
+body runs before compression when it is in any phase but `Encode`;
+one in `Phase::Encode` goes in `runs_after`.
+
+## Flash
+
+`brocanth_middleware::FlashPlugin` is registered in
+`src/plugins/mod.rs`. After a form POST, write a message and redirect:
+
+```rust
+if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {
+    flash.success("Saved.");
+}
+Ok(Response::empty(303).with_header("location", "/"))
+```
+
+The next HTML page shows it inside `<div id="flash">`, which the root
+layout carries. Keep that element in the layout. A page that draws a
+form again without a redirect uses `flash.now(level, text)`. The text
+is plain: the hook escapes it. Never put HTML or a secret in a message.
 
 ## Google Analytics
 
@@ -20909,24 +20988,6 @@ Do not add validation to it. The server checks the body and answers
 422 with every fault; a client that checked as well would be a second
 opinion, and the two would disagree the first time a rule changed.
 
-## CSRF
-
-`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
-is a double-submit cookie: the hook mints a token, sets it as its own
-cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
-unless the request sends the same value back -- in the `_csrf_token`
-field, or in the `X-CSRF-Token` header.
-
-So every form that posts carries the hidden field. In a page, read
-the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
-write `token.hidden_field()` inside the `<form>`. For HTML this
-project did not template, `token.stamp_forms(html)` adds the field to
-every posting form; the admin uses it.
-
-A 403 from this hook is a form that lost its token, or a caller that
-is not a browser. Add that path to `exempt`; do not remove the
-registration.
-
 ## CSS
 
 ```
@@ -20998,20 +21059,6 @@ password in a file that is in git or on a command line.
 
 In development `[mail] transport` is `log`: each message is in the log,
 and nothing is sent. Outside development only `smtp` starts.
-
-## Security headers
-
-`brocanth_middleware::SecurityHeaders` is registered in
-`src/plugins/mod.rs`. Its Content-Security-Policy
-allows inline scripts by hash only. To inline a new script, add
-`Csp::default().inline_script(TEXT)` with the exact text between the
-tags. Do not add `'unsafe-inline'` to `script-src`. A value that
-depends on the request goes in a `data-` attribute or a `<meta>` tag,
-not in the script.
-
-HSTS is sent only over HTTPS. Set `behind_tls` when a TLS terminator
-is in front. Set `include_subdomains` or `preload` only when the
-person who owns the domain says so.
 
 ## Incoming webhooks
 
@@ -21244,21 +21291,6 @@ a page. A download needs a token: mint it with `FileStore::tokens` after
 your policy allowed the read, and never log the URL. Do not write an
 upload or download page beside these routes.
 
-## Rate limit
-
-`brocanth_middleware::RateLimit` is registered in
-`src/plugins/mod.rs`. It has one example rule (`login`, 5 per 60 s,
-POST `/account/signin`).
-The numbers are an example. Do not invent limits: ask for the limit
-and the window of each route group.
-
-A request whose key cannot be found is not counted. Behind a proxy,
-the address comes from `ProxyHeaders` or from `ip_header`. Never set
-`ip_header` to a header the client can send, such as
-`X-Forwarded-For`, unless the edge overwrites it. Behind a load
-balancer with neither, every client has the balancer's address and
-shares one bucket: register `ProxyHeaders` trusting the balancer.
-
 ## Connected accounts
 
 `src/plugins/oauth_client/mod.rs` mounts the connect pages at
@@ -21300,52 +21332,6 @@ The nearest file wins. The components are `NotFound` and `ErrorPage`,
 and each may declare `caught: &Caught`. After you add one where there
 was none, run `touch src/pages/mod.rs`.
 
-## Roles
-
-Check a permission with `crate::plugins::roles::require(ctx, "<name>")`.
-A role answers which people; it does not answer which rows. Put a row
-rule in a `brocanth_policy::Policy`, and combine it with a permission
-through `Staff::gate`. Never filter rows after a paginated load.
-
-## Conditional GET
-
-`brocanth_middleware::ConditionalGet` is registered in
-`src/plugins/mod.rs`. It tags every `200` answer to a GET with a weak
-ETag over the body and answers `304` when the browser already has it.
-So a page must render the same bytes for the same content: no
-timestamp or random value in the markup, or every tag differs and no
-request is ever a `304`.
-
-A page that knows when its data changed sets `Last-Modified` as an
-IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). A page whose answer is
-for one user only sets `Cache-Control: private`; one that must not be
-kept sets `no-store`, and gets no tag.
-
-## Flash
-
-`brocanth_middleware::FlashPlugin` is registered in
-`src/plugins/mod.rs`. After a form POST, write a message and redirect:
-
-```rust
-if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {
-    flash.success("Saved.");
-}
-Ok(Response::empty(303).with_header("location", "/"))
-```
-
-The next HTML page shows it inside `<div id="flash">`, which the root
-layout carries. Keep that element in the layout. A page that draws a
-form again without a redirect uses `flash.now(level, text)`. The text
-is plain: the hook escapes it. Never put HTML or a secret in a message.
-
-## Connected accounts in memory
-
-The tokens live in this process (`oauth-client-memory`). A restart drops
-every connection, and two processes do not share them. It is for
-development and tests: `brocanth check --deploy` refuses it. Run
-`brocanth remove oauth-client-memory` before production; the tokens then
-go to Postgres.
-
 ## Account screens
 
 `src/pages/account/` holds the sign-up, sign-in, sign-out, reset,
@@ -21366,17 +21352,20 @@ Rules when you change them:
 - Read who is signed in with `auth_screens::signed_in`. Do not trust a
   cookie value you did not unseal.
 
-## Compression
+## Roles
 
-`brocanth_middleware::Compression` is registered in
-`src/plugins/mod.rs`. Its response hook runs after every hook that
-reads or rewrites the body, so a page never compresses its own
-output. Do not set `Content-Encoding` in a page unless the body is
-already encoded; the hook then leaves it alone.
+Check a permission with `crate::plugins::roles::require(ctx, "<name>")`.
+A role answers which people; it does not answer which rows. Put a row
+rule in a `brocanth_policy::Policy`, and combine it with a permission
+through `Staff::gate`. Never filter rows after a paginated load.
 
-A stream is never compressed. To keep a buffered body as it is, set
-`Cache-Control: no-transform`. A hook of your own that rewrites the
-body goes in `runs_after`, so compression waits for it.
+## Connected accounts in memory
+
+The tokens live in this process (`oauth-client-memory`). A restart drops
+every connection, and two processes do not share them. It is for
+development and tests: `brocanth check --deploy` refuses it. Run
+`brocanth remove oauth-client-memory` before production; the tokens then
+go to Postgres.
 
 ## Decisions that belong to the person
 
@@ -21402,7 +21391,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 63cbcb96c156a76b -->
+<!-- brocanth-digest: a1744256de3ab9c1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
