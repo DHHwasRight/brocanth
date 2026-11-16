@@ -48,7 +48,7 @@ It reads `Accept-Encoding` (q-values, `*`, `x-gzip`), picks `br` or `gzip`, and 
 
 Every response that could be compressed gets `Vary: Accept-Encoding`, also for a client that asked for none, so a shared cache keys on it. A strong `ETag` on a compressed body becomes weak.
 
-**Order.** The hook runs last: after `conditional_get`, `route_cache`, `gtag` and `beacon`, which read or rewrite the body. Its `Order` names them. Add a hook of your own to `runs_after` (in the file with `config`, or in code).
+**Order.** The hook runs last: it is in `Phase::Encode`, which a response reaches last, and first in that phase, which a response leaves last. So it runs after `conditional_get`, `route_cache`, `gtag` and `beacon` and names none of them. A hook of your own in another phase runs before it too; one in `Encode` that rewrites the body goes in `runs_after` (in the file with `config`, or in code).
 
 **Behind a CDN.** Most CDNs and proxies compress. Then leave this off: the second pass costs CPU and gains nothing.
 
