@@ -142,9 +142,13 @@ impl Module for Backoffice {
                 .replace("@PLUGIN@", PLUGIN_NOW)
                 .replace("@MOUNT_START@", MOUNT_NOW)
                 .replace("@TITLE_TEST@", TITLE_TEST)
+                .replace("@CONFIGURED_HEAD@", CONFIGURED_HEAD)
+                .replace("@CONFIGURED_TAIL@", CONFIGURED_TAIL)
+                .replace("@CONFIGURED_CALL@", CONFIGURED_CALL)
                 .replace("@HOLD@", HOLD)
                 .replace("@LATER@", LATER)
                 .replace("@SOURCE@", pick(SOURCE_ORM, SOURCE))
+                .replace("@CHECK_SOURCE@", pick(CHECK_SOURCE_ORM, CHECK_SOURCE))
                 .replace(
                     "@WHO_LABEL@",
                     if project.has("superuser") {
@@ -603,13 +607,33 @@ fn before_chosen(text: &str) -> String {
         return text.to_string();
     }
     let orm = text.contains(SOURCE_ORM);
-    let later_orm = LATER.replace("@SOURCE@", SOURCE_ORM);
-    let later = LATER.replace("@SOURCE@", SOURCE);
+    let later_orm = LATER
+        .replace("@SOURCE@", SOURCE_ORM)
+        .replace("@CHECK_SOURCE@", CHECK_SOURCE_ORM);
+    let later = LATER
+        .replace("@SOURCE@", SOURCE)
+        .replace("@CHECK_SOURCE@", CHECK_SOURCE);
     let mut out = text.to_string();
+    // `configured`'s body goes back to the top of `mount`.
+    if let Some(start) = out.find(CONFIGURED_HEAD) {
+        if let Some(len) = out[start..].find(CONFIGURED_TAIL) {
+            let body = out[start + CONFIGURED_HEAD.len()..start + len].to_string();
+            out.replace_range(start..start + len + CONFIGURED_TAIL.len(), "");
+            out = out.replacen(CONFIGURED_CALL, &body, 1);
+        }
+    }
     for (now, before) in [
         (
             "use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};",
             "use brocanth::plugin_context::NoContext;",
+        ),
+        (
+            "use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};",
+            "use brocanth::plugin_api::Plugin;",
+        ),
+        (
+            "use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, SharedData, Submission};",
+            "use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};",
         ),
         (PLUGIN_NOW, PLUGIN_BEFORE),
         (TITLE_TEST, ""),
@@ -726,6 +750,19 @@ impl Later {
     }
 }
 
+/// Builds the admin once over `data`, and drops it: an error is the one
+/// `Admin::new` gives, with its `help:` line. `AdminSettings::configure`
+/// runs it, so a configuration the admin refuses never serves.
+fn check(data: SharedData, config: AdminConfig, settings: &Settings) -> Result<(), PluginError> {
+    Admin::try_new(data, branded(config, settings))
+        .map(drop)
+        .map_err(|e| PluginError::new(e.to_string()))
+}
+
+/// The data source [`check`] builds the admin over.
+fn check_source() -> SharedData {
+@CHECK_SOURCE@}
+
 /// `config` with the titles, the "View site" link and the theme.
 fn branded(mut config: AdminConfig, settings: &Settings) -> AdminConfig {
     config = config.titled(&settings.title);
@@ -744,6 +781,30 @@ fn branded(mut config: AdminConfig, settings: &Settings) -> AdminConfig {
     config
 }
 "#;
+
+/// The start-time check's source without `admin-model`.
+const CHECK_SOURCE: &str = "    Arc::new(Fixture::new())\n";
+
+/// The start-time check's source with `admin-model`. The admin reads the
+/// models and their columns when it is built, and no row, so the source
+/// needs no connection: the database is not open yet.
+const CHECK_SOURCE_ORM: &str = "    Arc::new(models::Models::unconnected(
+        brocanth_model::sea_orm::DbBackend::Postgres,
+    ))\n";
+
+/// `configured`, the admin's configuration that `mount` and the start-time
+/// check share: its signature.
+const CONFIGURED_HEAD: &str =
+    "/// The admin's configuration under `prefix`, and the cells its tabs read.
+/// `mount` builds it, and `AdminSettings::configure` builds it to check it.
+fn configured(prefix: &str) -> (AdminConfig, LateCells<Ctx>) {
+";
+
+/// The end of `configured`.
+const CONFIGURED_TAIL: &str = "    (config, late)\n}\n\n";
+
+/// The call to `configured` at the top of `mount`.
+const CONFIGURED_CALL: &str = "    let (config, late) = configured(prefix);\n";
 
 /// The data source without `admin-model`.
 const SOURCE: &str = r#"            // An empty in-memory source: no models, so no rows to read. Put
@@ -840,7 +901,8 @@ impl OverOrm {
 }
 "#;
 
-/// The generated test that the admin shows the application's own title.
+/// The generated tests that the admin shows the application's own title,
+/// and that a configuration it refuses fails at start.
 const TITLE_TEST: &str = r#"
     /// The application's admin is built from the settings its plugin put on
     /// the request, and not from a process-wide global.
@@ -854,6 +916,25 @@ const TITLE_TEST: &str = r#"
         let body = std::str::from_utf8(body).expect("utf-8");
         let title = super::Settings::default().title;
         assert!(body.contains(&title), "{body}");
+    }
+
+    /// A configuration the admin refuses stops the start, with its `help:`
+    /// line: `AdminSettings::configure` runs this check.
+    #[test]
+    fn a_configuration_the_admin_refuses_fails_at_start() {
+        let (config, _late) = super::configured(crate::modules::admin::MODULE.mount_at);
+        let config = config.model("post", |m| {
+            m.action(brocanth_admin::actions::BulkAction::set(
+                "nope",
+                "Nope",
+                [("no_such_column", true)],
+            ))
+        });
+        let data = std::sync::Arc::new(brocanth_admin::Fixture::blog());
+        let error = super::check(data, config, &super::Settings::default())
+            .expect_err("the admin refuses an action on a missing column");
+        assert!(error.0.contains("no_such_column"), "{}", error.0);
+        assert!(error.0.contains("help:"), "{}", error.0);
     }
 "#;
 
@@ -903,6 +984,13 @@ impl Plugin for AdminSettings {
         Self {
             settings: Arc::new(config),
         }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // A configuration the admin refuses stops the start: the first
+        // request builds the admin, and a deploy must not wait for it.
+        let (config, _late) = configured(crate::modules::admin::MODULE.mount_at);
+        check(check_source(), config, &self.settings)
     }
 
     fn provide(&self, cx: &mut ContextBuilder) {
@@ -955,11 +1043,11 @@ const ADMIN_RS: &str = r##"//! The backoffice, at `mount_at` in `src/modules/adm
 @MODELS_MOD@
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use brocanth::plugin_api::Plugin;
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, SharedData, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -996,13 +1084,13 @@ impl Default for Settings {
 }
 
 @PLUGIN@
-/// Every screen of the admin, under `prefix`.
+@CONFIGURED_HEAD@@MOUNT_START@@WHO_LABEL@@PANELS@@CONFIGURED_TAIL@/// Every screen of the admin, under `prefix`.
 ///
 /// Four routes: the index and everything under it, for GET and for POST.
 /// The admin parses its own paths, so the table gives it the whole path and
 /// does not split it into twelve routes.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
-@MOUNT_START@@WHO_LABEL@@PANELS@@HOLD@    let late = Arc::new(late);
+@CONFIGURED_CALL@@HOLD@    let late = Arc::new(late);
     let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
     let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
     for pattern in [prefix, rest.as_str()] {
