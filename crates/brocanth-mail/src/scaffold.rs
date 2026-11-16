@@ -61,7 +61,9 @@ impl Module for Mail {
         .uses::<JobQueue>(
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
         )
-        .uses::<PgPool>("the application opens Postgres, so the test that starts it is left out")
+        .uses::<PgPool>(
+            "a queued message waits in a Postgres table; the test that starts the application is left out",
+        )
         .asked_in("behaviour", "Send mail")
         .contributes::<AgentsSection>(
             Contribution::new(
@@ -74,6 +76,7 @@ impl Module for Mail {
             Dep::brocanth("brocanth-mail")
                 .feature("smtp")
                 .feature("serde")
+                .feature_with("db", "postgres")
                 .note("the `Outbox` in src/plugins/mail, and SMTP with rustls"),
         )
         .absent(
@@ -189,7 +192,34 @@ fn plugin_rs(project: &Project) -> String {
     // is the one question; a memory queue (`jobs-memory`) brings none.
     let postgres = project.provider::<PgPool>().is_some();
     text.replace("@APP_TEST@", if postgres { "" } else { APP_TEST })
+        .replace(
+            "@PENDING_NEW@\n",
+            if postgres {
+                PENDING_POSTGRES
+            } else {
+                PENDING_MEMORY
+            },
+        )
 }
+
+/// The pending store with a database: a row in it, so a message survives a
+/// restart as its job does.
+const PENDING_POSTGRES: &str = r#"        // A queued message waits in the database, and the job carries its id.
+        let Some(db) = lc.services().get::<brocanth_db::Db>().cloned() else {
+            return Err(PluginError::new(
+                "[mail] no database for the pending mail\n\
+                 help: register the db plugin before the mail plugin",
+            ));
+        };
+        let pending: Arc<dyn Pending> =
+            Arc::new(brocanth_mail::PgPending::new(db, pending::DEFAULT_TTL));
+"#;
+
+/// The pending store without a database: in memory, like the queue.
+const PENDING_MEMORY: &str = r#"        // A queued message waits in memory, like the queue, and the job
+        // carries its id.
+        let pending: Arc<dyn Pending> = Arc::new(brocanth_mail::MemoryPending::default());
+"#;
 
 /// Whether the project has a job queue, whichever module provides it.
 fn queued(project: &Project) -> bool {
@@ -207,7 +237,12 @@ const JOBS_EDITS: &[(&str, &str, &str)] = &[
          //! returns. A worker that this plugin starts sends it, and retries it\n\
          //! when the relay refuses. It is a second worker, beside the one in\n\
          //! `src/plugins/jobs/mod.rs`, so a slow relay holds up no other job.\n\
-         //! `[mail] worker = false` turns it off in a process that only serves.\n",
+         //! `[mail] worker = false` turns it off in a process that only serves.\n\
+         //!\n\
+         //! The job payload is an id, not the message: a reset link must not\n\
+         //! wait in the jobs table. The message waits in a `Pending` store\n\
+         //! (`brocanth_mail::pending`) for one hour at most, and the worker\n\
+         //! deletes it after the send or the last attempt.\n",
         "//! # Later\n\
          //!\n\
          //! There is no queue in this project, so `deliver_later` sends at once.\n\
@@ -222,6 +257,7 @@ const JOBS_EDITS: &[(&str, &str, &str)] = &[
          use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};\n\
          use brocanth::plugin_shutdown::ShutdownCx;\n\
          use brocanth_jobs::{Job, JobContext, Queue, Worker, WorkerHandle};\n\
+         use brocanth_mail::pending::{self, Delivered, Pending};\n\
          use brocanth_mail::{\n\
          \x20   Address, Folder, Log, Mail, MailError, Message, MessageBuilder, Security, Smtp, SmtpConfig,\n\
          };\n\
@@ -249,24 +285,26 @@ const JOBS_EDITS: &[(&str, &str, &str)] = &[
         "@OUTBOX_FIELD@\n",
         "    /// The queue, once the jobs plugin opened it. Empty in a context built\n\
          \x20   /// before `before_start`, which sends at once.\n\
-         \x20   queue: Arc<OnceLock<Queue>>,\n",
+         \x20   queue: Arc<OnceLock<Queued>>,\n",
         "",
     ),
     (
         "@DELIVER_LATER@\n",
         "    /// Sends the message from a worker, after this request.\n\
          \x20   ///\n\
-         \x20   /// The message goes on the `mail` queue, and the worker retries a send\n\
-         \x20   /// the relay refused. Before the queue is open -- a context built by\n\
-         \x20   /// hand -- it sends at once.\n\
+         \x20   /// The message waits in the pending store, and its id goes on the\n\
+         \x20   /// `mail` queue: the worker retries a send the relay refused. Before\n\
+         \x20   /// the queue is open -- a context built by hand -- it sends at once.\n\
          \x20   pub async fn deliver_later(&self, message: Message) -> Result<(), DeliverError> {\n\
-         \x20       match self.queue.get() {\n\
-         \x20           Some(queue) => {\n\
-         \x20               queue.enqueue(DeliverMail { message }).await?;\n\
-         \x20               Ok(())\n\
-         \x20           }\n\
-         \x20           None => Ok(self.mail.send(&message).await?),\n\
+         \x20       let Some(queued) = self.queue.get() else {\n\
+         \x20           return Ok(self.mail.send(&message).await?);\n\
+         \x20       };\n\
+         \x20       let id = queued.pending.put(&message).await?;\n\
+         \x20       if let Err(e) = queued.queue.enqueue(DeliverMail { id: id.clone() }).await {\n\
+         \x20           let _ = queued.pending.delete(&id).await;\n\
+         \x20           return Err(e.into());\n\
          \x20       }\n\
+         \x20       Ok(())\n\
          \x20   }\n",
         "    /// Sends the message. This project has no queue, so it sends at once;\n\
          \x20   /// with the `jobs` module it goes on a queue.\n\
@@ -332,18 +370,24 @@ impl From<MailError> for DeliverError {
     }
 }
 
+/// The queue and the store a queued message waits in, once the jobs
+/// plugin opened the queue.
+struct Queued {
+    queue: Queue,
+    pending: Arc<dyn Pending>,
+}
+
 /// One message, sent from the `mail` queue.
 ///
-/// The message is checked again when the worker reads it back: a row that
-/// was edited in the table cannot carry a newline into a header.
-///
-/// The payload is the whole message, links included. So the last attempt
-/// does not fail into the dead letter, where it would wait with its links
-/// until someone discards it: it logs the recipients and the subject, and
-/// ends the job.
+/// The payload is the id of a row in the pending store, not the message:
+/// a reset link must not wait in the jobs table, in the jobs tab or in a
+/// backup of either. A retry reads the row again. The worker deletes the
+/// row after the send, and after the last attempt, which logs the
+/// recipients and the subject and ends the job, so no message waits in
+/// the dead letter.
 #[derive(Serialize, Deserialize)]
 pub struct DeliverMail {
-    pub message: Message,
+    pub id: String,
 }
 
 impl Job for DeliverMail {
@@ -359,20 +403,31 @@ impl Job for DeliverMail {
                  help: build the worker with `.state(mail)`, as MailPlugin::start does",
             )
         })?;
-        match mail.send(&self.message).await {
-            Err(e) if cx.is_last_attempt() => {
-                let to: Vec<&str> = self.message.to().iter().map(Address::address).collect();
-                let to = to.join(", ");
-                let subject = self.message.subject().as_str();
+        let store = cx.state::<Arc<dyn Pending>>().ok_or_else(|| {
+            MailError::transport(
+                "this worker was given no pending store\n\
+                 help: build the worker with `.state(pending)`, as MailPlugin::start does",
+            )
+        })?;
+        let id = self.id.as_str();
+        match pending::deliver(mail, store.as_ref(), id, cx.is_last_attempt()).await? {
+            Delivered::Sent => {}
+            Delivered::Expired => {
+                crate::plugins::say!(
+                    warn,
+                    "[mail] mail {id} was not sent: it expired or was sent already";
+                    %id
+                );
+            }
+            Delivered::GaveUp { to, subject, error } => {
                 crate::plugins::say!(
                     error,
-                    "[mail] gave up on mail to {to}: {subject}: {e}";
+                    "[mail] gave up on mail to {to}: {subject}: {error}";
                     %to, %subject
                 );
-                Ok(())
             }
-            sent => sent,
         }
+        Ok(())
     }
 }
 
@@ -389,8 +444,12 @@ const STAGES: &str = r#"
                  help: register the jobs plugin before the mail plugin",
             ));
         };
+@PENDING_NEW@
         if let Some(outbox) = &self.outbox {
-            let _ = outbox.queue.set(queue.clone());
+            let _ = outbox.queue.set(Queued {
+                queue: queue.clone(),
+                pending: Arc::clone(&pending),
+            });
         }
         if !self.settings.worker {
             return Ok(());
@@ -403,6 +462,7 @@ const STAGES: &str = r#"
             .queues(vec![DeliverMail::QUEUE.to_string()])
             .concurrency(2)
             .state(outbox.mail.clone())
+            .state(pending)
             .start()
             .map_err(|e| {
                 PluginError::new(format!(

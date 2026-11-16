@@ -163,6 +163,8 @@ pub mod scaffold;
 pub mod smtp;
 
 #[cfg(feature = "serde")]
+pub mod pending;
+#[cfg(feature = "serde")]
 mod serde_wire;
 
 #[cfg(all(test, feature = "runtime"))]
@@ -188,3 +190,8 @@ pub use plugin::{Mail, MailConfig, MailPlugin};
 
 #[cfg(feature = "smtp")]
 pub use smtp::{Security, Smtp, SmtpConfig};
+
+#[cfg(feature = "postgres")]
+pub use pending::PgPending;
+#[cfg(feature = "serde")]
+pub use pending::{deliver, Delivered, MemoryPending, Pending};
