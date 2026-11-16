@@ -367,6 +367,11 @@ mise run ci          # build, clippy -D warnings, tests
 cargo fmt --check
 ```
 
+GitHub Actions runs the same gate (`.github/workflows/ci.yml`) on each
+push to `main` and each pull request, with Postgres 16 and Redis 7 for the
+database tests. The generated-project builds run on `main`, nightly and on
+demand.
+
 - **Postgres tests** skip when no database is set. Set
   `BROCANTH_TEST_DATABASE_URL` to run them all. Each test makes its own
   schema. `BROCANTH_QUEUE_REQUIRE_POSTGRES=1` turns a missing database into

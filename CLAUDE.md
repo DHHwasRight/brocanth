@@ -27,6 +27,13 @@ mise run ci      # all three
 
 Also run `cargo fmt --check` before a commit.
 
+CI: `.github/workflows/ci.yml` runs the gate on a push to `main` and on
+each pull request: fmt, clippy (default and `--all-features`), `cargo test
+--workspace`, `mise run scaffold`, and the database tests against Postgres
+16 and Redis 7 service containers. `mise run generated` runs on a push to
+`main`, nightly and on demand, not on a pull request. `mise run embedded`
+runs nightly and on demand only: it downloads a Postgres archive.
+
 ## Tests
 
 - Postgres tests are skipped when no database is set.
