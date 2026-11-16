@@ -23,6 +23,24 @@
 //! what a plugin almost always wants: "after everything the session plugin
 //! does" survives the session plugin growing a second hook.
 //!
+//! # Phases
+//!
+//! A request or response hook also names a [`Phase`]: the stage of the
+//! request it belongs to. The phases nest. `Encode` is the outer layer,
+//! then `Identify`, `Guard` and `Cache`, then the handler. A request passes
+//! them inward (`Identify`, `Guard`, `Cache`); the response passes them
+//! outward (`Cache`, `Guard`, `Identify`, `Encode`), so `Encode` always
+//! writes the bytes the client gets. [`Order`] places a hook **inside** its
+//! phase only. An `after` or `before` that names a hook of another phase is
+//! [`OrderError::CrossPhase`]: the phase already decides that order, and a
+//! plugin name in the declaration is the coupling the phases remove. See
+//! ADR 10 in PLAN.md.
+//!
+//! [`Order::first`] and [`Order::last`] place a hook early or late in its
+//! phase without a name: the rate limiter counts first in `Guard`, and the
+//! CSRF check refuses last, so a hook that answers a caller with no token
+//! sits between them and names neither.
+//!
 //! ```
 //! use brocanth::plugin_order::{sort, HookId, Order, Ordered};
 //!
@@ -88,6 +106,75 @@ impl std::fmt::Display for HookId {
 }
 
 // ---------------------------------------------------------------------------
+// Phases
+// ---------------------------------------------------------------------------
+
+/// The stage of a request that a request or response hook belongs to.
+///
+/// The phases nest, `Encode` outermost:
+///
+/// ```text
+/// request  ->  Encode  Identify  Guard  Cache  ->  handler
+/// response <-  Encode  Identify  Guard  Cache  <-  handler
+/// ```
+///
+/// So request hooks run `Identify`, `Guard`, `Cache`, and response hooks
+/// run `Cache`, `Guard`, `Identify`, `Encode`. A phase says **when** a hook
+/// runs. Whether the application may turn it off is a different question,
+/// which [`HookSource::REQUIRED`](crate::plugin_hooks::HookSource::REQUIRED)
+/// answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Phase {
+    /// Who the caller is and what it asked for: the proxy reader, the
+    /// method override, the locale, the flash message. On the way out, the
+    /// parts of the answer that depend on the caller: the flash message,
+    /// `Vary`.
+    Identify,
+    /// Whether the request may go on: the rate limiter, the CSRF check,
+    /// CORS, and a hook that answers a caller the guards let through.
+    Guard,
+    /// An answer from a store, before the handler runs: the route cache,
+    /// and a hook that answers as a handler would, after every guard. On
+    /// the way out, the hook that stores the handler's page.
+    Cache,
+    /// The bytes on the wire, last on the way out: `ETag` and `304`,
+    /// compression, the policy headers, the `RateLimit-*` headers.
+    Encode,
+}
+
+impl Phase {
+    /// The four phases, in the order the documentation names them.
+    pub const ALL: [Phase; 4] = [Phase::Identify, Phase::Guard, Phase::Cache, Phase::Encode];
+
+    /// The name `explain` and the error messages print.
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Identify => "Identify",
+            Phase::Guard => "Guard",
+            Phase::Cache => "Cache",
+            Phase::Encode => "Encode",
+        }
+    }
+
+    /// The position in a chain's declared order, outermost first. A request
+    /// chain runs in declared order, a response chain in reverse.
+    fn depth(self) -> u8 {
+        match self {
+            Phase::Encode => 0,
+            Phase::Identify => 1,
+            Phase::Guard => 2,
+            Phase::Cache => 3,
+        }
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -106,6 +193,16 @@ struct Dep {
 pub struct Order {
     after: Vec<Dep>,
     before: Vec<Dep>,
+    band: Band,
+}
+
+/// Where a hook goes in its phase when no edge decides it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Band {
+    First,
+    #[default]
+    Middle,
+    Last,
 }
 
 impl Order {
@@ -158,6 +255,29 @@ impl Order {
         self
     }
 
+    /// Run as early in the phase as the edges allow.
+    ///
+    /// Not an edge: an `after` that this hook or another declares still
+    /// wins. Between two hooks that no edge orders, a `first` hook goes
+    /// before a plain one, and a plain one before a [`last`](Order::last)
+    /// one; registration order breaks the remaining ties. For the hook
+    /// that the other hooks of its phase rely on without naming it: the
+    /// rate limiter counts first in `Guard`.
+    #[must_use]
+    pub fn first(mut self) -> Self {
+        self.band = Band::First;
+        self
+    }
+
+    /// Run as late in the phase as the edges allow. See
+    /// [`first`](Order::first). The CSRF check refuses last in `Guard`,
+    /// so a hook that answers a caller with no token runs before it.
+    #[must_use]
+    pub fn last(mut self) -> Self {
+        self.band = Band::Last;
+        self
+    }
+
     /// The names this hook asked to follow.
     pub fn after_names(&self) -> impl Iterator<Item = &str> {
         self.after.iter().map(|d| d.target.as_str())
@@ -170,20 +290,36 @@ impl Order {
 
     /// Whether the hook said nothing at all.
     pub fn is_unconstrained(&self) -> bool {
-        self.after.is_empty() && self.before.is_empty()
+        self.after.is_empty() && self.before.is_empty() && self.band == Band::Middle
     }
 }
 
-/// One thing to be sorted: an identity, its declarations, and the value.
+/// One thing to be sorted: an identity, its phase, its declarations, and
+/// the value.
 pub struct Ordered<T> {
     pub id: HookId,
+    /// `None` in a chain with no phases: the error and the model hooks.
+    pub phase: Option<Phase>,
     pub order: Order,
     pub value: T,
 }
 
 impl<T> Ordered<T> {
+    /// An item with no phase.
     pub fn new(id: HookId, order: Order, value: T) -> Self {
-        Self { id, order, value }
+        Self {
+            id,
+            phase: None,
+            order,
+            value,
+        }
+    }
+
+    /// The same item, in `phase`.
+    #[must_use]
+    pub fn in_phase(mut self, phase: Phase) -> Self {
+        self.phase = Some(phase);
+        self
     }
 }
 
@@ -191,6 +327,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Ordered<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ordered")
             .field("id", &self.id.to_string())
+            .field("phase", &self.phase)
             .field("order", &self.order)
             .field("value", &self.value)
             .finish()
@@ -216,6 +353,28 @@ pub enum OrderError {
         second: String,
         /// The whole loop, starting and ending at `first`.
         path: Vec<String>,
+    },
+
+    #[error(
+        "`{hook}` runs in the {phase} phase and declares `{relation} {depends_on}`, which \
+         reaches `{target}` in the {target_phase} phase\n\
+         help: remove that `{relation}`: the phases order hooks of two phases, and \
+         `after`/`before` orders hooks inside one phase; to run beside `{target}`, register \
+         `{hook}` in `Phase::{target_phase}`"
+    )]
+    CrossPhase {
+        /// The hook that declared the edge.
+        hook: String,
+        /// Its phase.
+        phase: Phase,
+        /// `after` or `before`.
+        relation: &'static str,
+        /// The name it declared, as written.
+        depends_on: String,
+        /// The hook that name reached in another phase.
+        target: String,
+        /// That hook's phase.
+        target_phase: Phase,
     },
 
     #[error(
@@ -285,6 +444,21 @@ pub fn sort<T>(items: Vec<Ordered<T>>) -> Result<Vec<T>, OrderError> {
             for dep in deps {
                 match targets.get(&dep.target) {
                     Some(hits) => {
+                        // An edge across phases is refused, `_if_present` or
+                        // not: the phases already order those two hooks.
+                        if let Some(&j) = hits.iter().find(|&&j| items[j].phase != item.phase) {
+                            if let (Some(phase), Some(target_phase)) = (item.phase, items[j].phase)
+                            {
+                                return Err(OrderError::CrossPhase {
+                                    hook: item.id.to_string(),
+                                    phase,
+                                    relation,
+                                    depends_on: dep.target.clone(),
+                                    target: items[j].id.to_string(),
+                                    target_phase,
+                                });
+                            }
+                        }
                         for &j in hits {
                             if relation == "after" {
                                 add(j, i, &mut edges, &mut indegree);
@@ -310,13 +484,16 @@ pub fn sort<T>(items: Vec<Ordered<T>>) -> Result<Vec<T>, OrderError> {
         }
     }
 
-    // Kahn, always taking the lowest registration index that is ready, so the
-    // order is a function of the declarations and nothing else.
+    // Kahn, always taking the ready hook of the outermost phase, then of the
+    // earliest band, then of the lowest registration index, so the order is
+    // a function of the declarations and nothing else. No edge crosses a
+    // phase, so each phase comes out whole, outermost first.
+    let key = |i: usize| (items[i].phase.map(Phase::depth), items[i].order.band, i);
     let mut ready: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
     let mut out: Vec<usize> = Vec::with_capacity(n);
     while !ready.is_empty() {
-        ready.sort_unstable();
-        let next = ready.remove(0);
+        ready.sort_unstable_by_key(|&i| std::cmp::Reverse(key(i)));
+        let next = ready.pop().expect("not empty");
         out.push(next);
         for &to in &edges[next] {
             indegree[to] -= 1;
@@ -618,6 +795,161 @@ mod tests {
         assert!(!path.iter().any(|hook| hook == "c.h"), "{err}");
         assert_eq!(path.first(), path.last(), "{err}");
         assert_eq!(path.len(), 3, "{err}");
+    }
+
+    fn phased(instance: &str, name: &str, phase: Phase, order: Order) -> Ordered<String> {
+        item(instance, name, order).in_phase(phase)
+    }
+
+    #[test]
+    fn phases_come_out_whole_outermost_first_whatever_the_registration_order() {
+        let got = sort(vec![
+            phased("cache", "lookup", Phase::Cache, Order::new()),
+            phased("csrf", "check", Phase::Guard, Order::new()),
+            phased("gzip", "encode", Phase::Encode, Order::new()),
+            phased("proxy", "read", Phase::Identify, Order::new()),
+            phased("limit", "count", Phase::Guard, Order::new()),
+        ])
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "gzip.encode",
+                "proxy.read",
+                "csrf.check",
+                "limit.count",
+                "cache.lookup"
+            ]
+        );
+    }
+
+    #[test]
+    fn hooks_of_one_phase_follow_their_after() {
+        let got = sort(vec![
+            phased("audit", "trail", Phase::Guard, Order::new().after("auth")),
+            phased("proxy", "read", Phase::Identify, Order::new()),
+            phased("auth", "check", Phase::Guard, Order::new()),
+        ])
+        .unwrap();
+        assert_eq!(got, vec!["proxy.read", "auth.check", "audit.trail"]);
+    }
+
+    #[test]
+    fn an_after_across_phases_is_refused_with_a_help_line() {
+        let err = sort(vec![
+            phased("proxy", "read", Phase::Identify, Order::new()),
+            phased(
+                "limit",
+                "count",
+                Phase::Guard,
+                Order::new().after("proxy.read"),
+            ),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OrderError::CrossPhase {
+                    phase: Phase::Guard,
+                    target_phase: Phase::Identify,
+                    relation: "after",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("`limit.count` runs in the Guard phase"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`proxy.read` in the Identify phase"),
+            "{text}"
+        );
+        assert!(text.contains("\nhelp: remove that `after`"), "{text}");
+        assert!(text.contains("`Phase::Identify`"), "{text}");
+    }
+
+    #[test]
+    fn an_if_present_edge_across_phases_is_refused_too() {
+        let err = sort(vec![
+            phased("csrf", "check", Phase::Guard, Order::new()),
+            phased(
+                "hook",
+                "x",
+                Phase::Cache,
+                Order::new().before_if_present("csrf"),
+            ),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OrderError::CrossPhase {
+                    relation: "before",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // Absent, it stays silent, as before.
+        let got = sort(vec![phased(
+            "hook",
+            "x",
+            Phase::Cache,
+            Order::new().before_if_present("csrf"),
+        )])
+        .unwrap();
+        assert_eq!(got, vec!["hook.x"]);
+    }
+
+    #[test]
+    fn first_and_last_place_a_hook_in_its_phase_without_a_name() {
+        let got = sort(vec![
+            phased("csrf", "check", Phase::Guard, Order::new().last()),
+            phased("hooks", "answer", Phase::Guard, Order::new()),
+            phased("limit", "count", Phase::Guard, Order::new().first()),
+            phased("proxy", "read", Phase::Identify, Order::new().last()),
+            phased("override", "rewrite", Phase::Identify, Order::new()),
+        ])
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "override.rewrite",
+                "proxy.read",
+                "limit.count",
+                "hooks.answer",
+                "csrf.check"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_edge_beats_a_band() {
+        let got = sort(vec![
+            phased("auth", "subject", Phase::Guard, Order::new()),
+            phased(
+                "limit",
+                "count",
+                Phase::Guard,
+                Order::new().first().after("auth"),
+            ),
+            phased("other", "x", Phase::Guard, Order::new()),
+        ])
+        .unwrap();
+        assert_eq!(got, vec!["auth.subject", "limit.count", "other.x"]);
+    }
+
+    #[test]
+    fn a_chain_with_no_phases_sorts_as_it_always_did() {
+        let got = sort(vec![
+            item("b", "h", Order::new().after("a")),
+            item("a", "h", Order::new()),
+        ])
+        .unwrap();
+        assert_eq!(got, vec!["a.h", "b.h"]);
     }
 
     #[test]

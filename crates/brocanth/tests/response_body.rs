@@ -23,7 +23,7 @@ use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, Response,
     ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_shutdown::{ShutdownCx, ShutdownReason};
 
 // ---------------------------------------------------------------------------
@@ -126,6 +126,7 @@ impl HookSource for Watcher {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.response(
             "watch",
+            Phase::Guard,
             Order::new(),
             WatchHook {
                 rec: self.rec.clone(),
@@ -248,7 +249,7 @@ impl Plugin for Tagger {
 impl HookSource for Tagger {
     type Families = OnResponse;
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("etag", Order::new(), ETag);
+        registrar.response("etag", Phase::Guard, Order::new(), ETag);
         Ok(())
     }
 }
@@ -331,7 +332,7 @@ impl Plugin for Shouter {
 impl HookSource for Shouter {
     type Families = OnResponse;
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("shout", Order::new(), Shout);
+        registrar.response("shout", Phase::Guard, Order::new(), Shout);
         Ok(())
     }
 }

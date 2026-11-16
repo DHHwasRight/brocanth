@@ -214,8 +214,9 @@ Abuse, because anybody can send to a public URL:
 - **One answer.** Counted or not, the collector answers 204, or a 1×1 GIF
   to a GET, with `Cache-Control: no-store`. Never a 5xx and never a reason:
   a beacon cannot read it, and a prober learns nothing.
-- **CSRF.** The collector runs before the CSRF check (`before_if_present
-  ("csrf.check")`): a beacon is a cross-site POST with no token, and it
+- **CSRF.** The collector runs before the CSRF check: both are in
+  `Phase::Guard`, and the check is `Order::last()` there. A beacon is a
+  cross-site POST with no token, and it
   writes nothing a forged form could abuse. Every other POST still meets
   the check; a test holds both.
 

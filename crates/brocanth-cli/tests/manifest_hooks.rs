@@ -26,14 +26,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use brocanth::plugin_api::Plugin;
-use brocanth::plugin_hooks::{hook_names, HookSource};
+use brocanth::plugin_hooks::{hook_names, hook_phases, HookSource};
 
 /// One hooking plugin: the module key, the plugin type as a generated
 /// project names it, and the names it registers.
 struct Row {
     key: &'static str,
     ty: &'static str,
-    registered: fn() -> Vec<String>,
+    registered: fn() -> Vec<(String, Option<String>)>,
 }
 
 /// Every hooking plugin of a module the CLI has. Each is configured so that
@@ -162,10 +162,12 @@ const PLUGINS: &[Row] = &[
     },
 ];
 
-/// The names `plugin` registers, and its `HOOKS` when it lists them: both
-/// must equal the manifest's.
-fn names<P: HookSource>(plugin: &P) -> Vec<String> {
+/// The names `plugin` registers, each with its phase (`None` for an error
+/// or a model hook), and its `HOOKS` when it lists them: both must equal
+/// the manifest's.
+fn names<P: HookSource>(plugin: &P) -> Vec<(String, Option<String>)> {
     let registered = hook_names(plugin).unwrap_or_else(|e| panic!("{}: {e}", P::NAME));
+    let phases = hook_phases(plugin).unwrap_or_else(|e| panic!("{}: {e}", P::NAME));
     if !P::HOOKS.is_empty() {
         let listed: BTreeSet<&str> = P::HOOKS.iter().copied().collect();
         let installed: BTreeSet<&str> = registered.iter().map(String::as_str).collect();
@@ -178,11 +180,20 @@ fn names<P: HookSource>(plugin: &P) -> Vec<String> {
         );
     }
     registered
+        .into_iter()
+        .map(|name| {
+            let phase = phases
+                .iter()
+                .find(|(hook, _)| *hook == name)
+                .map(|(_, phase)| phase.name().to_string());
+            (name, phase)
+        })
+        .collect()
 }
 
 /// The names a generated plugin passes to its registrar: the first string
-/// after each `registrar.<method>(`.
-fn written(picks: &[&'static str], path: &str) -> Vec<String> {
+/// after each `registrar.<method>(`, with the `Phase::<name>` after it.
+fn written(picks: &[&'static str], path: &str) -> Vec<(String, Option<String>)> {
     let files =
         brocanth_cli::testing::generate("my-blog", picks, &[]).unwrap_or_else(|e| panic!("{e}"));
     let source = &files
@@ -196,7 +207,19 @@ fn written(picks: &[&'static str], path: &str) -> Vec<String> {
         let Some(open) = call.find('(') else { continue };
         let args = call[open + 1..].trim_start();
         if let Some(rest) = args.strip_prefix('"') {
-            found.push(rest[..rest.find('"').expect("a closed string")].to_string());
+            let end = rest.find('"').expect("a closed string");
+            let phase = rest[end + 1..]
+                .trim_start()
+                .strip_prefix(',')
+                .map(str::trim_start)
+                .and_then(|next| next.strip_prefix("Phase::"))
+                .map(|next| {
+                    let len = next
+                        .find(|c: char| !c.is_alphanumeric())
+                        .unwrap_or(next.len());
+                    next[..len].to_string()
+                });
+            found.push((rest[..end].to_string(), phase));
         }
     }
     assert!(
@@ -328,7 +351,10 @@ fn every_manifest_declares_exactly_the_hooks_its_plugin_registers() {
             .find(|m| m.manifest().key == row.key)
             .unwrap_or_else(|| panic!("no module `{}`", row.key));
         let declared = declared(*module);
-        let registered: BTreeSet<String> = (row.registered)().into_iter().collect();
+        let registered: BTreeSet<String> = (row.registered)()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         if declared != registered {
             wrong.push(format!(
                 "`{}`: the plugin registers {registered:?}, the manifest declares {declared:?}",
@@ -339,6 +365,39 @@ fn every_manifest_declares_exactly_the_hooks_its_plugin_registers() {
     assert!(
         wrong.is_empty(),
         "{}\nhelp: make `Manifest::hook` list each name the plugin passes to its registrar",
+        wrong.join("\n")
+    );
+}
+
+/// The phase is when a hook runs, `required` whether a project may turn it
+/// off. `explain` prints the manifest's phase, so it must be the one the
+/// plugin registers.
+#[test]
+fn every_manifest_declares_the_phase_each_hook_runs_in() {
+    let mut wrong = Vec::new();
+    for row in PLUGINS {
+        let module = brocanth_cli::testing::modules()
+            .iter()
+            .find(|m| m.manifest().key == row.key)
+            .unwrap_or_else(|| panic!("no module `{}`", row.key));
+        let manifest = module.manifest();
+        for (name, phase) in (row.registered)() {
+            let Some((_, _, hook)) = manifest.hooks.iter().find(|(n, _, _)| *n == name) else {
+                continue;
+            };
+            let declared = hook.phase.map(|p| p.name().to_string());
+            if declared != phase {
+                wrong.push(format!(
+                    "`{}.{name}`: the plugin registers it in {phase:?}, the manifest declares {declared:?}",
+                    row.key
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{}\nhelp: give `Manifest::hook` the phase the plugin passes to its registrar: \
+         `Hook::required().phase(Phase::Guard)`; an error or a model hook has none",
         wrong.join("\n")
     );
 }

@@ -1683,6 +1683,23 @@ macro_rules! register {
         //     ),
         // );
 
+        // -- brocanth-middleware: CSRF ------------------------------------
+        //
+        // Not one of the five above. Each of those encodes a fact about
+        // this deployment; this one encodes a fact about browsers: any
+        // page on any site can post a form here, and the cookies ride
+        // along. That is true wherever this runs, so this hook is on, and
+        // the only thing to decide is which paths are exempt -- a webhook,
+        // or anything else whose caller is not a browser:
+        //
+        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
+        //
+        // The token for the request is `ctx.hooked::<CsrfToken>()`;
+        // `token.hidden_field()` is the input a form carries.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
+
         // -- brocanth-i18n: a locale per request --------------------------
         //
         // Reads `?locale=`, then the `locale` cookie, then Accept-Language,
@@ -1702,23 +1719,6 @@ macro_rules! register {
             "src/modules/i18n.rs",
             crate::modules::i18n::MODULE.hooks.off(),
         );
-
-        // -- brocanth-middleware: CSRF ------------------------------------
-        //
-        // Not one of the five above. Each of those encodes a fact about
-        // this deployment; this one encodes a fact about browsers: any
-        // page on any site can post a form here, and the cookies ride
-        // along. That is true wherever this runs, so this hook is on, and
-        // the only thing to decide is which paths are exempt -- a webhook,
-        // or anything else whose caller is not a browser:
-        //
-        //     exempt = ["/callbacks"]    under [csrf] in config/<env>.toml
-        //
-        // The token for the request is `ctx.hooked::<CsrfToken>()`;
-        // `token.hidden_field()` is the input a form carries.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
-            .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::storage::Files>("storage")
             .map_err(|e| e.to_string())?;
@@ -1755,16 +1755,16 @@ pub(crate) use register;
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
 type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
-type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithI18n>;
-type WithStorage = After<crate::plugins::storage::Files, WithMiddlewareCsrf>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithAdmin>;
+type WithI18n = After<crate::plugins::i18n::I18n, WithMiddlewareCsrf>;
+type WithStorage = After<crate::plugins::storage::Files, WithI18n>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithStorage>;
 pub type Installed = WithStorageRoutes;
 
-type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, NoHooks>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedI18n>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
+type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedCsrf>;
 type HookedStorageRoutes =
-    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedCsrf>;
+    Both<<crate::plugins::storage_routes::StorageRoutes as HookSource>::Families, HookedI18n>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1913,42 +1913,6 @@ pub const SETTINGS: &[Setting] = &[
         text: true,
     },
     Setting {
-        path: "i18n.query",
-        help: "The query parameter that names a locale: `?locale=fr`. Empty means none.",
-        flag: true,
-        file: "src/modules/i18n.rs",
-        flags: crate::modules::i18n::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "i18n.cookie",
-        help: "The cookie that names a locale. Empty means none.",
-        flag: true,
-        file: "src/modules/i18n.rs",
-        flags: crate::modules::i18n::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "i18n.default",
-        help: "The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.",
-        flag: true,
-        file: "src/modules/i18n.rs",
-        flags: crate::modules::i18n::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "i18n.remember",
-        help: "A `?locale=` choice sets the cookie, so the next page keeps it.",
-        flag: true,
-        file: "src/modules/i18n.rs",
-        flags: crate::modules::i18n::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "csrf.cookie",
         help: "The cookie this hook owns.",
         flag: true,
@@ -1981,6 +1945,42 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/middleware_csrf.rs",
         flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "i18n.query",
+        help: "The query parameter that names a locale: `?locale=fr`. Empty means none.",
+        flag: true,
+        file: "src/modules/i18n.rs",
+        flags: crate::modules::i18n::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.cookie",
+        help: "The cookie that names a locale. Empty means none.",
+        flag: true,
+        file: "src/modules/i18n.rs",
+        flags: crate::modules::i18n::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.default",
+        help: "The locale for a request that asks for none offered. None: `en`, the catalog's default. Empty means none.",
+        flag: true,
+        file: "src/modules/i18n.rs",
+        flags: crate::modules::i18n::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "i18n.remember",
+        help: "A `?locale=` choice sets the cookie, so the next page keeps it.",
+        flag: true,
+        file: "src/modules/i18n.rs",
+        flags: crate::modules::i18n::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -2276,8 +2276,8 @@ pub fn read_line() -> Result<bool, String> {
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let admin = crate::plugins::admin::Settings::default();
-    let i18n = brocanth_i18n::NegotiatorConfig::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
+    let i18n = brocanth_i18n::NegotiatorConfig::default();
     let storage = crate::plugins::storage::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let server = crate::plugins::ServerSettings::default();
@@ -2287,14 +2287,14 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("admin.index_title", format!("{:?}", admin.index_title)),
         ("admin.site_url", format!("{:?}", admin.site_url)),
         ("admin.stylesheet", format!("{:?}", admin.stylesheet)),
-        ("i18n.query", format!("{:?}", i18n.query)),
-        ("i18n.cookie", format!("{:?}", i18n.cookie)),
-        ("i18n.default", format!("{:?}", i18n.default)),
-        ("i18n.remember", format!("{:?}", i18n.remember)),
         ("csrf.cookie", format!("{:?}", csrf.cookie)),
         ("csrf.field", format!("{:?}", csrf.field)),
         ("csrf.header", format!("{:?}", csrf.header)),
         ("csrf.secure", format!("{:?}", csrf.secure)),
+        ("i18n.query", format!("{:?}", i18n.query)),
+        ("i18n.cookie", format!("{:?}", i18n.cookie)),
+        ("i18n.default", format!("{:?}", i18n.default)),
+        ("i18n.remember", format!("{:?}", i18n.remember)),
         ("storage.root", format!("{:?}", storage.root)),
         ("storage.secret", format!("{:?}", storage.secret)),
         ("storage.token_ttl", format!("{:?}", storage.token_ttl)),
@@ -2429,7 +2429,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 15472b5d3a6100e1
+// brocanth-digest: 5b0b08023901912f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3175,6 +3175,20 @@ title = "My Blog admin"
 # A stylesheet every screen links after the shipped one: the theme. Empty means none.
 # stylesheet = "/admin-theme.css"
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
 [i18n]
 # The query parameter that names a locale: `?locale=fr`. Empty means none.
 # query = "locale"
@@ -3193,20 +3207,6 @@ remember = true
 # nor a socket or a stream. The routes of other modules are kept in
 # src/plugins/mod.rs, from their files in src/modules/.
 unprefixed = ["/api"]
-
-[csrf]
-# The cookie this hook owns.
-cookie = "csrf_token"
-# The form field the token comes back in.
-field = "_csrf_token"
-# The header a fetch caller may send instead of the field. Empty means none.
-# While it is set, the cookie is not HttpOnly: a script reads it.
-# header = "x-csrf-token"
-# Paths never checked, each with everything under it.
-# For a caller that is not a browser: a webhook, a device.
-exempt = []
-# Send the cookie over HTTPS only.
-secure = true
 
 [storage]
 # Where uploads are stored.
@@ -3980,7 +3980,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage};
@@ -4089,21 +4089,13 @@ impl HookSource for StorageRoutes {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(routes) = &self.routes {
-            registrar.request_async(
-                "lift",
-                Order::new().before_if_present("csrf.check"),
-                routes.csrf_lift(),
-            );
-            // After the CSRF check, so an upload from another site stops
-            // there, and after the proxy reader and the rate limiter.
-            registrar.request_async(
-                "answer",
-                Order::new()
-                    .after_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                routes.clone(),
-            );
+            // `Guard`: the CSRF check refuses last in that phase, so the
+            // token this hook copies out of the form is there when it
+            // reads.
+            registrar.request_async("lift", Phase::Guard, Order::new(), routes.csrf_lift());
+            // `Cache`, after every guard: an upload from another site
+            // stops at the CSRF check, and a flood at the rate limiter.
+            registrar.request_async("answer", Phase::Cache, Order::new(), routes.clone());
         }
         Ok(())
     }
@@ -4298,6 +4290,24 @@ make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
 
+## CSRF
+
+`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
+is a double-submit cookie: the hook mints a token, sets it as its own
+cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
+unless the request sends the same value back -- in the `_csrf_token`
+field, or in the `X-CSRF-Token` header.
+
+So every form that posts carries the hidden field. In a page, read
+the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
+write `token.hidden_field()` inside the `<form>`. For HTML this
+project did not template, `token.stamp_forms(html)` adds the field to
+every posting form; the admin uses it.
+
+A 403 from this hook is a form that lost its token, or a caller that
+is not a browser. Add that path to `exempt`; do not remove the
+registration.
+
 ## Translations
 
 Text a visitor reads lives in `locales/<tag>.toml`, one file per
@@ -4336,24 +4346,6 @@ remembers the choice in the cookie. A path under an `unprefixed`
 prefix of `[i18n]` (`/api`), the routes of other modules (the admin,
 the file routes) and a file such as `/robots.txt` keep no segment.
 
-## CSRF
-
-`brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
-is a double-submit cookie: the hook mints a token, sets it as its own
-cookie, and refuses any verb that is not GET, HEAD, OPTIONS or TRACE
-unless the request sends the same value back -- in the `_csrf_token`
-field, or in the `X-CSRF-Token` header.
-
-So every form that posts carries the hidden field. In a page, read
-the token with `ctx.hooked::<brocanth_middleware::CsrfToken>()` and
-write `token.hidden_field()` inside the `<form>`. For HTML this
-project did not template, `token.stamp_forms(html)` adds the field to
-every posting form; the admin uses it.
-
-A 403 from this hook is a form that lost its token, or a caller that
-is not a browser. Add that path to `exempt`; do not remove the
-registration.
-
 ## File routes
 
 Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
@@ -4390,7 +4382,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 02d3f78134e7b22a -->
+<!-- brocanth-digest: f3fefe8124affa06 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

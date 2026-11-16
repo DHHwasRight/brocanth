@@ -18,7 +18,7 @@ use brocanth::plugin_hooks::{
     Both, Flow, HookFamilies, HookRegistrar, HookSource, OnRequest, OnResponse, Request,
     RequestHook, RequestState, Response, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{
     async_handler, BoxFuture, Handler, RouteBundle, RouteCx, RouteSource,
 };
@@ -109,6 +109,7 @@ impl HookSource for Probe {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "trace",
+            Phase::Guard,
             Order::new(),
             Hooks {
                 seen: self.seen.clone(),
@@ -116,6 +117,7 @@ impl HookSource for Probe {
         );
         registrar.response(
             "stamp",
+            Phase::Guard,
             Order::new(),
             Hooks {
                 seen: self.seen.clone(),

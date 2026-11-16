@@ -43,7 +43,7 @@ It leaves alone a stream, any other verb or status, and a response with `Cache-C
 
 **Why a weak tag.** The tag is over the identity body, before compression runs. A weak tag stays true for the gzip and the brotli copy of the page, so one tag serves every encoding.
 
-**Order.** The hook runs after the route cache stores a page and before compression. Its `Order` names `route_cache` and `compression`, so this holds in any registration order. A cache hit gets a tag and a `304` like a fresh page.
+**Order.** The hook is in `Phase::Encode`: it runs after the route cache stores a page (`Cache`) and before compression, which is first in `Encode`. It names no other hook, so this holds in any registration order. A cache hit gets a tag and a `304` like a fresh page.
 
 ## The module file
 

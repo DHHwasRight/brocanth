@@ -127,6 +127,7 @@ impl HookSource for ProxyHeaders {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "read",
+            brocanth::plugin_order::Phase::Identify,
             brocanth::plugin_order::Order::new(),
             Hook {
                 trust: self.config.trust.clone(),

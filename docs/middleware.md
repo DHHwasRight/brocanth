@@ -402,22 +402,21 @@ streamed download is usually a file that is already compressed, and a
 `101` has no body. So the hook neither wraps a stream nor announces an
 encoding for one.
 
-**Order, declared in the hooks.** Response hooks run in reverse declared
-order, and the right order on the way out is:
+**Order, from the phases.** Response hooks run `Cache`, `Guard`,
+`Identify`, then `Encode` (ADR 10), and the right order on the way out is:
 
 ```text
-handler -> route_cache.store -> gtag / beacon -> conditional_get.check -> compression.encode -> client
+handler -> route_cache.store (Cache) -> flash / gtag / beacon (Identify)
+        -> conditional_get.check (Encode) -> compression.encode (Encode, first) -> client
 ```
 
 The route cache stores the identity body, and a hit is tagged and
-compressed again for the client that asks. `ConditionalGet` declares
-`after_if_present("compression")` and `before_if_present("route_cache")`.
-`Compression` declares `before_if_present` on `conditional_get`,
-`route_cache`, `gtag` and `beacon`, and on each id in
-`CompressionConfig::runs_after`. So the order holds in any registration
-order, and an instance that is not installed changes nothing. The cost:
-the names are instance names, so an application that renames one of those
-instances adds it to `runs_after` itself.
+compressed again for the client that asks. Both encoding hooks are in
+`Phase::Encode`. `Compression` is `Order::first()` there, and response
+hooks leave a phase in reverse, so it touches the body last. No hook names
+another, so the order holds in any registration order and under any
+instance name. An application hook in `Encode` that rewrites the body goes
+in `CompressionConfig::runs_after`; one in another phase needs nothing.
 
 **In a generated project.** `middleware-conditional-get` and
 `middleware-compression` are children of `middleware`, off until ticked.

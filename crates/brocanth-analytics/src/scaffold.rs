@@ -56,11 +56,11 @@ impl Module for PageViews {
                 .feature_with("admin", "admin")
                 .note("the page-view hook and its Postgres store"),
         )
-        .hook("count", "count each page this server answers", Hook::on())
+        .hook("count", "count each page this server answers", Hook::on().phase(brocanth_scaffold::Phase::Identify))
         .hook(
             "collect",
             "accept beacons at `collector_path` from `collector_origins`",
-            Hook::on(),
+            Hook::on().phase(brocanth_scaffold::Phase::Guard),
         )
         .integration(
             "admin",
@@ -225,7 +225,7 @@ impl Module for StaticBeacon {
         .hook(
             "insert",
             "put the snippet into each HTML page, while `collector` is set",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
     }
 

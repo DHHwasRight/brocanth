@@ -1457,6 +1457,26 @@ macro_rules! register {
         //     ),
         // );
 
+        // -- brocanth-middleware: CSRF ------------------------------------
+        //
+        // Not one of the five above. Each of those encodes a fact about
+        // this deployment; this one encodes a fact about browsers: any
+        // page on any site can post a form here, and the cookies ride
+        // along. That is true wherever this runs, so this hook is on, and
+        // the only thing to decide is which paths are exempt -- a webhook,
+        // or anything else whose caller is not a browser:
+        //
+        //     a list has no flag: `brocanth add config` gives `exempt`
+        //     a home under [csrf] in config/<env>.toml
+        //
+        // The token for the request is `ctx.hooked::<CsrfToken>()`;
+        // `token.hidden_field()` is the input a form carries.
+        let builder = builder.plugin_hooking(
+            <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::csrf_settings(&given)?,
+            ),
+        );
+
         // -- brocanth-middleware: rate limit ------------------------------
         //
         // A fixed window per key. Each rule is a group of routes, a limit
@@ -1486,26 +1506,6 @@ macro_rules! register {
             "rate_limit",
             "src/modules/middleware_rate_limit.rs",
             crate::modules::middleware_rate_limit::MODULE.hooks.off(),
-        );
-
-        // -- brocanth-middleware: CSRF ------------------------------------
-        //
-        // Not one of the five above. Each of those encodes a fact about
-        // this deployment; this one encodes a fact about browsers: any
-        // page on any site can post a form here, and the cookies ride
-        // along. That is true wherever this runs, so this hook is on, and
-        // the only thing to decide is which paths are exempt -- a webhook,
-        // or anything else whose caller is not a browser:
-        //
-        //     a list has no flag: `brocanth add config` gives `exempt`
-        //     a home under [csrf] in config/<env>.toml
-        //
-        // The token for the request is `ctx.hooked::<CsrfToken>()`;
-        // `token.hidden_field()` is the input a form carries.
-        let builder = builder.plugin_hooking(
-            <brocanth_middleware::Csrf as brocanth::plugin_api::Plugin>::new(
-                crate::plugins::csrf_settings(&given)?,
-            ),
         );
 
         // -- brocanth-middleware: conditional GET -------------------------
@@ -1549,17 +1549,18 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, Base>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithMiddlewareRateLimit>;
-type WithMiddlewareConditionalGet = After<brocanth_middleware::ConditionalGet, WithMiddlewareCsrf>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, Base>;
+type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithMiddlewareCsrf>;
+type WithMiddlewareConditionalGet =
+    After<brocanth_middleware::ConditionalGet, WithMiddlewareRateLimit>;
 type WithMiddlewareCompression =
     After<brocanth_middleware::Compression, WithMiddlewareConditionalGet>;
 pub type Installed = WithMiddlewareCompression;
 
-type HookedRateLimit = Both<<brocanth_middleware::RateLimit as HookSource>::Families, NoHooks>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedRateLimit>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
+type HookedRateLimit = Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedCsrf>;
 type HookedConditionalGet =
-    Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedCsrf>;
+    Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedRateLimit>;
 type HookedCompression =
     Both<<brocanth_middleware::Compression as HookSource>::Families, HookedConditionalGet>;
 
@@ -1655,33 +1656,6 @@ pub struct Setting {
 /// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
-        path: "rate_limit.ip_header",
-        help: "A header that holds the client address, set by your edge. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        env: "MY_BLOG_RATE_LIMIT__IP_HEADER",
-    },
-    Setting {
-        path: "rate_limit.session_cookie",
-        help: "The session cookie, for a rule keyed by session. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        env: "MY_BLOG_RATE_LIMIT__SESSION_COOKIE",
-    },
-    Setting {
-        path: "rate_limit.fail_open",
-        help: "Let a request through when the counter store fails.",
-        flag: true,
-        file: "src/modules/middleware_rate_limit.rs",
-        flags: crate::modules::middleware_rate_limit::MODULE.flags,
-        none_as: None,
-        env: "MY_BLOG_RATE_LIMIT__FAIL_OPEN",
-    },
-    Setting {
         path: "csrf.cookie",
         help: "The cookie this hook owns.",
         flag: true,
@@ -1716,6 +1690,33 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::middleware_csrf::MODULE.flags,
         none_as: None,
         env: "MY_BLOG_CSRF__SECURE",
+    },
+    Setting {
+        path: "rate_limit.ip_header",
+        help: "A header that holds the client address, set by your edge. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_RATE_LIMIT__IP_HEADER",
+    },
+    Setting {
+        path: "rate_limit.session_cookie",
+        help: "The session cookie, for a rule keyed by session. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_RATE_LIMIT__SESSION_COOKIE",
+    },
+    Setting {
+        path: "rate_limit.fail_open",
+        help: "Let a request through when the counter store fails.",
+        flag: true,
+        file: "src/modules/middleware_rate_limit.rs",
+        flags: crate::modules::middleware_rate_limit::MODULE.flags,
+        none_as: None,
+        env: "MY_BLOG_RATE_LIMIT__FAIL_OPEN",
     },
     Setting {
         path: "conditional_get.etag",
@@ -1981,12 +1982,16 @@ pub fn read_line() -> Result<bool, String> {
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
-    let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let csrf = brocanth_middleware::CsrfConfig::default();
+    let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
     let compression = brocanth_middleware::CompressionConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "rate_limit.ip_header",
             format!("{:?}", rate_limit.ip_header),
@@ -1999,10 +2004,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "conditional_get.etag",
             format!("{:?}", conditional_get.etag),
@@ -2058,6 +2059,22 @@ where
     }
 }
 
+/// `[csrf]`, as this binary runs it without a file: the plugin's
+/// defaults, then the environment, then the flags.
+pub fn csrf_settings(given: &[Given]) -> Result<brocanth_middleware::CsrfConfig, String> {
+    let mut settings = brocanth_middleware::CsrfConfig::default();
+    for given in given {
+        match given.setting.path {
+            "csrf.cookie" => settings.cookie = parsed(given)?,
+            "csrf.field" => settings.field = parsed(given)?,
+            "csrf.header" => settings.header = optional(given)?,
+            "csrf.secure" => settings.secure = parsed(given)?,
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
 /// `[rate_limit]`, as this binary runs it without a file: the plugin's
 /// defaults, then the environment, then the flags.
 pub fn rate_limit_settings(
@@ -2069,22 +2086,6 @@ pub fn rate_limit_settings(
             "rate_limit.ip_header" => settings.ip_header = optional(given)?,
             "rate_limit.session_cookie" => settings.session_cookie = optional(given)?,
             "rate_limit.fail_open" => settings.fail_open = parsed(given)?,
-            _ => {}
-        }
-    }
-    Ok(settings)
-}
-
-/// `[csrf]`, as this binary runs it without a file: the plugin's
-/// defaults, then the environment, then the flags.
-pub fn csrf_settings(given: &[Given]) -> Result<brocanth_middleware::CsrfConfig, String> {
-    let mut settings = brocanth_middleware::CsrfConfig::default();
-    for given in given {
-        match given.setting.path {
-            "csrf.cookie" => settings.cookie = parsed(given)?,
-            "csrf.field" => settings.field = parsed(given)?,
-            "csrf.header" => settings.header = optional(given)?,
-            "csrf.secure" => settings.secure = parsed(given)?,
             _ => {}
         }
     }
@@ -2140,12 +2141,16 @@ pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings
 
 /// Each setting as the plugin holds it, after every layer.
 fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
-    let rate_limit = rate_limit_settings(given)?;
     let csrf = csrf_settings(given)?;
+    let rate_limit = rate_limit_settings(given)?;
     let conditional_get = conditional_get_settings(given)?;
     let compression = compression_settings(given)?;
     let server = server_settings(given)?;
     Ok(vec![
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "rate_limit.ip_header",
             format!("{:?}", rate_limit.ip_header),
@@ -2158,10 +2163,6 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         (
             "conditional_get.etag",
             format!("{:?}", conditional_get.etag),
@@ -2323,7 +2324,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: f2d87a47199db53e
+// brocanth-digest: 440bb0befebcf3a6
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2910,21 +2911,6 @@ make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
 
-## Rate limit
-
-`brocanth_middleware::RateLimit` is registered in
-`src/plugins/mod.rs`. Its example rule (`login`) is commented
-out, because no module serves a sign-in form.
-The numbers are an example. Do not invent limits: ask for the limit
-and the window of each route group.
-
-A request whose key cannot be found is not counted. Behind a proxy,
-the address comes from `ProxyHeaders` or from `ip_header`. Never set
-`ip_header` to a header the client can send, such as
-`X-Forwarded-For`, unless the edge overwrites it. Behind a load
-balancer with neither, every client has the balancer's address and
-shares one bucket: register `ProxyHeaders` trusting the balancer.
-
 ## CSRF
 
 `brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
@@ -2942,6 +2928,21 @@ every posting form; the admin uses it.
 A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
+
+## Rate limit
+
+`brocanth_middleware::RateLimit` is registered in
+`src/plugins/mod.rs`. Its example rule (`login`) is commented
+out, because no module serves a sign-in form.
+The numbers are an example. Do not invent limits: ask for the limit
+and the window of each route group.
+
+A request whose key cannot be found is not counted. Behind a proxy,
+the address comes from `ProxyHeaders` or from `ip_header`. Never set
+`ip_header` to a header the client can send, such as
+`X-Forwarded-For`, unless the edge overwrites it. Behind a load
+balancer with neither, every client has the balancer's address and
+shares one bucket: register `ProxyHeaders` trusting the balancer.
 
 ## Conditional GET
 
@@ -2967,7 +2968,8 @@ already encoded; the hook then leaves it alone.
 
 A stream is never compressed. To keep a buffered body as it is, set
 `Cache-Control: no-transform`. A hook of your own that rewrites the
-body goes in `runs_after`, so compression waits for it.
+body runs before compression when it is in any phase but `Encode`;
+one in `Phase::Encode` goes in `runs_after`.
 
 ## Decisions that belong to the person
 
@@ -2993,7 +2995,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 1dc9704c9ee91c6e -->
+<!-- brocanth-digest: d77c6157e8ad9b7e -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

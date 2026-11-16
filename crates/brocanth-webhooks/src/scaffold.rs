@@ -96,7 +96,7 @@ impl Module for WebhooksIn {
         .hook(
             "receive",
             "answer POST {path}/{source} before the CSRF check",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Guard),
         )
         .absent(
             "webhooks-in",
@@ -267,7 +267,7 @@ const INCOMING_RS: &str = r##"//! Incoming webhooks, as this application receive
 @USE_ARC@use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_webhooks::{Delivery, Handler, Incoming, Receiver, Rejection, Scheme};
 
 // ---------------------------------------------------------------------------
@@ -387,17 +387,11 @@ impl HookSource for WebhooksIn {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(receiver) = &self.receiver {
-            // Before the CSRF check, which would refuse a POST with no
-            // token. After the proxy reader and the rate limiter, so the
-            // client's address is read and a flood is refused first.
-            registrar.request_async(
-                "receive",
-                Order::new()
-                    .before_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                receiver.clone(),
-            );
+            // `Guard`, so the client's address is read (`Identify`). The
+            // rate limiter counts first in `Guard`, so a flood is refused
+            // before this hook; the CSRF check, which would refuse a POST
+            // with no token, refuses last.
+            registrar.request_async("receive", Phase::Guard, Order::new(), receiver.clone());
         }
         Ok(())
     }

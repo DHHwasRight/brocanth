@@ -167,8 +167,11 @@ A request hook declares a **phase**, and orders itself inside it:
 |---|---|
 | `Identify` | proxy-headers, session, i18n negotiate, method-override |
 | `Guard` | rate-limit count, csrf check, auth |
-| `Cache` | conditional-get, route cache |
-| `Encode` (response) | compression, security headers, RateLimit headers |
+| `Cache` | route cache |
+| `Encode` (response) | conditional-get, compression, security headers, RateLimit headers |
+
+(Stage 4 moved conditional-get from `Cache` to `Encode`; see its note in
+§12.)
 
 These four names are final, and an `after` across phases is a build
 error (§13, decision 2).
@@ -650,7 +653,61 @@ lists.
 **Stage 4 — hook phases (2 days).** `Phase` in `brocanth::plugin_order`;
 the registrar and `.hook` take it. Exit: cross-plugin
 `after_if_present`/`before_if_present` 18 -> ≤ 3; `.after(<middleware
-key>)` 6 -> 0; ADR 11 records the phases.
+key>)` 6 -> 0; ADR 10 records the phases (the first draft said ADR 11;
+10 was the next free number).
+
+**Stage 4: done (2026-11-16).** Measured with a grep of `crates/*/src`
+(the definitions in `plugin_order.rs` left out):
+
+| Relation | Before (`91beb93e`) | After |
+|---|---|---|
+| `after_if_present` / `before_if_present` calls | 21 in 9 files | 2 |
+| of those, naming another plugin's hook | 19, and 4 more in `compression`'s `RUNS_AFTER` | 0 |
+| `.after(<middleware key>)` in a manifest | 6 | 0 |
+
+The 2 left are loops over a list the application configures:
+`CompressionConfig::runs_after` and `RateLimitConfig::after`. They name
+no plugin, and a name in another phase now stops the build. The counts
+on `91beb93e` differ from §1 (18), which was measured on `8f546fc`.
+
+What was built, and the choices made on the way:
+
+- `brocanth::plugin_order::Phase` (`Identify`, `Guard`, `Cache`,
+  `Encode`). `HookRegistrar::request`, `request_async` and `response` take
+  it as the second argument; `error` and `model` do not. `hook_phases`
+  beside `hook_names` lists what a plugin registers.
+- **The phases nest, `Encode` outermost.** Request hooks run `Identify`,
+  `Guard`, `Cache`; response hooks run `Cache`, `Guard`, `Identify`,
+  `Encode`. The response must leave through the phases in reverse, so the
+  route cache stores the page before the flash message goes in, and
+  `Encode` must be last.
+- **`conditional_get` is in `Encode`, not `Cache`** (§3.6 put it in
+  `Cache`). In `Cache` it would tag the body before `Identify` writes the
+  flash message into it, and a `304` could hide the message. In `Encode`
+  it tags the bytes the client gets.
+- **`Order::first()` and `Order::last()`**, not in the sketch. The rate
+  limiter is first in `Guard` and the CSRF check last, so the hooks that
+  answer a caller with no token (webhooks `receive`, analytics `collect`,
+  storage `lift`, gtag `consent-log`) sit between them and name neither.
+  They are priorities; an explicit `after` wins over them. `compression`
+  is first in `Encode`, so it leaves last.
+- Storage's `answer` hook is in `Cache`: it must follow the CSRF check,
+  and `Cache` is the phase after every guard.
+- A cross-phase edge is `OrderError::CrossPhase`, `_if_present` or not,
+  with `help:` naming the target's phase.
+- The scaffold keeps its own `Phase` (the CLI does not link the core):
+  `Hook::required().phase(Phase::Guard)`. `manifest_hooks` holds each
+  manifest's phase to the one its plugin registers, for each of its 15
+  hooking modules (13 with request or response hooks).
+- The six middleware children lose their `.after`: the chain order of
+  their registrations no longer decides a hook's place.
+
+| Phase | Request hooks | Response hooks |
+|---|---|---|
+| `Identify` | proxy-headers `read`, method-override `rewrite`, i18n `negotiate`, dp `read`, flash `read`, logging `line`, analytics `count` | flash `write`, i18n `content-language`, dp `vary`, gtag `insert`, beacon `insert` |
+| `Guard` | rate-limit `count` (first), canonical-host `redirect`, content-types `check`, cors `preflight`, webhooks `receive`, analytics `collect`, storage `lift`, gtag `consent-log`, csrf `check` (last) | csrf `mint`, cors `mark` |
+| `Cache` | route-cache `lookup`, storage `answer` | route-cache `store` |
+| `Encode` | none | compression `encode` (first), conditional-get `check`, security-headers `set`, rate-limit `headers` |
 
 **Stage 5 — capability Kinds and exports (2-3 days).** `JobQueue`,
 `CacheStore`, `SessionCookie`, `ConfigCheck`, and AGENTS.md sections as a

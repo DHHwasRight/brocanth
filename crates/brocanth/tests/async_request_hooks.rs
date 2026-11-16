@@ -37,7 +37,7 @@ use brocanth::plugin_hooks::{
     AsyncRequestHook, Begin, Both, Flow, HandlerError, HookRegistrar, HookSource, OnAsyncRequest,
     OnRequest, Request, RequestHook, RequestState, Response,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::BoxFuture;
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,7 @@ impl HookSource for Session {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request_async(
             "load",
+            Phase::Guard,
             self.order.clone(),
             SessionHook {
                 rec: self.rec.clone(),
@@ -239,6 +240,7 @@ impl HookSource for Stamp {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "id",
+            Phase::Guard,
             self.order.clone(),
             StampHook {
                 rec: self.rec.clone(),
@@ -269,6 +271,7 @@ impl HookSource for Forgetful {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request_async(
             "load",
+            Phase::Guard,
             Order::new(),
             SessionHook {
                 rec: self.0.clone(),
@@ -482,7 +485,7 @@ impl HookSource for Mute {
     type Families = OnRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("etag", Order::new(), Stamper);
+        registrar.response("etag", Phase::Guard, Order::new(), Stamper);
         Ok(())
     }
 }

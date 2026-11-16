@@ -18,7 +18,7 @@ use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
     ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 
 /// The script, the same text on every page and every site. What varies is
 /// on the `<script>` element's `data-` attributes.
@@ -98,7 +98,7 @@ impl HookSource for Beacon {
                  `https://app.example.com/_a/v`"
             )));
         }
-        registrar.response("insert", Order::new(), Insert { tag });
+        registrar.response("insert", Phase::Identify, Order::new(), Insert { tag });
         Ok(())
     }
 }

@@ -170,6 +170,7 @@ impl HookSource for Cors {
             .map_err(|why| PluginError::new(format!("cors: {}", why)))?;
         registrar.request(
             "preflight",
+            brocanth::plugin_order::Phase::Guard,
             brocanth::plugin_order::Order::new(),
             Hook {
                 config: self.config.clone(),
@@ -177,6 +178,7 @@ impl HookSource for Cors {
         );
         registrar.response(
             "mark",
+            brocanth::plugin_order::Phase::Guard,
             brocanth::plugin_order::Order::new(),
             Hook {
                 config: self.config.clone(),

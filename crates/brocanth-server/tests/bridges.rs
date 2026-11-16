@@ -24,7 +24,7 @@ use brocanth::plugin_hooks::{
     Request as CoreRequest, RequestHook, RequestState, Response as CoreResponse, ResponseHead,
     ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
 use brocanth::routing::{Router, RouterBuilder, Verb};
 use brocanth_server::bridge::{Bridge, RouteKind};
@@ -60,7 +60,7 @@ impl HookSource for Stamp {
     type Families = OnResponse;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("mark", Order::new(), Mark);
+        registrar.response("mark", Phase::Guard, Order::new(), Mark);
         Ok(())
     }
 }
@@ -719,7 +719,7 @@ impl HookSource for Reroute {
     type Families = OnRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.request("reroute", Order::new(), Rewrite);
+        registrar.request("reroute", Phase::Guard, Order::new(), Rewrite);
         Ok(())
     }
 }

@@ -82,6 +82,8 @@ impl HookSource for CanonicalHost {
         let (_scheme, host) = split(&self.config.to);
         registrar.request(
             "redirect",
+            // A redirect turns the request away from this host.
+            brocanth::plugin_order::Phase::Guard,
             brocanth::plugin_order::Order::new(),
             Hook {
                 base: self.config.to.trim_end_matches('/').to_string(),

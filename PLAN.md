@@ -815,3 +815,52 @@ build that tries gets `BuildError::HooksOffRequired`. **Reason:** a CSRF
 check or a session that authorization reads must not go away through a
 one-line list in the module file. The application can still leave the
 whole plugin out, which it does in plain sight.
+
+### ADR 10 — A request hook names its phase; `after` orders hooks inside one phase only.
+
+**Status:** accepted (2026-11-16). **Touches:** §8, `brocanth::plugin_order`,
+`brocanth::plugin_hooks::HookRegistrar`, `brocanth_scaffold::Hook`.
+**Design:** `docs/module-capabilities.md` §3.6, stage 4.
+
+`HookRegistrar::request`, `request_async` and `response` take a `Phase`:
+`Identify`, `Guard`, `Cache` or `Encode`. The phases nest, `Encode`
+outermost. Request hooks run `Identify`, `Guard`, `Cache`; response hooks
+run `Cache`, `Guard`, `Identify`, `Encode`. `Order::after` and `before`
+order hooks inside one phase. An `after` or `before` that reaches a hook
+of another phase, `_if_present` or not, is `OrderError::CrossPhase`, a
+build error with a `help:` line. `Order::first()` and `Order::last()`
+place a hook early or late in its phase without a name. Error and model
+hooks have no phase. A manifest declares the phase with
+`Hook::required().phase(Phase::Guard)`, and a test holds it to the phase
+the plugin registers.
+
+**Reason:** before this, a hook ordered itself by another plugin's hook
+name: `after_if_present("proxy-headers.read")`, `before_if_present
+("csrf.check")`, 21 such calls in 9 files. A second proxy reader or a
+renamed instance had to edit every list, and a module's place in the
+generated chain (`.after("middleware-rate-limit")`) carried the tie-break.
+A phase names a stage of the request instead (Rails `on_load`, Bevy
+`SystemSet`). A cross-phase edge is an error, not a warning, because it is
+that plugin-name coupling again, and a warning lets it back one hook at a
+time.
+
+**Why nested, with `Encode` outermost:** the response must leave through
+the phases in reverse, so the route cache stores the handler's page before
+a flash message goes in, and `Encode` must be last, so the `ETag` and the
+compressed bytes are the ones the client gets. One nesting gives both, and
+keeps the existing rule that a response chain runs in reverse declared
+order. `conditional_get` is in `Encode`, not `Cache`: its tag covers the
+body after every phase wrote into it.
+
+**Why `first` and `last`:** the guards that answer a caller with no CSRF
+token (incoming webhooks, analytics beacons, the upload-token lift) must
+run after the rate limiter and before the CSRF check. With the limiter
+`first` and the check `last` in `Guard`, they name neither. These are
+priorities, not edges: an explicit `after` still wins over them.
+
+**What does not change:** ADR 9. `after_dispatch` still reaches every
+request hook, in reverse declared order, whatever stopped the chain.
+`HookSource::REQUIRED` still says which hooks `hooks_off` may not turn
+off. Required means "may not be turned off"; the phase means "when it
+runs". Generated code stays explicit (ADR 1): each generated plugin writes
+its phase as a literal argument.

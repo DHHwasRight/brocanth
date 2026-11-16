@@ -42,12 +42,12 @@ impl Module for Gtag {
         .hook(
             "consent-log",
             "record each consent choice, while `consent_log` names a file",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Guard),
         )
         .hook(
             "insert",
             "put the banner and the tag into each HTML page",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
         // The hook runs for the static export too, so a static site may
         // take it: the consent lives in the visitor's browser.

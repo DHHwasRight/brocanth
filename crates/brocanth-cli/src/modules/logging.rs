@@ -38,7 +38,7 @@ impl Module for Logging {
         .hook(
             "line",
             "write one line per response on stderr",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
     }
 
@@ -90,7 +90,7 @@ use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{{
     HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState, Response,
 }};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{{Order, Phase}};
 
 /// What this plugin is built from.
 ///
@@ -179,7 +179,9 @@ impl HookSource for Logging {{
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {{
         let level = *self.level.as_ref().unwrap_or(&Level::Info);
-        registrar.request("line", Order::new(), Line {{ level }});
+        // `Identify`: request hooks run `after_dispatch` in reverse, so this
+        // line sees the response after every guard did.
+        registrar.request("line", Phase::Identify, Order::new(), Line {{ level }});
         Ok(())
     }}
 }}

@@ -561,12 +561,12 @@ impl Module for StorageRoutes {
         .hook(
             "answer",
             "answer POST {path} and GET {path}/{address}",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Cache),
         )
         .hook(
             "lift",
             "copy an upload form's CSRF field into the header the CSRF check reads",
-            Hook::on(),
+            Hook::on().phase(brocanth_scaffold::Phase::Guard),
         )
         .option(Opt::mount(
             "path",
@@ -782,7 +782,7 @@ use std::sync::Arc;
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage@SPEC_USE@};
@@ -888,21 +888,13 @@ impl HookSource for StorageRoutes {
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         if let Some(routes) = &self.routes {
-            registrar.request_async(
-                "lift",
-                Order::new().before_if_present("csrf.check"),
-                routes.csrf_lift(),
-            );
-            // After the CSRF check, so an upload from another site stops
-            // there, and after the proxy reader and the rate limiter.
-            registrar.request_async(
-                "answer",
-                Order::new()
-                    .after_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
-                routes.clone(),
-            );
+            // `Guard`: the CSRF check refuses last in that phase, so the
+            // token this hook copies out of the form is there when it
+            // reads.
+            registrar.request_async("lift", Phase::Guard, Order::new(), routes.csrf_lift());
+            // `Cache`, after every guard: an upload from another site
+            // stops at the CSRF check, and a flood at the rate limiter.
+            registrar.request_async("answer", Phase::Cache, Order::new(), routes.clone());
         }
         Ok(())
     }

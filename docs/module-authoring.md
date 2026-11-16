@@ -217,7 +217,7 @@ use brocanth::plugin_hooks::{
     BodyShape, Both, Flow, HookRegistrar, HookSource, OnRequest, OnResponse, Request,
     RequestHook, RequestState, ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use http::header::{HeaderName, HeaderValue};
 
 #[cfg(feature = "scaffold")]
@@ -265,8 +265,8 @@ impl HookSource for Correlation {
         let header = HeaderName::try_from(self.config.header.as_str())
             .map_err(|e| PluginError::new(format!("`header`: {e}")))?;
         registrar
-            .request("read", Order::new(), Read { header: header.clone() })
-            .response("echo", Order::new(), Echo { header });
+            .request("read", Phase::Identify, Order::new(), Read { header: header.clone() })
+            .response("echo", Phase::Identify, Order::new(), Echo { header });
         Ok(())
     }
 }
@@ -515,15 +515,34 @@ The four hook traits:
 `Request` is `http::Request<Vec<u8>>`. `ResponseHead` is
 `http::response::Parts`.
 
-`Order` (`crates/brocanth/src/plugin_order.rs:106`) places a hook against
-other hooks by their qualified name:
+A request or response hook names a `Phase` (`brocanth::plugin_order`),
+the stage of the request it belongs to. The phases nest, `Encode`
+outermost: request hooks run `Identify`, `Guard`, `Cache`; response hooks
+run `Cache`, `Guard`, `Identify`, `Encode`.
+
+| Phase | Request hooks | Response hooks |
+|---|---|---|
+| `Identify` | proxy headers, method override, locale, dp-swap, flash read, request log | flash write, `Content-Language`, `Vary`, the gtag and beacon snippets |
+| `Guard` | rate limit (first), canonical host, content types, CORS, the hooks that answer a caller with no token (webhooks, beacons, consent log, the upload token lift), CSRF check (last) | CSRF cookie, CORS headers |
+| `Cache` | route cache lookup, the file routes | route cache store |
+| `Encode` | none | compression (first, so it runs last), `ETag`/304, policy headers, `RateLimit-*` |
+
+`Order` places a hook **inside** its phase, by the qualified name of a
+hook of the same phase:
 
 ```rust
-Order::new().after("proxy-headers.read").before_if_present("csrf.check")
+registrar.request("count", Phase::Guard, Order::new().after("auth.subject"), hook);
 ```
 
 `after_if_present` and `before_if_present` do not fail when the other hook
-is missing. `after` and `before` do.
+is missing. `after` and `before` do. An `after` or `before` that reaches a
+hook of another phase stops the build with `help:` (ADR 10): the phases
+already order those two hooks. `Order::first()` and `Order::last()` place
+a hook early or late in its phase without a name.
+
+"Required" (`HookSource::REQUIRED`, `Hook::required()`) and the phase are
+two questions: required says a project may not turn the hook off; the
+phase says when it runs.
 
 **A hook can be off.** The application calls
 `AppBuilder::hooks_off(instance, names)` after the registration. The

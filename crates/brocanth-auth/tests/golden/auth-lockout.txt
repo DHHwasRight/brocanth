@@ -1792,20 +1792,6 @@ macro_rules! register {
         //     ),
         // );
 
-        // -- brocanth-middleware: flash -----------------------------------
-        //
-        // Messages for the next page, in a signed cookie. A page writes
-        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
-        // the next HTML page shows the messages inside the layout's
-        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
-        // configuration below.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
-            .map_err(|e| e.to_string())?;
-        let builder = builder
-            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
-            .map_err(|e| e.to_string())?;
-
         // -- brocanth-middleware: CSRF ------------------------------------
         //
         // Not one of the five above. Each of those encodes a fact about
@@ -1821,6 +1807,20 @@ macro_rules! register {
         // `token.hidden_field()` is the input a form carries.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::Csrf>("csrf")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: flash -----------------------------------
+        //
+        // Messages for the next page, in a signed cookie. A page writes
+        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
+        // the next HTML page shows the messages inside the layout's
+        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
+        // configuration below.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
         let builder = builder
             .plugin_from_config::<crate::plugins::mail::MailPlugin>("mail")
@@ -1843,15 +1843,16 @@ pub(crate) use register;
 /// A plugin that puts nothing on the context folds away, because
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
-type WithFlash = After<brocanth_middleware::FlashPlugin, Base>;
+type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, Base>;
+type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareCsrf>;
 type WithAuth = After<crate::plugins::auth::Auth, WithFlash>;
-type WithMiddlewareCsrf = After<brocanth_middleware::Csrf, WithAuth>;
-type WithMail = After<crate::plugins::mail::MailPlugin, WithMiddlewareCsrf>;
+type WithMail = After<crate::plugins::mail::MailPlugin, WithAuth>;
 type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithMail>;
 pub type Installed = WithAuthScreens;
 
-type HookedFlashPlugin = Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, NoHooks>;
-type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, HookedFlashPlugin>;
+type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
+type HookedFlashPlugin =
+    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedCsrf>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1859,7 +1860,7 @@ type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, Hook
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedCsrf;
+pub type Hooks = HookedFlashPlugin;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1953,6 +1954,42 @@ pub struct Setting {
 /// rewrites this list; a file in src/modules/ renames or hides a flag.
 pub const SETTINGS: &[Setting] = &[
     Setting {
+        path: "csrf.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.field",
+        help: "The form field the token comes back in.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.header",
+        help: "The header a fetch caller may send instead of the field. Empty means none.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "csrf.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/middleware_csrf.rs",
+        flags: crate::modules::middleware_csrf::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
         path: "flash.cookie",
         help: "The cookie this hook owns.",
         flag: true,
@@ -2030,42 +2067,6 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/auth.rs",
         flags: crate::modules::auth::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
-        path: "csrf.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.field",
-        help: "The form field the token comes back in.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.header",
-        help: "The header a fetch caller may send instead of the field. Empty means none.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "csrf.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/middleware_csrf.rs",
-        flags: crate::modules::middleware_csrf::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -2414,13 +2415,17 @@ pub fn read_line() -> Result<bool, String> {
 
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
+    let csrf = brocanth_middleware::CsrfConfig::default();
     let flash = brocanth_middleware::FlashConfig::default();
     let auth = crate::plugins::auth::Settings::default();
-    let csrf = brocanth_middleware::CsrfConfig::default();
     let mail = crate::plugins::mail::Settings::default();
     let auth_screens = crate::plugins::auth_screens::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
+        ("csrf.cookie", format!("{:?}", csrf.cookie)),
+        ("csrf.field", format!("{:?}", csrf.field)),
+        ("csrf.header", format!("{:?}", csrf.header)),
+        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("flash.cookie", format!("{:?}", flash.cookie)),
         ("flash.key_env", format!("{:?}", flash.key_env)),
         ("flash.secure", format!("{:?}", flash.secure)),
@@ -2436,10 +2441,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "auth.absolute_timeout",
             format!("{:?}", auth.absolute_timeout),
         ),
-        ("csrf.cookie", format!("{:?}", csrf.cookie)),
-        ("csrf.field", format!("{:?}", csrf.field)),
-        ("csrf.header", format!("{:?}", csrf.header)),
-        ("csrf.secure", format!("{:?}", csrf.secure)),
         ("mail.transport", format!("{:?}", mail.transport)),
         ("mail.from", format!("{:?}", mail.from)),
         ("mail.from_name", format!("{:?}", mail.from_name)),
@@ -2555,7 +2556,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b159aa9a200ba23d
+// brocanth-digest: 780fb4f4a7a25ec9
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3269,6 +3270,20 @@ name = "My Blog"
 # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.
 shutdown_grace_secs = 25
 
+[csrf]
+# The cookie this hook owns.
+cookie = "csrf_token"
+# The form field the token comes back in.
+field = "_csrf_token"
+# The header a fetch caller may send instead of the field. Empty means none.
+# While it is set, the cookie is not HttpOnly: a script reads it.
+# header = "x-csrf-token"
+# Paths never checked, each with everything under it.
+# For a caller that is not a browser: a webhook, a device.
+exempt = []
+# Send the cookie over HTTPS only.
+secure = true
+
 [flash]
 # The cookie this hook owns.
 cookie = "flash"
@@ -3308,20 +3323,6 @@ secure = false
 idle_timeout = 28800
 # Seconds from creation before a session is dead, however much it was used.
 absolute_timeout = 2592000
-
-[csrf]
-# The cookie this hook owns.
-cookie = "csrf_token"
-# The form field the token comes back in.
-field = "_csrf_token"
-# The header a fetch caller may send instead of the field. Empty means none.
-# While it is set, the cookie is not HttpOnly: a script reads it.
-# header = "x-csrf-token"
-# Paths never checked, each with everything under it.
-# For a caller that is not a browser: a webhook, a device.
-exempt = []
-# Send the cookie over HTTPS only.
-secure = true
 
 [mail]
 # Where mail goes: `smtp`, `log` or `folder`.
@@ -5997,23 +5998,6 @@ make one compile. To turn one on, copy it to `build()` in
 `src/app.rs` and widen `type Core` by its hook families; the comment
 above the five shows the type.
 
-## Flash
-
-`brocanth_middleware::FlashPlugin` is registered in
-`src/plugins/mod.rs`. After a form POST, write a message and redirect:
-
-```rust
-if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {
-    flash.success("Saved.");
-}
-Ok(Response::empty(303).with_header("location", "/"))
-```
-
-The next HTML page shows it inside `<div id="flash">`, which the root
-layout carries. Keep that element in the layout. A page that draws a
-form again without a redirect uses `flash.now(level, text)`. The text
-is plain: the hook escapes it. Never put HTML or a secret in a message.
-
 ## CSRF
 
 `brocanth_middleware::Csrf` is registered in `src/plugins/mod.rs`. It
@@ -6031,6 +6015,23 @@ every posting form; the admin uses it.
 A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
+
+## Flash
+
+`brocanth_middleware::FlashPlugin` is registered in
+`src/plugins/mod.rs`. After a form POST, write a message and redirect:
+
+```rust
+if let Some(flash) = ctx.hooked_mut::<brocanth_middleware::Flash>() {
+    flash.success("Saved.");
+}
+Ok(Response::empty(303).with_header("location", "/"))
+```
+
+The next HTML page shows it inside `<div id="flash">`, which the root
+layout carries. Keep that element in the layout. A page that draws a
+form again without a redirect uses `flash.now(level, text)`. The text
+is plain: the hook escapes it. Never put HTML or a secret in a message.
 
 ## Mail
 
@@ -6103,7 +6104,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: da16e9d2a56242f1 -->
+<!-- brocanth-digest: a295c99d57bddce9 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

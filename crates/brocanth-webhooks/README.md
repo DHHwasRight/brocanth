@@ -76,7 +76,7 @@ assert_eq!(late.status, 401);
 ```
 
 Register the hook in a plugin with
-`registrar.request_async("receive", Order::new().before_if_present("csrf.check"), receiver)`.
+`registrar.request_async("receive", Phase::Guard, Order::new(), receiver)`: the rate limiter counts first in `Guard` and the CSRF check refuses last, so the hook answers between them.
 The generated `src/plugins/webhooks_in/mod.rs` does it for you.
 
 ## Send

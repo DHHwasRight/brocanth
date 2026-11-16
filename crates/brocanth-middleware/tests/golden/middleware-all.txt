@@ -1523,17 +1523,6 @@ macro_rules! register {
             .plugin_hooking_from_config::<brocanth_middleware::ConditionalGet>("conditional_get")
             .map_err(|e| e.to_string())?;
 
-        // -- brocanth-middleware: flash -----------------------------------
-        //
-        // Messages for the next page, in a signed cookie. A page writes
-        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
-        // the next HTML page shows the messages inside the layout's
-        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
-        // configuration below.
-        let builder = builder
-            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
-            .map_err(|e| e.to_string())?;
-
         // -- brocanth-middleware: compression -----------------------------
         //
         // gzip or brotli, as the browser's Accept-Encoding asks, on a
@@ -1545,6 +1534,17 @@ macro_rules! register {
         // work is done twice and the second pass finds nothing to gain.
         let builder = builder
             .plugin_hooking_from_config::<brocanth_middleware::Compression>("compression")
+            .map_err(|e| e.to_string())?;
+
+        // -- brocanth-middleware: flash -----------------------------------
+        //
+        // Messages for the next page, in a signed cookie. A page writes
+        // `ctx.hooked_mut::<brocanth_middleware::Flash>()` and redirects;
+        // the next HTML page shows the messages inside the layout's
+        // `<div id="flash">`. Other markup: `.render(my_fn)` on the
+        // configuration below.
+        let builder = builder
+            .plugin_hooking_from_config::<brocanth_middleware::FlashPlugin>("flash")
             .map_err(|e| e.to_string())?;
         builder
     }};
@@ -1567,9 +1567,10 @@ type WithMiddlewareSecurityHeaders =
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithMiddlewareSecurityHeaders>;
 type WithMiddlewareConditionalGet =
     After<brocanth_middleware::ConditionalGet, WithMiddlewareRateLimit>;
-type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareConditionalGet>;
-type WithMiddlewareCompression = After<brocanth_middleware::Compression, WithFlash>;
-pub type Installed = WithMiddlewareCompression;
+type WithMiddlewareCompression =
+    After<brocanth_middleware::Compression, WithMiddlewareConditionalGet>;
+type WithFlash = After<brocanth_middleware::FlashPlugin, WithMiddlewareCompression>;
+pub type Installed = WithFlash;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
 type HookedSecurityHeaders =
@@ -1578,10 +1579,10 @@ type HookedRateLimit =
     Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedSecurityHeaders>;
 type HookedConditionalGet =
     Both<<brocanth_middleware::ConditionalGet as HookSource>::Families, HookedRateLimit>;
-type HookedFlashPlugin =
-    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedConditionalGet>;
 type HookedCompression =
-    Both<<brocanth_middleware::Compression as HookSource>::Families, HookedFlashPlugin>;
+    Both<<brocanth_middleware::Compression as HookSource>::Families, HookedConditionalGet>;
+type HookedFlashPlugin =
+    Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedCompression>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1589,7 +1590,7 @@ type HookedCompression =
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedCompression;
+pub type Hooks = HookedFlashPlugin;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1855,33 +1856,6 @@ pub const SETTINGS: &[Setting] = &[
         text: false,
     },
     Setting {
-        path: "flash.cookie",
-        help: "The cookie this hook owns.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "flash.key_env",
-        help: "The environment variable that holds the signing key.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: true,
-    },
-    Setting {
-        path: "flash.secure",
-        help: "Send the cookie over HTTPS only.",
-        flag: true,
-        file: "src/modules/flash.rs",
-        flags: crate::modules::flash::MODULE.flags,
-        none_as: None,
-        text: false,
-    },
-    Setting {
         path: "compression.min_bytes",
         help: "The smallest body that is compressed, in bytes.",
         flag: true,
@@ -1923,6 +1897,33 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/middleware_compression.rs",
         flags: crate::modules::middleware_compression::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "flash.cookie",
+        help: "The cookie this hook owns.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.key_env",
+        help: "The environment variable that holds the signing key.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "flash.secure",
+        help: "Send the cookie over HTTPS only.",
+        flag: true,
+        file: "src/modules/flash.rs",
+        flags: crate::modules::flash::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -2179,8 +2180,8 @@ fn defaults() -> Vec<(&'static str, String)> {
     let security_headers = brocanth_middleware::SecurityHeadersConfig::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
     let conditional_get = brocanth_middleware::ConditionalGetConfig::default();
-    let flash = brocanth_middleware::FlashConfig::default();
     let compression = brocanth_middleware::CompressionConfig::default();
+    let flash = brocanth_middleware::FlashConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("csrf.cookie", format!("{:?}", csrf.cookie)),
@@ -2251,9 +2252,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             "conditional_get.last_modified",
             format!("{:?}", conditional_get.last_modified),
         ),
-        ("flash.cookie", format!("{:?}", flash.cookie)),
-        ("flash.key_env", format!("{:?}", flash.key_env)),
-        ("flash.secure", format!("{:?}", flash.secure)),
         (
             "compression.min_bytes",
             format!("{:?}", compression.min_bytes),
@@ -2268,6 +2266,9 @@ fn defaults() -> Vec<(&'static str, String)> {
             "compression.brotli_quality",
             format!("{:?}", compression.brotli_quality),
         ),
+        ("flash.cookie", format!("{:?}", flash.cookie)),
+        ("flash.key_env", format!("{:?}", flash.key_env)),
+        ("flash.secure", format!("{:?}", flash.secure)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -2385,7 +2386,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6966f37b39599d72
+// brocanth-digest: c56d9fadc7e6b866
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3183,17 +3184,6 @@ etag = true
 # Answer If-Modified-Since from a Last-Modified the page set.
 last_modified = true
 
-[flash]
-# The cookie this hook owns.
-cookie = "flash"
-# The environment variable that holds the signing key.
-# The name, not the key, which is at least 32 bytes. Unset: a random key
-# per process and a warning, so a message can be lost when the next
-# request reaches another instance.
-key_env = "FLASH_KEY"
-# Send the cookie over HTTPS only.
-secure = true
-
 [compression]
 # The smallest body that is compressed, in bytes.
 min_bytes = 1024
@@ -3208,6 +3198,17 @@ gzip_level = 6
 brotli_quality = 4
 # The media types that are compressed. `text/*` takes every text type.
 types = ["text/*", "application/json", "application/javascript", "application/xml", "application/rss+xml", "application/atom+xml", "application/manifest+json", "image/svg+xml"]
+
+[flash]
+# The cookie this hook owns.
+cookie = "flash"
+# The environment variable that holds the signing key.
+# The name, not the key, which is at least 32 bytes. Unset: a random key
+# per process and a warning, so a message can be lost when the next
+# request reaches another instance.
+key_env = "FLASH_KEY"
+# Send the cookie over HTTPS only.
+secure = true
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -3350,6 +3351,19 @@ IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). A page whose answer is
 for one user only sets `Cache-Control: private`; one that must not be
 kept sets `no-store`, and gets no tag.
 
+## Compression
+
+`brocanth_middleware::Compression` is registered in
+`src/plugins/mod.rs`. Its response hook runs after every hook that
+reads or rewrites the body, so a page never compresses its own
+output. Do not set `Content-Encoding` in a page unless the body is
+already encoded; the hook then leaves it alone.
+
+A stream is never compressed. To keep a buffered body as it is, set
+`Cache-Control: no-transform`. A hook of your own that rewrites the
+body runs before compression when it is in any phase but `Encode`;
+one in `Phase::Encode` goes in `runs_after`.
+
 ## Flash
 
 `brocanth_middleware::FlashPlugin` is registered in
@@ -3366,18 +3380,6 @@ The next HTML page shows it inside `<div id="flash">`, which the root
 layout carries. Keep that element in the layout. A page that draws a
 form again without a redirect uses `flash.now(level, text)`. The text
 is plain: the hook escapes it. Never put HTML or a secret in a message.
-
-## Compression
-
-`brocanth_middleware::Compression` is registered in
-`src/plugins/mod.rs`. Its response hook runs after every hook that
-reads or rewrites the body, so a page never compresses its own
-output. Do not set `Content-Encoding` in a page unless the body is
-already encoded; the hook then leaves it alone.
-
-A stream is never compressed. To keep a buffered body as it is, set
-`Cache-Control: no-transform`. A hook of your own that rewrites the
-body goes in `runs_after`, so compression waits for it.
 
 ## Decisions that belong to the person
 
@@ -3407,7 +3409,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: c1915ad8af9487db -->
+<!-- brocanth-digest: acd47ad29712fc11 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

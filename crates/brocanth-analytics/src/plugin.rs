@@ -8,7 +8,7 @@ use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
     HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState, Response,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_shutdown::ShutdownCx;
 
 use crate::classify::{clean_path, clean_query, country, is_bot, referrer_origin, ua_class};
@@ -269,6 +269,8 @@ impl HookSource for Analytics {
         }
         registrar.request(
             "count",
+            // Only `after_dispatch` does work, on the final response.
+            Phase::Identify,
             Order::new(),
             Count {
                 config: self.config.clone(),
@@ -276,16 +278,15 @@ impl HookSource for Analytics {
             },
         );
         if !self.config.collector_origins.is_empty() {
-            // Before the CSRF check: a beacon is a cross-site POST with no
-            // token, and it writes nothing a forged form could abuse. After
-            // the proxy reader and the rate limiter, when present, so the
-            // edge's address is read and a flood is refused first.
+            // `Guard`, so after the proxy reader (`Identify`). The rate
+            // limiter counts first in `Guard`, so a flood is refused before
+            // this hook. The CSRF check refuses last, so this hook answers
+            // first: a beacon is a cross-site POST with no token, and it
+            // writes nothing a forged form could abuse.
             registrar.request(
                 "collect",
-                Order::new()
-                    .before_if_present("csrf.check")
-                    .after_if_present("proxy-headers.read")
-                    .after_if_present("rate_limit.count"),
+                Phase::Guard,
+                Order::new(),
                 crate::collector::Collect::new(self.config.clone(), self.recorder.clone()),
             );
         }

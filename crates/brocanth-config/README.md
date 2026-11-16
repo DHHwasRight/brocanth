@@ -244,7 +244,7 @@ use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
     ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth_config::{AppBuilderConfigExt, Config};
 
 #[derive(serde::Deserialize, Default)]
@@ -269,7 +269,7 @@ impl Plugin for Stamp {
 impl HookSource for Stamp {
     type Families = OnResponse;
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("stamp", Order::new(), Noop);
+        registrar.response("stamp", Phase::Identify, Order::new(), Noop);
         Ok(())
     }
 }

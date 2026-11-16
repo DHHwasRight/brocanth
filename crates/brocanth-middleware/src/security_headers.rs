@@ -699,7 +699,12 @@ impl HookSource for SecurityHeaders {
             .config
             .headers()
             .map_err(|why| PluginError::new(format!("security_headers: {why}")))?;
-        registrar.response("set", brocanth::plugin_order::Order::new(), built);
+        registrar.response(
+            "set",
+            brocanth::plugin_order::Phase::Encode,
+            brocanth::plugin_order::Order::new(),
+            built,
+        );
         Ok(())
     }
 }

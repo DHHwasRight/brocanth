@@ -70,6 +70,7 @@ impl HookSource for ContentTypes {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "check",
+            brocanth::plugin_order::Phase::Guard,
             brocanth::plugin_order::Order::new(),
             Hook {
                 allowed: self.config.allowed.clone(),

@@ -42,8 +42,8 @@ stranger, and the generator cannot know your policy.
 **A plain form works with no script.** The module needs `middleware-csrf`,
 and reads the check's field and header from the CSRF plugin, so it keeps no
 copy of either. The CSRF check reads no multipart body. The `lift` hook runs before the check and copies the form's CSRF
-field into the header that the check reads. The `answer` hook runs after
-the check, so an upload from another site stops there.
+field into the header that the check reads (both in `Phase::Guard`, where the check is last). The `answer` hook runs in `Phase::Cache`, after
+every guard, so an upload from another site stops at the check.
 
 ## What it writes
 

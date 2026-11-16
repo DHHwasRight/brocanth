@@ -115,6 +115,8 @@ guide. A summary:
   `[<section>]`. See [docs/module-flags.md](../../docs/module-flags.md).
 - **Choices** a project makes in its `src/modules/<key>.rs`:
   `Manifest::hook(name, what, Hook::on() | Hook::off() | Hook::required())`,
+  with `.phase(Phase::Identify | Guard | Cache | Encode)` on a request or
+  response hook,
   `Manifest::integration(host, what, default)` and
   `Manifest::option(Opt::text | bool | integer | unsigned)`. Read them in
   generated code with `snippet::module_ref`, and guard an integration with
