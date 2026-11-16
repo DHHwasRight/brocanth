@@ -1371,6 +1371,9 @@ mod tests {
     /// kibibyte of memory, not the body.
     #[tokio::test]
     async fn a_long_answer_is_read_only_to_its_head() {
+        // It builds a client, so it waits while another test holds the
+        // proxy variables.
+        let _turn = PROXY_ENV.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
