@@ -18,7 +18,7 @@ The wizard shows it under the database, in the Data question:
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Development only | yes: `brocanth check --deploy` reports `deploy/development-only` |
-| Crates | `brocanth-db` (feature `embedded`: `postgresql_embedded` with `bundled`) |
+| Crates | `brocanth-db` (feature `embedded`: `postgresql_embedded`, no `bundled`) |
 | Without it | the pool opens on `[db] url`, a server you run |
 
 `brocanth create my-app --with db,db-embedded`, then `cargo run`: the
@@ -34,9 +34,10 @@ that has `db`.
 - The `db` plugin reads that URL in its own `configure` and opens its pool
   on it, in place of `[db] url`. `db` stays the one pool: this module opens
   none.
-- The first start extracts the bundled archive into `tmp/postgres/server`,
-  runs `initdb` into `tmp/postgres/data` and creates the database. It takes
-  a few seconds. A later start only starts the server.
+- The first start installs Postgres `POSTGRES_VERSION` (18.7.0) into
+  `tmp/postgres/server` (see [The archive](#the-archive)), runs `initdb` into
+  `tmp/postgres/data` and creates the database. It takes a few seconds. A
+  later start only starts the server.
 - `shutdown` runs in reverse order: `db` closes its pool, then this plugin
   stops the server with `pg_ctl stop -m fast` and waits for it. A drop of
   the handle (a panic, an early error) stops it too.
@@ -61,7 +62,7 @@ Three guards, each with a `help:` line:
 
 **Reason:** the server lives in one checkout on one disk, with a generated
 password in a file beside its data. It has no backup, no replica, and no
-upgrade path. The release image would also carry the 38-98 MiB archive.
+upgrade path.
 
 ## Facts checked (2026-11-16)
 
@@ -71,11 +72,11 @@ upgrade path. The release image would also carry the 38-98 MiB archive.
 | Crate licence | `(Apache-2.0 OR MIT) AND PostgreSQL` |
 | Archive source | GitHub releases of `theseus-rs/postgresql-binaries`, licence PostgreSQL |
 | PostgreSQL licence | The PostgreSQL Licence: permissive, BSD/MIT style. No copyleft term reaches the application. |
-| Server version | the latest release at build time; 18.7.0 when this was checked. `POSTGRESQL_VERSION='=17.6.0'` at build time pins one, and the build script then caches the archive in `~/.theseus/postgresql`. |
+| Server version | 18.7.0, pinned in `brocanth_db::embedded::POSTGRES_VERSION` |
 | `sqlx` | 0.9, the copy the workspace already has: no second driver |
-| Network | at build time only: the build script downloads the archive once per target directory (`OUT_DIR`). The first start needs none. |
+| Network | none at build time. At the first start only, and only when no archive file and no cache is on the machine. |
 
-Archive size per target, release 18.7.0 (the binary grows by this much):
+Archive size per target, release 18.7.0 (one download, one cached file):
 
 | Target | Archive |
 |---|---|
@@ -89,11 +90,40 @@ Archive size per target, release 18.7.0 (the binary grows by this much):
 | `aarch64-pc-windows-msvc` | 46 MiB |
 
 Supported platforms: the eight targets above, macOS, Linux (glibc and
-musl) and Windows, on x86_64 and aarch64. Another target fails the build
-with the build script's error.
+musl) and Windows, on x86_64 and aarch64. On another target the first start
+fails: no release has an archive for it.
 
-The build script uses the GitHub API without a token. Behind a rate limit,
-set `GITHUB_TOKEN` for the build.
+## The archive
+
+The build needs no network. The first start installs the binaries into
+`tmp/postgres/server/18.7.0/` from the first of:
+
+| Source | When |
+|---|---|
+| `$BROCANTH_POSTGRES_ARCHIVE` | the variable names a `postgresql-18.7.0-<target>.tar.gz` file. For a machine with no network: download the file from the [releases](https://github.com/theseus-rs/postgresql-binaries/releases/tag/18.7.0) once and point the variable at it. |
+| `~/.theseus/postgresql/postgresql-18.7.0-<target>.tar.gz` | the cache. One file per machine, shared by every checkout. `postgresql_embedded`'s own build script caches to the same name. |
+| GitHub | one API request (the release by tag, not the release list) and one download, checked against the release's SHA-256 file, then written to the cache. Set `GITHUB_TOKEN` behind the rate limit. |
+
+The extraction goes to a directory beside `18.7.0/` and is renamed into
+place, so a process killed halfway leaves nothing that looks installed.
+
+**Reason, against `bundled`:** the `bundled` feature of `postgresql_embedded`
+downloads the archive in its build script. Its version defaults to the
+latest release, so the script lists the releases through the GitHub API on
+each fresh target directory. Every `--all-features` build of this workspace
+then needed the network, failed on a GitHub 504, and shared the
+unauthenticated limit of 60 requests an hour, which CI reaches. A pinned
+`POSTGRESQL_VERSION` at build time still makes one API request per fresh
+machine, and an environment variable that every build must set is easy to
+lose. Installing at the first start keeps every build offline and
+deterministic, and the binary is 38-98 MiB smaller. The cost: the first
+`cargo run` on a machine with no cache needs the network once, or the
+archive file.
+
+The tests that start a real server (`tests/embedded.rs`) need the archive.
+They skip with a message when no archive file and no cache is on the
+machine, unless `BROCANTH_EMBEDDED_TEST=1` lets them download it.
+`mise run embedded` sets it and runs them.
 
 ## Directories
 
@@ -150,8 +180,7 @@ The runtime piece is `brocanth_db::embedded`, behind the feature
 module is part of `db` (module capabilities, section 4.2) and its code is
 one file that hands a URL to the pool. A feature keeps one dependency line
 in the project; the optional dependencies keep a project without the
-module free of the archive, the crate and its build script. The cost:
-`cargo build --all-features` in this workspace downloads the archive.
+module free of the crate.
 
 ## When module capabilities stage 1 lands
 

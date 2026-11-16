@@ -4,9 +4,19 @@
 //! before the `db` plugin opens its pool, and hands `db` the URL through
 //! [`EmbeddedUrl`]. The pool stays `db`'s. This module opens no pool.
 //!
-//! Built on `postgresql_embedded` with its `bundled` feature: the server
-//! archive is in the binary, so the first start extracts it and needs no
-//! network and no Postgres on the machine.
+//! Built on `postgresql_embedded`, with one pinned Postgres release,
+//! [`POSTGRES_VERSION`]. A build needs no network. The first start installs
+//! the binaries from the first of:
+//!
+//! 1. the file that [`ARCHIVE_ENV`] (`BROCANTH_POSTGRES_ARCHIVE`) names, for
+//!    a machine with no network;
+//! 2. the cache, `~/.theseus/postgresql/postgresql-<version>-<target>.tar.gz`
+//!    (the file name `postgresql_embedded`'s own build script caches to);
+//! 3. one download from the GitHub releases of `theseus-rs/postgresql-binaries`,
+//!    checked against its SHA-256 file and written to the cache.
+//!    `GITHUB_TOKEN` lifts the API rate limit.
+//!
+//! A later start finds the binaries under `server/` and reads nothing.
 //!
 //! **Never in production.** One server per checkout, on one disk, with a
 //! generated password in a file beside its data. `brocanth check --deploy`
@@ -29,8 +39,18 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use postgresql_embedded::{PostgreSQL, Settings, Status};
+use postgresql_archive::configuration::theseus;
+use postgresql_embedded::{PostgreSQL, Settings, Status, VersionReq};
 use thiserror::Error;
+
+/// The Postgres release the server runs. Pinned, so a start never asks
+/// which release is the latest, and every machine runs the same server.
+pub const POSTGRES_VERSION: &str = "18.7.0";
+
+/// The variable that names an archive file to install from, in place of the
+/// cache and the download: `postgresql-<POSTGRES_VERSION>-<target>.tar.gz`
+/// from the releases of `theseus-rs/postgresql-binaries`.
+pub const ARCHIVE_ENV: &str = "BROCANTH_POSTGRES_ARCHIVE";
 
 /// The URL of the running embedded server, for the `db` plugin.
 ///
@@ -97,6 +117,16 @@ pub enum EmbeddedError {
         /// What to check.
         help: &'static str,
     },
+    /// The archive could not be read, downloaded or extracted.
+    #[error("embedded Postgres could not install {version}: {message}\nhelp: {help}")]
+    Install {
+        /// [`POSTGRES_VERSION`].
+        version: &'static str,
+        /// What failed.
+        message: String,
+        /// What to do next.
+        help: String,
+    },
     /// `initdb`, `pg_ctl` or the first connection failed.
     #[error("embedded Postgres could not {action}: {message}\nhelp: {help}")]
     Server {
@@ -161,6 +191,7 @@ impl EmbeddedPostgres {
             host: "localhost".to_string(),
             port: config.port,
             password: password(&dir.join("password"))?,
+            version: pinned_version(),
             // The cluster survives the process: a drop stops the server and
             // keeps the files.
             temporary: false,
@@ -170,6 +201,7 @@ impl EmbeddedPostgres {
         let data_dir = settings.data_dir.clone();
         let database = config.database.clone();
         on_own_runtime(move || async move {
+            install(&settings.installation_dir).await?;
             let mut server = PostgreSQL::new(settings);
             server.setup().await.map_err(|e| EmbeddedError::Server {
                 action: "set up",
@@ -230,7 +262,7 @@ impl EmbeddedPostgres {
         &self.redacted
     }
 
-    /// The server's version: `18.1.0`.
+    /// The server's version: [`POSTGRES_VERSION`].
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -279,6 +311,111 @@ impl Drop for EmbeddedPostgres {
         // `PostgreSQL`'s own drop runs `pg_ctl stop -m fast` when the server
         // runs, and keeps the files because `temporary` is false.
         drop(self.server.take());
+    }
+}
+
+fn pinned_version() -> VersionReq {
+    VersionReq::parse(&format!("={POSTGRES_VERSION}")).expect("POSTGRES_VERSION is a version")
+}
+
+/// `postgresql-<version>-<target>.tar.gz`, the release asset's name.
+fn archive_name() -> String {
+    format!(
+        "postgresql-{POSTGRES_VERSION}-{}.tar.gz",
+        postgresql_archive::matcher::target()
+    )
+}
+
+/// The cached archive, shared by every checkout on the machine.
+fn cached_archive() -> Option<PathBuf> {
+    std::env::home_dir().map(|home| home.join(".theseus/postgresql").join(archive_name()))
+}
+
+/// Whether a first start can install [`POSTGRES_VERSION`] with no network:
+/// [`ARCHIVE_ENV`] is set, or the cache holds the archive. A test that starts
+/// a real server reads it to skip on a machine with neither.
+pub fn archive_on_machine() -> bool {
+    std::env::var_os(ARCHIVE_ENV).is_some() || cached_archive().is_some_and(|file| file.is_file())
+}
+
+/// Extracts [`POSTGRES_VERSION`] into `server/<version>/` unless it is there.
+///
+/// The extraction goes to a directory beside it and is renamed into place,
+/// so a process killed halfway leaves no directory that looks installed.
+async fn install(server_dir: &Path) -> Result<(), EmbeddedError> {
+    let installed = server_dir.join(POSTGRES_VERSION);
+    if installed.is_dir() {
+        return Ok(());
+    }
+    let bytes = archive_bytes().await?;
+    let partial = server_dir.join(format!(".{POSTGRES_VERSION}.partial"));
+    let _ = std::fs::remove_dir_all(&partial);
+    postgresql_archive::extract(theseus::URL, &bytes, &partial)
+        .await
+        .map_err(|e| {
+            install_error(
+                e.to_string(),
+                "delete the `server` directory and start again",
+            )
+        })?;
+    std::fs::rename(&partial, &installed).map_err(|source| EmbeddedError::Io {
+        path: installed.display().to_string(),
+        source,
+        help: "set `dir` under [db_embedded] to a directory this process can write",
+    })
+}
+
+/// The archive: the file [`ARCHIVE_ENV`] names, the cache, or a download.
+async fn archive_bytes() -> Result<Vec<u8>, EmbeddedError> {
+    if let Some(file) = std::env::var_os(ARCHIVE_ENV) {
+        let file = PathBuf::from(file);
+        return std::fs::read(&file).map_err(|e| {
+            install_error(
+                format!("{ARCHIVE_ENV}={}: {e}", file.display()),
+                format!("set {ARCHIVE_ENV} to the path of {}", archive_name()),
+            )
+        });
+    }
+    let cache = cached_archive();
+    if let Some(bytes) = cache.as_deref().and_then(|file| std::fs::read(file).ok()) {
+        return Ok(bytes);
+    }
+    let (_, bytes) = postgresql_archive::get_archive(theseus::URL, &pinned_version())
+        .await
+        .map_err(|e| {
+            install_error(
+                format!("the download failed: {e}"),
+                format!(
+                    "the first start downloads {} from {}/releases: check the network, set \
+                     GITHUB_TOKEN behind a rate limit, or download it by hand and set {ARCHIVE_ENV} \
+                     to its path",
+                    archive_name(),
+                    theseus::URL
+                ),
+            )
+        })?;
+    if let Some(file) = cache {
+        // Best effort: a cache that cannot be written costs a download at the
+        // next install, nothing more. Written aside and renamed, so a reader
+        // never sees half a file.
+        let aside = file.with_extension(format!("{}.partial", std::process::id()));
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&aside, &bytes))
+            .and_then(|()| std::fs::rename(&aside, &file));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&aside);
+        }
+    }
+    Ok(bytes)
+}
+
+fn install_error(message: String, help: impl Into<String>) -> EmbeddedError {
+    EmbeddedError::Install {
+        version: POSTGRES_VERSION,
+        message,
+        help: help.into(),
     }
 }
 

@@ -7,6 +7,11 @@ rust = "1.98"
 run = "cargo build --workspace"
 [tasks.test]
 run = "cargo test --workspace"
+# The tests that start a real embedded Postgres. They skip when the archive
+# is not on the machine; this lets them download it once (GitHub, see
+# docs/modules/db-embedded.md).
+[tasks.embedded]
+run = "BROCANTH_EMBEDDED_TEST=1 cargo test -p brocanth-db --features embedded --test embedded"
 [tasks.lint]
 run = "cargo clippy --all-targets -- -D warnings"
 # Every module crate as the CLI takes it: the scaffold side alone, with the

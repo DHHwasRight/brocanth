@@ -9,8 +9,8 @@
 //!
 //! - `src/plugins/db_embedded/mod.rs`: the plugin. It refuses to start
 //!   outside `development` and `test`, and stops the server on shutdown.
-//! - `brocanth-db` with the feature `embedded`, which bundles the server
-//!   archive into the binary at build time.
+//! - `brocanth-db` with the feature `embedded`, which installs one pinned
+//!   Postgres release at the first start. The build needs no network.
 //! - `[db_embedded]` in the config file: the directory, the port, the
 //!   database name, the timeout.
 //! - `/tmp/postgres` in `.gitignore`.
@@ -45,7 +45,7 @@ impl Module for DbEmbedded {
         .krate(
             Dep::brocanth("brocanth-db")
                 .feature("embedded")
-                .note("the Postgres archive, bundled at build time"),
+                .note("a pinned Postgres release, installed at the first start"),
         )
         // No `after`: `db` waits for this module (`after("db-embedded")` in
         // its manifest), so the server runs before the pool reads a URL. An
@@ -105,6 +105,12 @@ when the application starts, and the `db` pool opens on it: `cargo run`
 needs no Postgres on the machine. The data is in `tmp/postgres/data` and
 survives a restart; delete `tmp/postgres` for an empty database.
 
+The build needs no network. The first start installs Postgres
+`brocanth_db::embedded::POSTGRES_VERSION` from the first of:
+`$BROCANTH_POSTGRES_ARCHIVE` (a `postgresql-<version>-<target>.tar.gz`
+file, for a machine with no network), the cache in `~/.theseus/postgresql`,
+or one download from GitHub (set `GITHUB_TOKEN` behind a rate limit).
+
 It is for development only. It refuses to start when `$<APP>_ENV` is not
 `development` or `test`, and `brocanth check --deploy` reports it. Before a
 deploy, run `brocanth remove db-embedded` and set `[db] url`.
@@ -120,8 +126,7 @@ fn plugin_rs(project: &Project) -> String {
     format!(
         r##"//! A Postgres server inside this binary, for development.
 //!
-//! `configure` starts it from the archive the `embedded` feature of
-//! `brocanth-db` bundled, before the `db` plugin, and publishes its URL. The
+//! `configure` starts it, before the `db` plugin, and publishes its URL. The
 //! `db` plugin opens its pool on that URL and not on `[db] url`. `shutdown`
 //! stops the server after the pool closed.
 //!
@@ -206,7 +211,7 @@ impl Plugin for DbEmbedded {{
 
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         check_environment(&environment())?;
-        // Blocks until the server answers: the first start extracts the
+        // Blocks until the server answers: the first start installs the
         // binaries and runs initdb, a few seconds; a later one starts it.
         let server = EmbeddedPostgres::start(&self.config)
             .map_err(|e| PluginError::new(format!("[db_embedded] {{e}}")))?;

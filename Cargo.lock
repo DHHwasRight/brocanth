@@ -1011,6 +1011,7 @@ dependencies = [
  "brocanth-cli",
  "brocanth-db",
  "brocanth-scaffold",
+ "postgresql_archive",
  "postgresql_embedded",
  "sea-query",
  "sea-query-sqlx",

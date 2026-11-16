@@ -67,14 +67,24 @@ brocanth-scaffold = { workspace = true, optional = true }
 # `db-embedded` module. Development only: `brocanth check --deploy` refuses
 # the module, so a deployed build has none of this.
 #
-# `bundled` embeds the server archive at build time (its build script
-# downloads it once into OUT_DIR), so the first start needs no network.
-# `tokio` drives initdb and pg_ctl with a timeout. `tls-rustls-ring` is the
-# stack `sqlx` above takes, and the build script needs one for the download.
-# Its `sqlx` is 0.9, the same copy.
+# No `bundled`: its build script asks the GitHub API for the release list
+# and downloads the archive at build time, so every `--all-features` build
+# needed the network and hit the unauthenticated rate limit (60 an hour).
+# `brocanth_db::embedded` pins one Postgres version and installs it at the
+# first start instead: from `BROCANTH_POSTGRES_ARCHIVE`, from the cache in
+# `~/.theseus/postgresql`, or by one download. A build needs no network.
+# `theseus` is the release source. `tokio` drives initdb and pg_ctl with a
+# timeout. `tls-rustls-ring` is the stack `sqlx` above takes, and the
+# download needs one. Its `sqlx` is 0.9, the same copy.
 postgresql_embedded = { version = "0.22", default-features = false, features = [
-    "bundled",
+    "theseus",
     "tokio",
+    "tls-rustls-ring",
+], optional = true }
+# The download and the extraction of the pinned archive. The copy that
+# `postgresql_embedded` takes, with the same features.
+postgresql_archive = { version = "0.22", default-features = false, features = [
+    "theseus",
     "tls-rustls-ring",
 ], optional = true }
 # The runtime that starts and stops the server, on a thread of its own.
@@ -102,7 +112,7 @@ plugin = ["runtime", "dep:brocanth"]
 scaffold = ["dep:brocanth-scaffold"]
 # A development Postgres in the binary. Apart from `runtime`: it hands a URL
 # to whatever opens the pool, and opens none itself.
-embedded = ["dep:postgresql_embedded", "dep:tokio"]
+embedded = ["dep:postgresql_embedded", "dep:postgresql_archive", "dep:tokio"]
 
 [lints.rust]
 missing_docs = "warn"
