@@ -108,6 +108,63 @@ kind!(
     One
 );
 
+kind!(
+    /// The project's job queue. A caller reads the handle,
+    /// `brocanth_jobs::Queue`, and never the backend below it: `jobs` keeps
+    /// the jobs in Postgres, `jobs-memory` in the process, and a new backend
+    /// is a new module that provides this Kind.
+    JobQueue,
+    group = "jobs",
+    runtime = "brocanth_jobs::Queue",
+    gist = "a job queue",
+    One
+);
+
+kind!(
+    /// The project's cache. A caller reads `dyn brocanth_cache::Cache`
+    /// through the handle, and never the backend below it: Postgres from
+    /// `cache`, memory from `cache-memory`, Redis from `cache-redis`.
+    CacheStore,
+    group = "cache",
+    runtime = "dyn brocanth_cache::Cache",
+    gist = "a cache",
+    One
+);
+
+kind!(
+    /// The session cookie on each request. `sessions` gives an empty seam,
+    /// `auth` a signed session. A project takes one: two session cookies
+    /// are a bug, not a choice.
+    SessionCookie,
+    group = "http",
+    runtime = "the session cookie on the request",
+    gist = "a session cookie",
+    One
+);
+
+kind!(
+    /// A check that `check --deploy` runs: a module that creates its tables
+    /// at startup contributes one. The module writes the entry into
+    /// [`Slot::ConfigChecks`](crate::Slot::ConfigChecks), so the check runs
+    /// on the generated code and cannot drift from the binary.
+    ConfigCheck,
+    group = "config",
+    runtime = "brocanth_config::check::Entry",
+    gist = "a config check",
+    Many
+);
+
+kind!(
+    /// A `##` section of the generated `AGENTS.md`: a rule a coding agent
+    /// must follow in this project. The module writes it into
+    /// [`Slot::AgentsSections`](crate::Slot::AgentsSections).
+    AgentsSection,
+    group = "docs",
+    runtime = "a section of AGENTS.md",
+    gist = "a section of AGENTS.md",
+    Many
+);
+
 /// A requirement on a Kind, as a manifest holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
@@ -139,6 +196,16 @@ mod tests {
         assert_eq!(pool.group, "db");
         assert_eq!(pool.cardinality, Cardinality::One);
         assert_eq!(pool.to_string(), "PgPool");
+    }
+
+    #[test]
+    fn a_contribution_kind_takes_many() {
+        assert_eq!(KindRef::of::<ConfigCheck>().cardinality, Cardinality::Many);
+        assert_eq!(
+            KindRef::of::<AgentsSection>().cardinality,
+            Cardinality::Many
+        );
+        assert_eq!(KindRef::of::<JobQueue>().cardinality, Cardinality::One);
     }
 
     #[test]
