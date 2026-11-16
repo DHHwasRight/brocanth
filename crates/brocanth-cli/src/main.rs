@@ -11,6 +11,7 @@ mod commands;
 mod modules;
 mod owned;
 mod questions;
+mod resolve;
 mod tui;
 mod ui;
 mod wizard;

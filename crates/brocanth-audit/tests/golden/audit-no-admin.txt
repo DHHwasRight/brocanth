@@ -1467,6 +1467,7 @@ macro_rules! register {
         // section, and it is the only reason a TOML parser is in the tree.
         let config = crate::plugins::config()?;
         let builder = $builder.with_config(config);
+        // PgPool <- db (model requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2108,7 +2109,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: bacf2f26616a890a
+// brocanth-digest: 72374ca97650ceb3
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3136,6 +3137,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "db", "model", "audit"]
 
+[bindings]
+PgPool = { provider = "db", why = "model requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3168,4 +3172,4 @@ config = ["audit"]
 crates = ["brocanth-audit"]
 adapted_to = ["config"]
 
-# brocanth-digest: c8cf3245b30d3203
+# brocanth-digest: 09051dd4e0151e50

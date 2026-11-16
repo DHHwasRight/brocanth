@@ -21,18 +21,18 @@
 //!
 //! # Where the jobs live
 //!
-//! Three cases, one plugin file:
+//! Two cases, one plugin file:
 //!
-//! * **`db` chosen**: the queue runs on a small control pool of its own,
-//!   opened on the database the `db` plugin connects to (`Queue::beside`),
-//!   and `[jobs]` has no `url`. Not on the `db` pool itself: job bodies
-//!   use that one, and a running job must never hold the connection its
-//!   own heartbeat needs.
-//! * **No `db`**: the queue opens its own pool from `[jobs] url`. A
-//!   project can have a queue and no ORM.
+//! * **Postgres** (`requires::<PgPool>`, so `brocanth create --jobs` adds
+//!   `db`): the queue runs on a small control pool of its own, opened on
+//!   the database the `db` plugin connects to (`Queue::beside`), and
+//!   `[jobs]` has no `url`. Not on the `db` pool itself: job bodies use
+//!   that one, and a running job must never hold the connection its own
+//!   heartbeat needs.
 //! * **`jobs-memory` chosen**: the queue lives in the process
-//!   (`Queue::memory()`), for development and tests. `brocanth check
-//!   --deploy` reports it (`deploy/development-only`).
+//!   (`Queue::memory()`), for development and tests, and requires no
+//!   pool. `brocanth check --deploy` reports it
+//!   (`deploy/development-only`).
 //!
 //! With `admin`, the queue is the admin's `jobs` tab: an integration, on by
 //! default, that `src/modules/jobs.rs` turns off.
@@ -43,14 +43,14 @@
 use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// Where the generated queue keeps its jobs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Store {
-    /// Its own pool, from `[jobs] url`.
-    Url,
-    /// The pool the `db` plugin opened.
+    /// The database the `db` plugin opened.
     Db,
     /// The process's memory: `jobs-memory`.
     Memory,
@@ -60,10 +60,8 @@ impl Store {
     fn of(project: &Project) -> Self {
         if project.has("jobs-memory") {
             Store::Memory
-        } else if project.has("db") {
-            Store::Db
         } else {
-            Store::Url
+            Store::Db
         }
     }
 }
@@ -82,13 +80,13 @@ impl Module for Jobs {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "db",
-            "the queue runs on the pool the db plugin opens, and [jobs] has no url",
+        .requires_unless::<PgPool>(
+            &["jobs-memory"],
+            "the queue's tables live in the project's database, beside the pages' pool",
         )
         .adapts_to(
             "jobs-memory",
-            "the queue lives in the process, and [jobs] has no url and no migrate",
+            "the queue lives in the process, and [jobs] has no migrate",
         )
         .adapts_to(
             "observability",
@@ -123,9 +121,6 @@ impl Module for Jobs {
         // Only for the order of the `[jobs]` section and the builder line:
         // the queue reads its URL from the file the config plugin loaded.
         .after("config")
-        // The plugin reads the pool from the services the `db` plugin
-        // fills, so it registers after it.
-        .after("db")
         .absent(
             "brocanth-jobs",
             "no queue; slow work happens inside the request that asked for it",
@@ -203,17 +198,6 @@ before production; the queue then uses Postgres.
 /// `Queue::schema_sql` hands out in a migration somebody read.
 fn settings(store: Store) -> Vec<Setting> {
     let mut out = Vec::new();
-    if store == Store::Url {
-        out.push(
-            Setting::text(
-                "url",
-                "postgres://localhost/development",
-                "The database the queue lives in.",
-            )
-            .note("A URL can carry a password, so no flag sets it.")
-            .secret(),
-        );
-    }
     if store != Store::Memory {
         out.push(
             Setting::bool(
@@ -244,7 +228,7 @@ fn settings(store: Store) -> Vec<Setting> {
 
 fn plugin_rs(project: &Project, store: Store) -> String {
     let (derive, note) = settings_derive(project, "jobs");
-    let (fields, defaults, check_url, open, ready, store_doc) = store_parts(store);
+    let (fields, defaults, open, ready, store_doc) = store_parts(store);
     let observed = observed(project);
     format!(
         r##"//! Background jobs, as this application registers them.
@@ -397,7 +381,7 @@ impl Plugin for Jobs {{
     }}
 
     fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
-{check_url}        if self.settings.worker && self.settings.queues.is_empty() {{
+        if self.settings.worker && self.settings.queues.is_empty() {{
             return Err(PluginError::new(
                 "[jobs] worker is true and queues is empty, so the worker would claim nothing\n\
                  help: name a queue in `queues` under [jobs], or set worker = false",
@@ -521,22 +505,12 @@ fn observed(project: &Project) -> String {
 }
 
 /// The parts of the plugin file that depend on where the jobs live: the
-/// settings' fields, their defaults, the URL check, the opening of the
-/// queue, the readiness check and the module doc.
-fn store_parts(store: Store) -> (String, String, String, String, String, String) {
-    let url_field =
-        "    /// The database the queue lives in. Its own URL, not the models': a\n    \
-                     /// queue and an ORM can share one database and need not.\n    \
-                     pub url: String,\n";
+/// settings' fields, their defaults, the opening of the queue, the
+/// readiness check and the module doc.
+fn store_parts(store: Store) -> (String, String, String, String, String) {
     let migrate_field = "    /// Create the queue's tables at startup if they are absent.\n    \
                          pub migrate: bool,\n";
-    let url_default = "            url: \"postgres://localhost/development\".to_string(),\n";
     let migrate_default = "            migrate: true,\n";
-    let check_url = "        if self.settings.url.is_empty() {\n            \
-                     return Err(PluginError::new(\n                \
-                     \"[jobs] url is required; the queue is a table and needs a database\\n\\\n                 \
-                     help: set `url` under [jobs] in the config file, or the variable for `jobs.url`\",\n            \
-                     ));\n        }\n";
     let migrating_ready = |what: &str| {
         format!(
             "        // Ready when {what} answers: a catalogue lookup, the same cost\n        \
@@ -547,35 +521,9 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
         )
     };
     match store {
-        Store::Url => (
-            format!("{url_field}{migrate_field}"),
-            format!("{url_default}{migrate_default}"),
-            check_url.to_string(),
-            "        // The lifecycle hooks are synchronous and opening a pool is not, so\n        \
-             // the pool opens lazily and nothing here waits. Waiting would hang a\n        \
-             // current-thread runtime, where this thread drives the I/O. The pool\n        \
-             // spawns its upkeep task, so it needs the runtime entered.\n        \
-             let runtime = tokio::runtime::Handle::try_current().map_err(|e| {\n            \
-             PluginError::new(format!(\n                \
-             \"[jobs] needs a Tokio runtime at startup to open its pool ({e})\\n\\\n                 \
-             help: build the application inside the runtime that serves it\"\n            \
-             ))\n        \
-             })?;\n        \
-             let queue = {\n            \
-             let _entered = runtime.enter();\n            \
-             Queue::connect_lazy(&self.settings.url)\n                \
-             .map_err(|e| PluginError::new(format!(\"[jobs] {e}\")))?\n        \
-             };\n"
-                .to_string(),
-            migrating_ready("the queue"),
-            "//! In Postgres, on a pool of its own opened from `[jobs] url`. Add the `db`\n\
-             //! module and the queue shares its pool instead."
-                .to_string(),
-        ),
         Store::Db => (
             migrate_field.to_string(),
             migrate_default.to_string(),
-            String::new(),
             "        // On the database the `db` plugin opened, which registers before\n        \
              // this one, but on a small pool of the queue's own. Job bodies use\n        \
              // the `db` pool; if the queue's claim, heartbeat and settle shared it,\n        \
@@ -604,7 +552,6 @@ fn store_parts(store: Store) -> (String, String, String, String, String, String)
                 .to_string(),
         ),
         Store::Memory => (
-            String::new(),
             String::new(),
             String::new(),
             "        // In this process's memory (`jobs-memory`): for development and\n        \

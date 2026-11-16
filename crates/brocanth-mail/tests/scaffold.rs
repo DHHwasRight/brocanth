@@ -34,7 +34,7 @@ fn a_project_without_a_queue_sends_at_once() {
 /// With `jobs`: the `mail` queue, its job, and a worker of its own.
 #[test]
 fn a_project_with_a_queue_delivers_later_from_a_worker() {
-    shape("mail-jobs", &["config", "jobs", "mail"]);
+    shape("mail-jobs", &["config", "db", "jobs", "mail"]);
 }
 
 fn mail_file(files: &[(String, String)]) -> &str {
@@ -58,7 +58,7 @@ fn the_start_test_stays_unless_the_application_opens_postgres() {
     .unwrap_or_else(|e| panic!("{e}"));
     assert!(mail_file(&memory).contains(test), "jobs-memory keeps it");
     let postgres =
-        brocanth_cli::testing::generate("my-blog", &["config", "jobs", "mail"], &[&Mail])
+        brocanth_cli::testing::generate("my-blog", &["config", "db", "jobs", "mail"], &[&Mail])
             .unwrap_or_else(|e| panic!("{e}"));
     assert!(
         !mail_file(&postgres).contains(test),

@@ -32,7 +32,9 @@
 //!   other request.
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Manifest, Module, Opt, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 use super::uses_postgres;
 
@@ -61,18 +63,7 @@ impl Module for AuthScreens {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "jobs",
-            "accounts are in Postgres, so the generated end-to-end test is left out",
-        )
-        .adapts_to(
-            "cache",
-            "accounts are in Postgres, so the generated end-to-end test is left out",
-        )
-        .adapts_to(
-            "db",
-            "accounts are in Postgres, so the generated end-to-end test is left out",
-        )
+        .uses::<PgPool>("accounts are in Postgres, so the generated end-to-end test is left out")
         .adapts_to(
             "auth-lockout",
             "sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock",

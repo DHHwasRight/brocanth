@@ -4135,10 +4135,9 @@ pub fn Layout(children: Element) -> Element {
 //!    for everybody and a deploy loses every account. That is the one thing
 //!    in this file to replace before anybody else uses this application.
 //!    Do not write a store: `brocanth-auth` has `PgStore` behind its
-//!    `postgres` feature. Add a Postgres module (`db`, `jobs` or `cache`)
-//!    and generate again, and this file is written over `PgStore`, with the
-//!    pool opened lazily in `before_start` and the tables made by a
-//!    readiness check.
+//!    `postgres` feature. Add the `db` module (`brocanth add db`), and
+//!    this file is written over `PgStore`, on the pool `db` opens, with the
+//!    tables made by a readiness check.
 //! 2. **`Http = StubHttp`.** There are no providers, so nothing in this
 //!    binary ever performs a provider request, and a client that answers "no
 //!    stubbed route" is a louder failure than one that opens a socket. It is

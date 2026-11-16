@@ -334,6 +334,16 @@ mod tests {
                     );
                 }
             }
+            // A shape names the provider of each Kind it requires, rather
+            // than leaving it to the resolver: the shape is the receipt.
+            let refused =
+                crate::resolve::refusals(preset.picks, crate::commands::create::Door::Create);
+            assert!(
+                refused.is_empty(),
+                "{} leaves a Kind unprovided: {}",
+                preset.name,
+                refused[0].render()
+            );
         }
     }
 

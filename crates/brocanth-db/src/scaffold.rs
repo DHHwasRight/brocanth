@@ -19,7 +19,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// The database, as a choice on the `brocanth create` menu.
 ///
@@ -39,6 +41,9 @@ impl Module for Database {
         .category(Category::Middleware)
         // `ctx.db()` is a function every page calls.
         .category(Category::Renderer)
+        // The one shared pool. Every Postgres module requires it and opens no
+        // pool of its own, so `brocanth create --jobs` adds this module.
+        .provides::<PgPool>("the project's one Postgres pool, published as `brocanth_db::Db`")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",

@@ -27,7 +27,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, module_ref, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// First-party analytics, as a choice on the `brocanth create` menu.
 pub struct PageViews;
@@ -47,19 +49,13 @@ impl Module for PageViews {
             "operations",
             "Count page views on the server: no cookie, no script, no third party",
         )
-        .needs(
-            "db",
-            "the views are rows in the database the `db` module opens; in memory they would vanish at every restart",
-        )
+        .requires::<PgPool>("the views are rows in the database the `db` module opens; in memory they would vanish at every restart")
         .krate(
             Dep::brocanth("brocanth-analytics")
                 .feature_with("config", "config")
                 .feature_with("admin", "admin")
                 .note("the page-view hook and its Postgres store"),
         )
-        // The plugin reads the pool from the services the `db` plugin
-        // fills, so it registers after it.
-        .after("db")
         .hook("count", "count each page this server answers", Hook::on())
         .hook(
             "collect",

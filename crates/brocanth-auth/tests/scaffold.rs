@@ -81,25 +81,46 @@ fn the_screens_are_pages_with_a_csrf_field_in_every_form() {
 #[test]
 fn with_postgres_the_generated_test_is_left_out() {
     let mut picks = SCREENS.to_vec();
-    picks.push("jobs");
+    picks.push("db");
     let files = brocanth_cli::testing::generate("my-blog", &picks, MODULES)
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!file(&files, "src/plugins/auth_screens/mod.rs").contains("mod tests"));
 }
 
-/// `db` alone is a Postgres database: accounts and sessions go there, and
-/// the dependency line turns `postgres` on through `feature_with`.
+/// With the project's pool, accounts and sessions are rows on it: no
+/// `[auth] url` and no pool of auth's own. The dependency line turns
+/// `postgres` on through `feature_with`.
 #[test]
 fn with_db_accounts_live_in_postgres() {
     let files = brocanth_cli::testing::generate("my-blog", &["config", "db", "auth"], MODULES)
         .unwrap_or_else(|e| panic!("{e}"));
-    assert!(file(&files, "src/plugins/auth/mod.rs").contains("pub type Store = PgStore;"));
+    let plugin = file(&files, "src/plugins/auth/mod.rs");
+    assert!(plugin.contains("pub type Store = PgStore;"));
+    assert!(
+        plugin.contains("lc.require_service::<brocanth_db::Db>()"),
+        "{plugin}"
+    );
+    assert!(!plugin.contains("connect_lazy"), "{plugin}");
+    assert!(!plugin.contains("pub url: String"), "{plugin}");
+    assert!(!file(&files, "config/development.toml").contains("[auth]\nurl"));
     let manifest = file(&files, "Cargo.toml");
     let line = manifest
         .lines()
         .find(|l| l.starts_with("brocanth-auth = "))
         .expect("an auth line");
     assert!(line.contains("\"postgres\""), "{line}");
+}
+
+/// A queue in memory brings no pool, so accounts stay in memory.
+#[test]
+fn with_a_memory_queue_accounts_stay_in_memory() {
+    let files = brocanth_cli::testing::generate(
+        "my-blog",
+        &["config", "jobs", "jobs-memory", "auth"],
+        MODULES,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(file(&files, "src/plugins/auth/mod.rs").contains("pub type Store = MemoryStore;"));
 }
 
 /// A screen without the CSRF check is refused, not written.

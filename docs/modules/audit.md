@@ -11,8 +11,9 @@ The wizard calls it: *Change history: who changed which row, and when*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`db`](db.md): the history is rows in the database the `db` module opens; [`model`](model.md): it records the changes the model layer publishes |
-| After | [`db`](db.md) |
+| Needs | [`model`](model.md): it records the changes the model layer publishes |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | none |
 | Adapts to | [`config`](config.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

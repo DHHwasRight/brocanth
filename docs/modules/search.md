@@ -11,8 +11,9 @@ The wizard calls it: *Full-text search over a site index, with a page*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`db`](db.md): the index is a table and the page queries it through the `db` pool; [`pagination`](pagination.md): the page reads `page` with `ctx.page_params()` and draws its pager with the module's helpers |
-| After | [`db`](db.md), [`pagination`](pagination.md) |
+| Needs | [`pagination`](pagination.md): the page reads `page` with `ctx.page_params()` and draws its pager with the module's helpers |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | [`pagination`](pagination.md) |
 | Adapts to | [`model`](model.md), [`rsx`](rsx.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

@@ -17,7 +17,7 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Slot};
 
 /// Row-level security, as a choice on the `brocanth create` menu.
 pub struct Rls;
@@ -33,10 +33,7 @@ impl Module for Rls {
             "data",
             "Row-level security: Postgres hides the rows of other tenants",
         )
-        .needs(
-            "db",
-            "the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal",
-        )
+        .requires::<PgPool>("the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal")
         .needs(
             "commands",
             "the migration is written by `rls make`, a command of the project's binary that runs `schema()`",
@@ -57,7 +54,6 @@ impl Module for Rls {
             Dep::brocanth("brocanth-rls")
                 .note("roles, grants and policies in Rust, diffed into migrations"),
         )
-        .after("db")
         .after("model")
         .absent(
             "brocanth-rls",

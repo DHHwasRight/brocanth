@@ -20,7 +20,9 @@
 //! [`enabled`]: https://docs.rs/brocanth-flags
 
 use brocanth_scaffold::snippet::{configurable, integration, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// Feature flags, as a choice on the `brocanth create` menu.
 pub struct FeatureFlags;
@@ -44,19 +46,13 @@ impl Module for FeatureFlags {
             "operations",
             "Feature flags: turn code on for some users without a deploy",
         )
-        .needs(
-            "db",
-            "the rules are rows in the database the `db` module opens; in memory a restart would turn every flag off",
-        )
+        .requires::<PgPool>("the rules are rows in the database the `db` module opens; in memory a restart would turn every flag off")
         .krate(
             Dep::brocanth("brocanth-flags")
                 .feature_with("config", "config")
                 .feature_with("admin", "admin")
                 .note("the flag rules, their in-process copy and their Postgres store"),
         )
-        // The plugin reads the pool from the services the `db` plugin
-        // fills, so it registers after it.
-        .after("db")
         .integration(
             "admin",
             "a `flags` tab in the admin that turns each declared flag on or off",

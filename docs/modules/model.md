@@ -11,8 +11,9 @@ The wizard calls it: *An ORM with validations and migrations*.
 | Default | off |
 | Presets | HTML application, JSON API, Something that does work |
 | Part of | nothing |
-| Needs | [`db`](db.md): the ORM runs over the pool the `db` plugin opens, and without `db` there is none |
-| After | [`db`](db.md) |
+| Needs | none |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | none |
 | Adapts to | [`config`](config.md), [`commands`](commands.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

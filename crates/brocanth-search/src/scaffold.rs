@@ -20,7 +20,7 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::module_ref;
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, Project, Scaffold, Slot};
+use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Slot};
 
 /// Site search, as a choice on the `brocanth create` menu.
 pub struct Search;
@@ -32,10 +32,7 @@ impl Module for Search {
             "Postgres full-text and trigram search: a site index, its migration, a page at /search",
         )
         .category(Category::Routes)
-        .needs(
-            "db",
-            "the index is a table and the page queries it through the `db` pool",
-        )
+        .requires::<PgPool>("the index is a table and the page queries it through the `db` pool")
         .needs(
             "pagination",
             "the page reads `page` with `ctx.page_params()` and draws its pager with the module's helpers",

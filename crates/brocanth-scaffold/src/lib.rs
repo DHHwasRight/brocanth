@@ -64,8 +64,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod kind;
 #[cfg(feature = "testing")]
 pub mod testing;
+
+pub use kind::{KindRef, PgPool, Requirement};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -265,6 +268,29 @@ pub struct Manifest {
     /// an error: a memory backend in a deployed project loses its data at
     /// every restart and is not shared between processes.
     pub development_only: Option<&'static str>,
+    /// The Kinds this module gives, each with what it gives. Set with
+    /// [`Manifest::provides`].
+    pub provides: Vec<(KindRef, &'static str)>,
+    /// The Kinds this module cannot be written without. Set with
+    /// [`Manifest::requires`] and [`Manifest::requires_unless`].
+    ///
+    /// Not a key: the CLI finds the provider. With none chosen and one in
+    /// the registry that is not [`development_only`], it adds that one and
+    /// says so; with several, it refuses and names them. A requirement
+    /// implies "after the provider", as [`needs`] implies `after`.
+    ///
+    /// [`development_only`]: Manifest::development_only
+    /// [`needs`]: Manifest::needs
+    pub requires: Vec<Requirement>,
+    /// The Kinds this module writes different code beside, each with what
+    /// changes. Set with [`Manifest::uses`].
+    ///
+    /// The Kind form of [`adapts_to`]: `contribute` asks
+    /// [`Project::provider`], and a test holds the two to each other. It
+    /// implies "after the provider" when one is bound.
+    ///
+    /// [`adapts_to`]: Manifest::adapts_to
+    pub uses: Vec<(KindRef, &'static str)>,
 }
 
 impl Manifest {
@@ -294,7 +320,70 @@ impl Manifest {
             integrations: Vec::new(),
             options: Vec::new(),
             development_only: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
+            uses: Vec::new(),
         }
+    }
+
+    /// Give the Kind `K`, and say what is given.
+    pub fn provides<K: kind::Kind>(mut self, what: &'static str) -> Self {
+        self.provides.push((KindRef::of::<K>(), what));
+        self
+    }
+
+    /// Refuse to be written without a provider of `K`, and say what breaks.
+    ///
+    /// `why` is printed when the CLI adds the provider (`added db: jobs
+    /// requires PgPool`) and when it cannot choose one, so it names what
+    /// lives there: "the queue tables live in the project's database".
+    pub fn requires<K: kind::Kind>(self, why: &'static str) -> Self {
+        self.requires_unless::<K>(&[], why)
+    }
+
+    /// [`requires`](Manifest::requires), lifted while one of `unless` is
+    /// chosen: the module's own children that replace the backend which
+    /// needs `K`. `cache` requires `PgPool` unless `cache-memory` or
+    /// `cache-redis` holds the entries.
+    pub fn requires_unless<K: kind::Kind>(
+        mut self,
+        unless: &'static [&'static str],
+        why: &'static str,
+    ) -> Self {
+        self.requires.push(Requirement {
+            kind: KindRef::of::<K>(),
+            why,
+            unless,
+        });
+        self
+    }
+
+    /// Write different code when `K` has a provider, and say what changes.
+    /// Declare one for every Kind `contribute` asks
+    /// [`Project::provider`] about that is not required.
+    pub fn uses<K: kind::Kind>(mut self, what_changes: &'static str) -> Self {
+        self.uses.push((KindRef::of::<K>(), what_changes));
+        self
+    }
+
+    /// The requirements that hold in a project of `picks`.
+    pub fn requirements<'m>(&'m self, picks: &'m [&str]) -> impl Iterator<Item = &'m Requirement> {
+        self.requires.iter().filter(move |r| r.active(picks))
+    }
+
+    /// Whether this module gives `kind`.
+    pub fn gives(&self, kind: &str) -> bool {
+        self.provides.iter().any(|(k, _)| k.name == kind)
+    }
+
+    /// Every Kind this module may ask [`Project::provider`] about: what it
+    /// uses, and what it requires.
+    pub fn may_ask_kinds(&self) -> Vec<&'static str> {
+        self.uses
+            .iter()
+            .map(|(k, _)| k.name)
+            .chain(self.requires.iter().map(|r| r.kind.name))
+            .collect()
     }
 
     /// A hook the plugin registers. `name` is the name the plugin passes to
@@ -909,6 +998,10 @@ pub struct Project<'a> {
     on: &'a [&'a str],
     known: &'a [&'a str],
     mounts: &'a [(&'a str, &'a str)],
+    /// The provider bound to each Kind, as `(Kind name, module key)`.
+    bindings: &'a [(&'a str, &'a str)],
+    /// Every Kind asked about through [`Project::provider`], in order.
+    asked_kinds: std::cell::RefCell<Vec<&'static str>>,
     /// Keys asked about that no module declares. Collected rather than
     /// answered `false`, because a typo that reads as "the user did not want
     /// it" is a bug that produces a working project with a piece missing.
@@ -928,6 +1021,8 @@ impl<'a> Project<'a> {
             on,
             known,
             mounts: &[],
+            bindings: &[],
+            asked_kinds: std::cell::RefCell::new(Vec::new()),
             unknown: std::cell::RefCell::new(Vec::new()),
             asked: std::cell::RefCell::new(Vec::new()),
         }
@@ -939,6 +1034,32 @@ impl<'a> Project<'a> {
     pub fn with_mounts(mut self, mounts: &'a [(&'a str, &'a str)]) -> Self {
         self.mounts = mounts;
         self
+    }
+
+    /// Give the view the provider the CLI bound to each Kind, as `(Kind
+    /// name, module key)`. A view without them binds nothing.
+    pub fn with_bindings(mut self, bindings: &'a [(&'a str, &'a str)]) -> Self {
+        self.bindings = bindings;
+        self
+    }
+
+    /// The module that provides the Kind `K` in this project, or `None`.
+    ///
+    /// The question a module asks instead of `has("<provider key>")`: it
+    /// names the thing, so a second provider changes no reader. Declare
+    /// the Kind with [`Manifest::uses`] or [`Manifest::requires`]; a test
+    /// holds the two to each other.
+    pub fn provider<K: kind::Kind>(&self) -> Option<&'a str> {
+        self.asked_kinds.borrow_mut().push(K::NAME);
+        self.bindings
+            .iter()
+            .find(|(kind, _)| *kind == K::NAME)
+            .map(|(_, key)| *key)
+    }
+
+    /// Every Kind asked about through [`Project::provider`], in order.
+    pub fn asked_kinds(&self) -> Vec<&'static str> {
+        self.asked_kinds.borrow().clone()
     }
 
     /// Every mount option of a chosen module, as `(module key, option

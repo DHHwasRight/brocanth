@@ -1461,6 +1461,7 @@ macro_rules! register {
         // environment, then the flags.
         let given = crate::plugins::given()?;
         let builder = $builder;
+        // PgPool <- db (oauth-client requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::db::Database::new(
             crate::plugins::db_settings(&given)?,
         ));
@@ -2400,7 +2401,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: c5da0eef5d47bf39
+// brocanth-digest: e77ca5a0493267d0
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4060,6 +4061,9 @@ title = "My App"
 [modules]
 enabled = ["db", "auth", "oauth", "oauth-client", "oauth-client-memory"]
 
+[bindings]
+PgPool = { provider = "db", why = "oauth-client requires PgPool" }
+
 [modules.db]
 version = "0.1.0"
 kind = ["enhancer", "middleware", "renderer"]
@@ -4100,4 +4104,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: 6024a2c08368870c
+# brocanth-digest: c062a49240a3077f

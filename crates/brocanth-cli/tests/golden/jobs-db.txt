@@ -1465,6 +1465,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::admin::AdminSettings>("admin")
             .map_err(|e| e.to_string())?;
+        // PgPool <- db (jobs requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
@@ -2113,7 +2114,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 318fa6b9e89c7efd
+// brocanth-digest: e6da59223cf20579
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3510,6 +3511,9 @@ title = "My Blog"
 [modules]
 enabled = ["config", "db", "jobs", "admin"]
 
+[bindings]
+PgPool = { provider = "db", why = "jobs requires PgPool" }
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3532,7 +3536,7 @@ kind = ["enhancer"]
 files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
 config = ["jobs"]
 crates = ["brocanth-jobs", "serde"]
-adapted_to = ["config", "db", "admin"]
+adapted_to = ["config", "admin"]
 
 [modules.admin]
 version = "0.1.0"
@@ -3542,4 +3546,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: 0cf34495982458e8
+# brocanth-digest: d7411e2dfd75e1f0

@@ -12,8 +12,9 @@ The wizard calls it: *GitHub Actions*.
 | Presets | HTML application, JSON API, Something that does work, Static site |
 | Part of | [`ci`](ci.md), ticked with its parent |
 | Needs | none |
+| Uses | `PgPool`: CI starts a database for the tests |
 | After | none |
-| Adapts to | [`static`](static.md), [`docker`](docker.md), [`db`](db.md), [`jobs`](jobs.md), [`cache`](cache.md) |
+| Adapts to | [`static`](static.md), [`docker`](docker.md) |
 | Conflicts | none |
 | Outside the runtime | yes |
 | Crates | none |

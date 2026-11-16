@@ -11,8 +11,9 @@ The wizard calls it: *Connect accounts and call their APIs*.
 | Default | off |
 | Presets | none |
 | Part of | [`oauth`](oauth.md), ticked with its parent |
-| Needs | [`auth`](auth.md): a connection belongs to a signed-in account, and `auth` holds the sessions; [`db`](db.md): the tokens are rows in the `db` module's database, and a restart must not drop them |
-| After | [`auth`](auth.md), [`db`](db.md), [`config`](config.md) |
+| Needs | [`auth`](auth.md): a connection belongs to a signed-in account, and `auth` holds the sessions |
+| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
+| After | [`auth`](auth.md), [`config`](config.md) |
 | Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`oauth-client-memory`](oauth-client-memory.md), [`admin`](admin.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |

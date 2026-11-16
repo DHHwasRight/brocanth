@@ -12,8 +12,9 @@ The wizard calls it: *Accounts and passwords. No OAuth provider*.
 | Presets | none |
 | Part of | nothing |
 | Needs | none |
+| Uses | `PgPool`: accounts and sessions are rows on the project's pool, not in memory |
 | After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md), [`db`](db.md), [`auth-oauth`](auth-oauth.md) |
+| Adapts to | [`config`](config.md), [`auth-oauth`](auth-oauth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` |
@@ -33,7 +34,7 @@ Slots:
 - src/plugins/mod.rs (the provider list): `auth crate::plugins::auth::Auth`
 - config/<env>.toml: `[auth]`
 
-`auth.url` exists only when the project also has `jobs` or `cache`: then accounts live in Postgres (`PgStore`). Otherwise they live in memory (`MemoryStore`).
+With the project's pool (`PgPool`, from [`db`](db.md)), accounts and sessions live in Postgres (`PgStore`) on that pool: auth opens no pool and `[auth]` has no `url`. Without it they live in memory (`MemoryStore`). A queue or a cache in Postgres requires the pool, so with `jobs` or `cache` the accounts are in Postgres too; `jobs-memory` and `cache-memory` bring no pool.
 
 ## Settings
 

@@ -12,8 +12,9 @@ The wizard calls it: *Sign-up, sign-in and reset pages*.
 | Presets | none |
 | Part of | [`auth`](auth.md), off until you tick it |
 | Needs | [`rsx`](rsx.md), [`input`](input.md), [`middleware-csrf`](middleware-csrf.md), [`mail`](mail.md), [`flash`](flash.md) |
+| Uses | `PgPool`: accounts are in Postgres, so the generated end-to-end test is left out |
 | After | [`auth`](auth.md), [`flash`](flash.md), [`mail`](mail.md), [`auth-lockout`](auth-lockout.md) |
-| Adapts to | [`config`](config.md), [`jobs`](jobs.md), [`cache`](cache.md), [`db`](db.md), [`auth-lockout`](auth-lockout.md) |
+| Adapts to | [`config`](config.md), [`auth-lockout`](auth-lockout.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` (through `auth`) |

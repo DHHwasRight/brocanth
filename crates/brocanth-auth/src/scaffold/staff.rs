@@ -22,7 +22,9 @@
 //! member of staff, which `roles` uses.
 
 use brocanth_scaffold::snippet::{configurable, integration, settings_derive, PLUGIN_TRAIT_USE};
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 use super::uses_postgres;
 
@@ -48,12 +50,7 @@ impl Module for Superuser {
             "commands",
             "the binary gets `createsuperuser`, when the accounts are in Postgres",
         )
-        .adapts_to("jobs", "`createsuperuser` opens the accounts in Postgres")
-        .adapts_to("cache", "`createsuperuser` opens the accounts in Postgres")
-        .adapts_to(
-            "db",
-            "`createsuperuser` opens the accounts in Postgres, on the `[db]` database",
-        )
+        .uses::<PgPool>("`createsuperuser` opens the accounts in Postgres, on the `[db]` database")
         .integration(
             "admin",
             "the admin's policy is StaffPolicy: a superuser passes every check, a role holder what its roles grant",
@@ -101,7 +98,7 @@ impl Module for Superuser {
         if project.has("commands") && postgres {
             s.file(
                 "src/commands/createsuperuser.rs",
-                command_rs(project.has("config"), project.has("db")),
+                command_rs(project.has("config")),
             );
             s.at(Slot::CommandsMod).line("pub mod createsuperuser;");
         }
@@ -301,53 +298,21 @@ impl Plugin for Superuser {
 }
 "##;
 
-/// `src/commands/createsuperuser.rs`. With `db`, `[auth]` has no `url`: the
-/// accounts are on the `db` plugin's database, so the command opens `[db]`
-/// as `migrate` does.
-fn command_rs(configured: bool, db: bool) -> String {
-    let settings = match (configured, db) {
-        (true, false) => COMMAND_SETTINGS_FROM_CONFIG,
-        (false, false) => COMMAND_SETTINGS_FROM_ENV,
-        (true, true) => COMMAND_DB_SETTINGS_FROM_CONFIG,
-        (false, true) => COMMAND_DB_SETTINGS_FROM_ENV,
+/// `src/commands/createsuperuser.rs`. The accounts are on the `db`
+/// plugin's database, so the command opens `[db]` as `migrate` does.
+fn command_rs(configured: bool) -> String {
+    let settings = if configured {
+        COMMAND_SETTINGS_FROM_CONFIG
+    } else {
+        COMMAND_SETTINGS_FROM_ENV
     };
-    let text = COMMAND_RS.replace("@SETTINGS@", settings);
-    if !db {
-        return text;
-    }
-    let mut text = text;
-    for (from, to) in COMMAND_DB_EDITS {
-        assert!(text.contains(from), "the superuser command lost `{from}`");
-        text = text.replacen(from, to, 1);
-    }
-    text
+    COMMAND_RS.replace("@SETTINGS@", settings)
 }
-
-/// The command on `[db]`, not `[auth] url`.
-const COMMAND_DB_EDITS: &[(&str, &str)] = &[
-    (
-        "//! Opens the accounts at `[auth] url` and makes",
-        "//! Opens the accounts in the `[db]` database and makes",
-    ),
-    (
-        "use brocanth_command::{anyhow, clap, cmd, Command, Context};\n",
-        "use brocanth_command::{anyhow, clap, cmd, Command, Context};\nuse brocanth_db::{Db, DbConfig};\n",
-    ),
-    (
-        "        let (auth, superuser) = settings()?;\n",
-        "        let (database, superuser) = settings()?;\n",
-    ),
-    (
-        "            let store = Arc::new(PgStore::connect(&auth.url).await?);\n",
-        "            let db = Db::connect(&database).await?;\n\
-         \x20           let store = Arc::new(PgStore::from_pool(db.pool().clone()));\n",
-    ),
-];
 
 const COMMAND_RS: &str = r#"//! `createsuperuser` -- an operator account that passes every check of the
 //! admin.
 //!
-//! Opens the accounts at `[auth] url` and makes the account with the
+//! Opens the accounts in the `[db]` database and makes the account with the
 //! address a superuser. It creates the account first when there is none,
 //! with the password in the variable that `[superuser] password_env` names.
 //! An account that exists keeps its password. Run it twice and nothing
@@ -362,6 +327,7 @@ use brocanth_auth::{
     ensure_superuser, Accounts, Passwords, PgStore, SuperuserOutcome, SystemClock,
 };
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
+use brocanth_db::{Db, DbConfig};
 
 /// Make the account with this address a superuser, creating it if needed
 #[cmd]
@@ -375,14 +341,15 @@ pub struct Createsuperuser {
 impl Command for Createsuperuser {
     fn run(self, ctx: &mut Context) -> anyhow::Result<()> {
         std::env::set_current_dir(ctx.root())?;
-        let (auth, superuser) = settings()?;
+        let (database, superuser) = settings()?;
         let name = superuser.password_env;
         let password = std::env::var(&name).unwrap_or_default();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let outcome = runtime.block_on(async {
-            let store = Arc::new(PgStore::connect(&auth.url).await?);
+            let db = Db::connect(&database).await?;
+            let store = Arc::new(PgStore::from_pool(db.pool().clone()));
             store.migrate().await?;
             let accounts = Accounts::new(
                 Arc::clone(&store),
@@ -407,31 +374,6 @@ impl Command for Createsuperuser {
 @SETTINGS@"#;
 
 const COMMAND_SETTINGS_FROM_CONFIG: &str = r#"
-/// `[auth]` and `[superuser]`, through the loader the server uses.
-fn settings() -> anyhow::Result<(
-    crate::plugins::auth::Settings,
-    crate::plugins::superuser::Settings,
-)> {
-    let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
-    Ok((loaded.section("auth")?, loaded.section("superuser")?))
-}
-"#;
-
-const COMMAND_SETTINGS_FROM_ENV: &str = r#"
-/// `[auth]` and `[superuser]`: the defaults, or the environment, as the
-/// server reads them.
-fn settings() -> anyhow::Result<(
-    crate::plugins::auth::Settings,
-    crate::plugins::superuser::Settings,
-)> {
-    Ok((
-        crate::plugins::auth_settings(&[]).map_err(anyhow::Error::msg)?,
-        crate::plugins::superuser_settings(&[]).map_err(anyhow::Error::msg)?,
-    ))
-}
-"#;
-
-const COMMAND_DB_SETTINGS_FROM_CONFIG: &str = r#"
 /// `[db]` and `[superuser]`, through the loader the server uses.
 fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {
     let loaded = brocanth_config::Loader::new(crate::app::APP).load()?;
@@ -444,7 +386,7 @@ fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)>
 }
 "#;
 
-const COMMAND_DB_SETTINGS_FROM_ENV: &str = r#"
+const COMMAND_SETTINGS_FROM_ENV: &str = r#"
 /// `[db]` and `[superuser]` as the server reads them without a file: the
 /// defaults, then the variables, then the flags.
 fn settings() -> anyhow::Result<(DbConfig, crate::plugins::superuser::Settings)> {

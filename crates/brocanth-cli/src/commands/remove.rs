@@ -497,7 +497,8 @@ fn prune(root: &Path, file: &Path) {
 
 // -- what stays must still stand --------------------------------------------
 
-/// Refuse to take out a module that a module staying is part of or needs.
+/// Refuse to take out a module that a module staying is part of or needs,
+/// or the only provider of a Kind a staying module requires.
 ///
 /// One diagnostic for each module leaving, naming every module that holds
 /// it, so the help line is one command that works.
@@ -518,6 +519,29 @@ fn still_needed(stay: &[&'static str], removing: &[&'static str]) -> Result<(), 
                 .note("a child is part of its parent and cannot stay without it")
                 .help(format!("brocanth remove {} {gone}", children.join(" "))),
             );
+        }
+        // The provider of a Kind is not re-added here: `remove` takes out
+        // what it was told to, or refuses and says who still requires it.
+        let orphans = crate::resolve::orphaned_by(gone, stay);
+        if !orphans.is_empty() {
+            let names: Vec<&str> = orphans.iter().map(|(key, _, _)| *key).collect();
+            let kind = orphans[0].1;
+            let mut d = Diagnostic::error(
+                *gone,
+                format!(
+                    "`{gone}` provides {kind} ({}), which {} require{}",
+                    kind.gist,
+                    ticked(&names),
+                    if names.len() == 1 { "s" } else { "" }
+                ),
+            );
+            for (key, kind, why) in &orphans {
+                d = d.note(format!("{key} requires {kind}: {why}"));
+            }
+            bad.push(d.help(format!(
+                "brocanth remove {} {gone}, or keep `{gone}`",
+                names.join(" ")
+            )));
         }
         let needers: Vec<(&str, &str)> = stay
             .iter()
@@ -1140,9 +1164,11 @@ mod tests {
 
     #[test]
     fn removing_a_module_leaves_what_creating_without_it_would_have_written() {
+        // The queue and the cache require the pool; it stays when they go.
+        let pooled = with(DEFAULT, &["db"]);
         for (module, base) in [
-            ("cache", DEFAULT),
-            ("jobs", DEFAULT),
+            ("cache", &pooled[..]),
+            ("jobs", &pooled[..]),
             ("admin", DEFAULT),
             ("sessions", DEFAULT),
             ("openapi", DEFAULT),
@@ -1191,7 +1217,7 @@ mod tests {
 
     #[test]
     fn an_edited_file_of_the_module_stops_the_remove_and_nothing_changes() {
-        let root = project("rmedited", &with(DEFAULT, &["cache"]));
+        let root = project("rmedited", &with(DEFAULT, &["db", "cache"]));
         let path = root.join("src/plugins/cache/mod.rs");
         let edited = format!("{}// mine\n", read(&root, "src/plugins/cache/mod.rs"));
         std::fs::write(&path, &edited).expect("write");
@@ -1218,7 +1244,7 @@ mod tests {
 
     #[test]
     fn an_edited_config_section_of_the_module_is_refused_with_its_values() {
-        let root = project("rmconfig", &with(DEFAULT, &["cache"]));
+        let root = project("rmconfig", &with(DEFAULT, &["db", "cache"]));
         let path = root.join("config/development.toml");
         let text = read(&root, "config/development.toml");
         assert!(text.contains("[cache]"), "{text}");
@@ -1249,7 +1275,7 @@ mod tests {
         let root = project("rmneeded", &["config", "db", "model"]);
         let refused = said(&remove(&root, &["db"]).expect_err("model needs db"));
         assert!(
-            refused.contains("`model` cannot work without `db`"),
+            refused.contains("`db` provides PgPool (a Postgres pool), which `model` requires"),
             "{refused}"
         );
         assert!(refused.contains("brocanth remove model db"), "{refused}");

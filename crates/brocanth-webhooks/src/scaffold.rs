@@ -20,7 +20,9 @@ use brocanth_scaffold::snippet::{
     configurable, configurable_hooking, integration, redact_secrets, settings_derive, Hooking,
     PLUGIN_TRAIT_USE,
 };
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+};
 
 /// The parent: the crate both directions are written in.
 pub struct Webhooks;
@@ -78,10 +80,7 @@ impl Module for WebhooksIn {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "db",
-            "the idempotency keys are rows every instance shares; without it they are in memory",
-        )
+        .uses::<PgPool>("the idempotency keys are rows every instance shares; without it they are in memory")
         // The idempotency keys in the database, when there is one.
         .krate(krate().feature_with("db", "postgres"))
         // The example event derives `Deserialize`. The config plugin brings
@@ -91,8 +90,6 @@ impl Module for WebhooksIn {
                 .feature("derive")
                 .note("a webhook's event is decoded from JSON"),
         )
-        // The plugin reads the pool from the services the `db` plugin fills.
-        .after("db")
         .after("config")
         // Required: the hook is the module. A project that receives no
         // webhook removes the module, which a toggle cannot do.
@@ -108,7 +105,7 @@ impl Module for WebhooksIn {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let db = project.has("db");
+        let db = project.provider::<PgPool>().is_some();
         s.file(
             "src/plugins/webhooks_in/mod.rs",
             redact_secrets(&incoming_rs(project, db), &incoming_settings(db)),
@@ -502,10 +499,7 @@ impl Module for WebhooksOut {
         .asked_in("doors", "Send signed webhooks, retried on a Postgres queue")
         .part_of_but_off("webhooks")
         .because("it is the outgoing half of `brocanth-webhooks`, which the parent brings")
-        .needs(
-            "db",
-            "the endpoints and the delivery log are rows in the `db` module's database",
-        )
+        .requires::<PgPool>("the endpoints and the delivery log are rows in the `db` module's database")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -519,7 +513,6 @@ impl Module for WebhooksOut {
         .krate(
             Dep::version("serde_json", "1").note("an outgoing event's payload is JSON"),
         )
-        .after("db")
         .after("jobs")
         .after("config")
         .integration(
