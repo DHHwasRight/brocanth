@@ -93,6 +93,22 @@ pub struct DbConfig {
     )]
     pub statement_timeout: Option<Duration>,
 
+    /// How long a migration statement waits for a table lock before it
+    /// fails (SQLSTATE `55P03`). Default 10 s. `None` waits as long as it
+    /// takes. Migrations only: [`DbConfig::connect_options`] does not send
+    /// it, so the application's own queries keep the server default. A
+    /// generated `migrate` passes it to [`Migrator::lock_timeout`].
+    ///
+    /// [`Migrator::lock_timeout`]: crate::migrate::Migrator::lock_timeout
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default = "defaults::lock_timeout",
+            deserialize_with = "duration::optional"
+        )
+    )]
+    pub lock_timeout: Option<Duration>,
+
     /// The schemas an unqualified name resolves in, first to last. Empty
     /// keeps the server default (`"$user", public`).
     #[cfg_attr(feature = "serde", serde(default))]
@@ -132,6 +148,9 @@ mod defaults {
     pub fn max_lifetime() -> Option<Duration> {
         Some(super::DEFAULT_MAX_LIFETIME)
     }
+    pub fn lock_timeout() -> Option<Duration> {
+        Some(crate::migrate::DEFAULT_LOCK_TIMEOUT)
+    }
 }
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -150,6 +169,7 @@ impl DbConfig {
             idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
             max_lifetime: Some(DEFAULT_MAX_LIFETIME),
             statement_timeout: None,
+            lock_timeout: Some(crate::migrate::DEFAULT_LOCK_TIMEOUT),
             search_path: Vec::new(),
             read_only: false,
             application_name: None,
@@ -245,6 +265,7 @@ impl fmt::Debug for DbConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_lifetime", &self.max_lifetime)
             .field("statement_timeout", &self.statement_timeout)
+            .field("lock_timeout", &self.lock_timeout)
             .field("search_path", &self.search_path)
             .field("read_only", &self.read_only)
             .field("application_name", &self.application_name)
@@ -517,6 +538,14 @@ mod tests {
             cfg.connect_options().unwrap().get_ssl_mode(),
             PgSslMode::VerifyFull
         ));
+    }
+
+    #[test]
+    fn lock_timeout_is_for_migrations_and_never_reaches_the_pool() {
+        let mut cfg = DbConfig::new("postgres://h/d");
+        assert_eq!(cfg.lock_timeout, Some(crate::migrate::DEFAULT_LOCK_TIMEOUT));
+        cfg.lock_timeout = Some(Duration::from_secs(3));
+        assert_eq!(cfg.connect_options().unwrap().get_options(), None);
     }
 
     #[test]

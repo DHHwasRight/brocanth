@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use brocanth::plugin_app::App;
 use brocanth::plugin_hooks::{Begin, HandlerError, HookFamilies, Request, RequestState, Response};
-use brocanth::plugin_routes::{route, AnyHandler, Handler, RouteCx, RoutePlan, Routed};
+use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx, RoutePlan};
 use brocanth::routing::Router;
 
 use crate::request::{resolve, CookieJar, TestRequest};
@@ -364,21 +364,14 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
 
         let response = self.app.run(&mut core, &mut state, |core, state| {
             // `core` is `&mut` for the hooks that rewrite it; dispatch only
-            // reads, and `RouteCx` borrows it shared.
+            // reads. `App::dispatch_blocking` is the server's dispatch, so the
+            // 501, the 405 and the 404 come from the same code, inside the
+            // region the response hooks and `after_dispatch` see.
             let read: &Request = core;
-            // The core's `route` owns the 501, the 405 and the 404, the same
-            // function the server's bridge calls. Built here and not returned
-            // early, so the response hooks and `after_dispatch` see them.
-            match route(&self.router, read) {
-                Routed::Found { handler, matched } => {
-                    let params = matched.params();
-                    // After the hooks: a provider may read what they wrote.
-                    let context = self.app.context_for(read, &*state);
-                    let mut cx = RouteCx::new(read, &params, &context, state);
-                    handler.run(plan, &mut cx)
-                }
-                Routed::Answer(response) => Ok(response),
-            }
+            self.app
+                .dispatch_blocking(&self.router, read, state, |handler, cx| {
+                    handler.run(plan, cx)
+                })
         });
 
         TestResponse::from_core(response)
@@ -397,17 +390,11 @@ impl<E: 'static, H: HookFamilies, R: TestRoute<E>> TestClient<E, H, R> {
         let outcome = match self.app.begin_async(&mut core, &mut state).await {
             Begin::Answered(outcome) => outcome,
             Begin::Dispatch => {
-                let read: &Request = &core;
-                match route(&self.router, read) {
-                    Routed::Found { handler, matched } => {
-                        let params = matched.params();
-                        // After the hooks: a provider may read what they wrote.
-                        let context = self.app.context_for(read, &state);
-                        let mut cx = RouteCx::new(read, &params, &context, &mut state);
-                        handler.run_async(plan, &mut cx).await
-                    }
-                    Routed::Answer(response) => Ok(response),
-                }
+                self.app
+                    .dispatch(&self.router, &core, &mut state, async |handler, cx| {
+                        handler.run_async(plan, cx).await
+                    })
+                    .await
             }
         };
 

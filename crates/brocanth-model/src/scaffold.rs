@@ -287,7 +287,7 @@ use brocanth_command::anyhow::Context as _;
 use brocanth_command::{anyhow, clap, cmd, Command, Context};
 use brocanth_db::{Db, DbConfig};
 use brocanth_model::sea_orm_migration::{MigrationStatus, MigratorTrait};
-use brocanth_model::Orm;
+use brocanth_model::{migrating, Orm};
 
 use crate::migrations::Migrator;
 
@@ -364,8 +364,10 @@ fn apply(what: Apply) -> anyhow::Result<()> {
     let mut config = database()?;
     // The server's limits are not a migration's: a long `ALTER TABLE` must
     // not hit the statement timeout, and a read-only pool cannot migrate.
+    // `lock_timeout` is the migration's own: `[db] lock_timeout`.
     config.statement_timeout = None;
     config.read_only = false;
+    let lock_timeout = config.lock_timeout;
     tokio::runtime::Runtime::new()?.block_on(async {
         // The pool the server opens, and the ORM over it, as the `model`
         // plugin builds it.
@@ -379,24 +381,23 @@ fn apply(what: Apply) -> anyhow::Result<()> {
             Apply::Down(_) => "migrate down",
             Apply::Status => "migrate status",
         };
-        let before = orm
-            .migrate_locked(async |txn| {
-                let before = Migrator::get_migration_with_status(txn).await?;
-                match what {
-                    Apply::Up => Migrator::up(txn, None).await?,
-                    Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
-                    Apply::Status => {}
-                }
-                Ok(before)
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "{verb} failed, and nothing of it was kept\n\
-                     help: read the database error below, fix the migration it names, then \
-                     run `{verb}` again; `migrate status` lists what is applied"
-                )
-            })?;
+        let before = migrating::locked(orm.connection(), lock_timeout, async |txn| {
+            let before = Migrator::get_migration_with_status(txn).await?;
+            match what {
+                Apply::Up => Migrator::up(txn, None).await?,
+                Apply::Down(n) => Migrator::down(txn, Some(n)).await?,
+                Apply::Status => {}
+            }
+            Ok(before)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "{verb} failed, and nothing of it was kept\n\
+                 help: read the database error below, fix the migration it names, then \
+                 run `{verb}` again; `migrate status` lists what is applied"
+            )
+        })?;
         let named = |status: MigrationStatus| -> Vec<String> {
             before
                 .iter()

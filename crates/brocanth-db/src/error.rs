@@ -204,6 +204,10 @@ fn help_for(code: &str) -> Option<&'static str> {
         "42703" => "no such column; check the statement against the migration",
         "40001" => "a serialization failure; run the transaction again",
         "40P01" => "a deadlock; take locks in one order, or run the transaction again",
+        "55P03" => {
+            "the statement waited longer than `lock_timeout` for a lock another session \
+             holds; run it again when that session ends, or raise `[db] lock_timeout`"
+        }
         _ => return None,
     })
 }
@@ -211,6 +215,11 @@ fn help_for(code: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_timeout_failure_says_which_setting_to_raise() {
+        assert!(help_for("55P03").is_some_and(|help| help.contains("`[db] lock_timeout`")));
+    }
 
     #[test]
     fn not_found_says_what_to_do() {

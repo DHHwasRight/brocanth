@@ -90,8 +90,13 @@ that pings the database restarts every pod when the database blinks.
 failed check, not a failed probe.
 
 ```json
-{"status":"unready","checks":[{"name":"jobs","status":"ok","latency_ms":0.8},{"name":"cache","status":"fail","latency_ms":2000,"error":"timed out after 2000 ms"}]}
+{"status":"unready","checks":[{"name":"jobs","status":"ok","latency_ms":0.8},{"name":"cache","status":"fail","latency_ms":2000}]}
 ```
+
+The body names each check and says `ok` or `fail`, on every listener. It
+never carries a check's error text: that can name a host, a table or a driver
+message. The reason goes to the log, as a `warn` line under
+`brocanth::readyz`.
 
 `200` when every check passes. `503` otherwise, or `{"status":"draining"}`
 once shutdown began.

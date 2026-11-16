@@ -119,9 +119,9 @@ impl<'a, E> RouteCx<'a, E> {
 
 /// What the router decided about a request, before any handler runs.
 ///
-/// The server's bridge and `brocanth-test`'s client both call [`route`], so
-/// the 501, the 405 and the 404 have one owner. The handler call stays with
-/// the caller: one blocks, one awaits, and only the caller knows which.
+/// [`App::dispatch`](crate::plugin_app::App::dispatch) calls [`route`], and
+/// the server's bridge and `brocanth-test`'s client both call that, so the
+/// 501, the 405 and the 404 have one owner.
 #[derive(Debug)]
 pub enum Routed<'r, 'p, H> {
     /// Run this handler. `matched.params()` gives the path parameters.

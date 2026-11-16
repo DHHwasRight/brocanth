@@ -8,11 +8,12 @@ use brocanth_scaffold::{
 ///
 /// It writes `serve`, `routes` and the AGENTS.md section on tasks. It does
 /// not write `brocanth.toml`: `create.rs` writes that marker for every
-/// project. Four things stay in `create.rs`, because each one is a choice
-/// between two whole shapes of a file that every project has, not a piece a
-/// module adds: `src/main.rs`, the `serve` task in `mise.toml`, the next
-/// steps `create` prints, and `src/commands/mod.rs`, which lists the
-/// `CommandsMod` lines of every module.
+/// project. The rest stays in `create.rs`, and that is final: `src/main.rs`,
+/// the `serve` task in `mise.toml` and the next steps `create` prints are
+/// each a choice between two whole texts, not a piece a module adds;
+/// `src/commands/mod.rs` and `src/commands/settings.rs` need the finished
+/// build (every module's `CommandsMod` line, every module's settings).
+/// `docs/modules/commands.md` ("Who owns what") has the table.
 pub struct Commands;
 
 impl Module for Commands {

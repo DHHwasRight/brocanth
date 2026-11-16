@@ -153,6 +153,12 @@ fn settings(project: &Project) -> Vec<Setting> {
             "Seconds before the server cancels a statement. 0 is no limit.",
         )
         .note("`migrate` ignores it: a migration runs with no statement limit."),
+        Setting::integer(
+            "lock_timeout",
+            10,
+            "Seconds a migration statement waits for a table lock. 0 waits forever.",
+        )
+        .note("Only `migrate` sets it: a busy table fails the run, not every query behind it."),
         Setting::list(
             "search_path",
             &[],
@@ -289,7 +295,7 @@ impl Command for Migrate {
             .build()?;
         runtime.block_on(async {
             let db = Db::connect(&config).await?;
-            let migrator = Migrator::new(&db, files);
+            let migrator = Migrator::new(&db, files).lock_timeout(config.lock_timeout);
             let result = apply(&migrator, self.action).await;
             db.close().await;
             result
@@ -538,6 +544,9 @@ pub struct Settings {{
     pub idle_timeout: u64,
     /// Seconds before the server cancels a statement. 0 is no limit.
     pub statement_timeout: u64,
+    /// Seconds a migration statement waits for a table lock. 0 waits
+    /// forever. Only `migrate` sets it.
+    pub lock_timeout: u64,
     /// The schemas for a table name with no schema. Empty is the server's
     /// default.
     pub search_path: Vec<String>,
@@ -560,6 +569,7 @@ impl Default for Settings {{
             acquire_timeout: 30,
             idle_timeout: 600,
             statement_timeout: 30,
+            lock_timeout: 10,
             search_path: Vec::new(),
             read_only: false,
             application_name: {name:?}.to_string(),
@@ -578,6 +588,7 @@ impl Settings {{
         config.acquire_timeout = Duration::from_secs(self.acquire_timeout);
         config.idle_timeout = seconds(self.idle_timeout);
         config.statement_timeout = seconds(self.statement_timeout);
+        config.lock_timeout = seconds(self.lock_timeout);
         config.search_path = self.search_path.clone();
         config.read_only = self.read_only;
         config.application_name =

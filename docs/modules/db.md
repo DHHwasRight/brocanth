@@ -35,7 +35,7 @@ An option is set at build time in `src/modules/db.rs`. A setting is read at run 
 | Exports | none |
 | Hooks | none |
 | Options (build time) | none |
-| Settings (run time) | `[db]`: `url` (secret), `max_connections`, `min_connections`, `acquire_timeout`, `idle_timeout`, `statement_timeout`, `search_path`, `read_only`, `application_name`, `ca_file` |
+| Settings (run time) | `[db]`: `url` (secret), `max_connections`, `min_connections`, `acquire_timeout`, `idle_timeout`, `statement_timeout`, `lock_timeout`, `search_path`, `read_only`, `application_name`, `ca_file` |
 <!-- end generated: capabilities -->
 
 ## What it writes
@@ -83,8 +83,13 @@ client gets `Internal Server Error`.
 
 Section `[db]`. Environment variable: `$<APP>_DB__<KEY>`. Flag: `--db.<key>`. Rename or hide a flag in `src/modules/db.rs`.
 
-A duration is a whole number of seconds. For `idle_timeout` and
-`statement_timeout`, 0 turns it off.
+A duration is a whole number of seconds. For `idle_timeout`,
+`statement_timeout` and `lock_timeout`, 0 turns it off.
+
+`migrate` ignores `statement_timeout` and `read_only`. It sets
+`lock_timeout`, which only a migration uses: a migration that waits on a busy
+table fails after that many seconds, with a `help:` line, and does not queue
+every query behind it.
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
@@ -94,6 +99,7 @@ A duration is a whole number of seconds. For `idle_timeout` and
 | `acquire_timeout` | integer | `30` | `--db.acquire_timeout` | Seconds a statement waits for a connection, opening one included. |
 | `idle_timeout` | integer | `600` | `--db.idle_timeout` | Seconds before an idle connection closes. 0 keeps it open. |
 | `statement_timeout` | integer | `0` | `--db.statement_timeout` | Seconds before the server cancels a statement. 0 is no limit. |
+| `lock_timeout` | integer | `10` | `--db.lock_timeout` | Seconds a migration statement waits for a table lock. 0 waits forever. |
 | `search_path` | list | `[]` | none (list) | The schemas for a table name with no schema. Empty is the server's default. |
 | `read_only` | bool | `false` | `--db.read_only` | Every transaction is read-only: for a replica, or a reporting process. |
 | `application_name` | text | the project name | `--db.application_name` | The name pg_stat_activity shows. Empty sends none. |

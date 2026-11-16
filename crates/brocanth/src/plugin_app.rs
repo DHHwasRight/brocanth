@@ -51,8 +51,11 @@ use crate::plugin_hooks::{
 };
 use crate::plugin_model::{ModelDispatch, ModelHooks};
 use crate::plugin_order::{dependency_on_off_hook, sort, OrderError, Ordered};
-use crate::plugin_routes::{no_such_plugin, RouteBundle, RouteError, RoutePlan, RouteSource};
+use crate::plugin_routes::{
+    no_such_plugin, route, RouteBundle, RouteCx, RouteError, RoutePlan, RouteSource, Routed,
+};
 use crate::plugin_shutdown::{ShutdownCx, ShutdownPhase, ShutdownReason, ShutdownReport};
+use crate::routing::Router;
 use crate::suggest::nearest_name;
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1125,66 @@ impl<E, H> App<E, H> {
             reg.inner.provide_for_request(request, state, &mut builder);
         }
         builder.build::<E>()
+    }
+
+    /// The dispatch region of one request: router, context, handler.
+    ///
+    /// Every front end calls this, so the server's bridge and
+    /// `brocanth-test`'s client cannot drift apart. [`route`] answers the
+    /// 501, the 405 and the 404; a match gets its [`RouteCx`], built after
+    /// the request hooks so a provider may read what they wrote, and `call`
+    /// runs the handler. Call it inside the dispatch region, between
+    /// [`App::begin`] (or [`App::begin_async`]) and [`App::finish`], so the
+    /// response hooks see every answer.
+    ///
+    /// `call` is the one part a front end chooses: it awaits the handler, or
+    /// runs it on the spot. A caller with no `.await` uses
+    /// [`App::dispatch_blocking`], which is this function polled once.
+    pub async fn dispatch<R, F>(
+        &self,
+        router: &Router<R>,
+        request: &Request,
+        state: &mut RequestState,
+        call: F,
+    ) -> Result<Response, HandlerError>
+    where
+        F: AsyncFnOnce(&R, &mut RouteCx<'_, E>) -> Result<Response, HandlerError>,
+    {
+        match route(router, request) {
+            Routed::Found { handler, matched } => {
+                let params = matched.params();
+                let context = self.context_for(request, &*state);
+                let mut cx = RouteCx::new(request, &params, &context, state);
+                call(handler, &mut cx).await
+            }
+            Routed::Answer(response) => Ok(response),
+        }
+    }
+
+    /// [`App::dispatch`], for a caller that cannot `.await`.
+    ///
+    /// The same body, not a copy: `call` is wrapped in an async closure with
+    /// no suspension point, so the future is ready on its first poll. A
+    /// handler that waits is the caller's to drive inside `call`.
+    pub fn dispatch_blocking<R, F>(
+        &self,
+        router: &Router<R>,
+        request: &Request,
+        state: &mut RequestState,
+        call: F,
+    ) -> Result<Response, HandlerError>
+    where
+        F: FnOnce(&R, &mut RouteCx<'_, E>) -> Result<Response, HandlerError>,
+    {
+        use std::future::Future as _;
+        use std::task::{Context as TaskContext, Poll, Waker};
+        let future = std::pin::pin!(
+            self.dispatch(router, request, state, async move |h, cx| { call(h, cx) })
+        );
+        match future.poll(&mut TaskContext::from_waker(Waker::noop())) {
+            Poll::Ready(outcome) => outcome,
+            Poll::Pending => unreachable!("a dispatch with no suspension point is ready at once"),
+        }
     }
 
     /// The sorted hooks this application installed.

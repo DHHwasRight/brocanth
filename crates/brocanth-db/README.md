@@ -158,6 +158,7 @@ set is cleared, and with no role it returns to the login role.
 | `idle_timeout` | 10 min | an idle connection closes after this |
 | `max_lifetime` | 30 min | a connection is replaced after this |
 | `statement_timeout` | none | the server cancels a longer statement (`57014`) |
+| `lock_timeout` | 10 s | migrations only: a statement waits this long for a table lock (`55P03`) |
 | `search_path` | server default | schemas for unqualified names |
 | `read_only` | false | every transaction is read-only (`25006` on a write) |
 | `application_name` | none | the name in `pg_stat_activity` |

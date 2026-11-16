@@ -281,10 +281,13 @@ impl Observer {
             }
         }
         let report = probes::ready(self.readiness(), timeout).await;
-        #[cfg(feature = "logs")]
+        // The body says only `fail`: the reason goes here, to the operator.
         for check in &report.checks {
             if let Err(error) = &check.outcome {
+                #[cfg(feature = "logs")]
                 tracing::warn!(target: "brocanth::readyz", check = %check.name, "not ready: {error}");
+                #[cfg(not(feature = "logs"))]
+                eprintln!("readyz: check {} not ready: {error}", check.name);
             }
         }
         *last = Some((Instant::now(), report.clone()));
@@ -470,8 +473,8 @@ impl Observer {
         let answer = if config.live_path.as_deref() == Some(path) {
             probes::live()
         } else if config.ready_path.as_deref() == Some(path) {
-            // Anybody reaches the main listener: the reasons go to the log.
-            self.ready_shared().await.into_response(!main)
+            // A probe answers whoever reaches it: the reasons go to the log.
+            self.ready_shared().await.into_response()
         } else {
             self.answer_metrics(request, main).await?
         };

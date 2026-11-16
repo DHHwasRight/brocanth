@@ -41,13 +41,35 @@ An option is set at build time in `src/modules/commands.rs`. A setting is read a
 
 Files:
 
+- `src/commands/serve.rs`
 - `src/commands/routes.rs`
 
 Slots:
 
-- src/commands/mod.rs: `pub mod routes;`
+- src/commands/mod.rs: `pub mod serve;`, `pub mod routes;`
+- AGENTS.md: the `Tasks` section, on how to add a command
 
-`create.rs` writes `src/commands/mod.rs`, `serve.rs` and `settings.rs`. The module adds the `routes` command. With `commands`, `cargo run` alone prints the help: run `cargo run -- serve` or `brocanth serve`.
+With `commands`, `cargo run` alone prints the help: run `cargo run -- serve`
+or `brocanth serve`.
+
+## Who owns what
+
+The module owns every file and section that only a project with `commands`
+has: `serve.rs`, `routes.rs` and the AGENTS.md section. `create.rs` keeps
+six things. The move stops here, on purpose.
+
+| File | Owner | Why |
+|---|---|---|
+| `src/main.rs` | `create.rs` | Every project has one. `commands` picks one of two whole shapes (a command line, or `serve` only), not a piece to add. |
+| `src/commands/mod.rs` | `create.rs` | It lists the `CommandsMod` lines of every module, so only the finished build can write it. |
+| `src/commands/settings.rs` | `create.rs` | It exists when any module declares a setting, a fact of the finished build. |
+| `mise.toml`, task `serve` | `create.rs` | Every project has the task. `commands` changes its `run` line (`cargo run -- serve` or `cargo run`). |
+| the next steps `create` prints | `create.rs` | They are the CLI's output, not a file of the project. |
+| `brocanth.toml` | `create.rs` | The marker every project has, with or without `commands`. |
+
+A slot cannot carry any of these: each one is a choice between two whole
+texts, or needs every module's contribution first. Moving them would mean a
+module that rewrites the files of the others.
 
 ## Settings
 
