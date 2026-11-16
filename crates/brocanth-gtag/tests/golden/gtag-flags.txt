@@ -353,6 +353,7 @@ async fn run(
     let server = brocanth_server::Server::bind(addr)
         .await
         .map_err(|e| e.to_string())?
+        .max_body(plugins::max_body()?)
         .with_streams(app.core.streams().clone());
     let bound = server.local_addr().map_err(|e| e.to_string())?;
     let stopper = server.stopper();
@@ -1682,6 +1683,15 @@ pub const SETTINGS: &[Setting] = &[
         none_as: None,
         env: "MY_BLOG_SERVER__SHUTDOWN_GRACE_SECS",
     },
+    Setting {
+        path: "server.max_body_bytes",
+        help: "The largest request body the server reads, in bytes; a larger one gets 413.",
+        flag: true,
+        file: "src/modules/brocanth.rs",
+        flags: Flags::Project,
+        none_as: None,
+        env: "MY_BLOG_SERVER__MAX_BODY_BYTES",
+    },
 ];
 
 /// One value this run was given, above the defaults.
@@ -2023,6 +2033,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
         ),
+        (
+            "server.max_body_bytes",
+            format!("{:?}", server.max_body_bytes),
+        ),
     ]
 }
 
@@ -2104,8 +2118,10 @@ pub fn gtag_settings(given: &[Given]) -> Result<brocanth_gtag::GtagConfig, Strin
 pub fn server_settings(given: &[Given]) -> Result<crate::plugins::ServerSettings, String> {
     let mut settings = crate::plugins::ServerSettings::default();
     for given in given {
-        if given.setting.path == "server.shutdown_grace_secs" {
-            settings.shutdown_grace_secs = parsed(given)?;
+        match given.setting.path {
+            "server.shutdown_grace_secs" => settings.shutdown_grace_secs = parsed(given)?,
+            "server.max_body_bytes" => settings.max_body_bytes = parsed(given)?,
+            _ => {}
         }
     }
     Ok(settings)
@@ -2138,6 +2154,10 @@ fn merged(given: &[Given]) -> Result<Vec<(&'static str, String)>, String> {
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
+        ),
+        (
+            "server.max_body_bytes",
+            format!("{:?}", server.max_body_bytes),
         ),
     ])
 }
@@ -2211,12 +2231,15 @@ pub fn settings_report() -> Result<String, String> {
 pub struct ServerSettings {
     /// Seconds a stop waits for open requests, then for the plugins.
     pub shutdown_grace_secs: u64,
+    /// The largest request body the server reads, in bytes; a larger one gets 413.
+    pub max_body_bytes: usize,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+            max_body_bytes: brocanth_server::MAX_BODY,
         }
     }
 }
@@ -2226,6 +2249,12 @@ impl Default for ServerSettings {
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
     let server = server_settings(&layers()?)?;
     Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
+}
+
+/// `[server] max_body_bytes` from every settings layer, or
+/// [`brocanth_server::MAX_BODY`] when none sets it.
+pub fn max_body() -> Result<usize, String> {
+    Ok(server_settings(&layers()?)?.max_body_bytes)
 }
 
 /// What the server is handed for one request.
@@ -2269,7 +2298,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 9d24f222f98efca8
+// brocanth-digest: 36cee3273f00257f
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2324,6 +2353,7 @@ pub mod brocanth {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Key {
         ShutdownGraceSecs,
+        MaxBodyBytes,
     }
 
     impl Key {
@@ -2331,6 +2361,7 @@ pub mod brocanth {
         pub const fn path(self) -> &'static str {
             match self {
                 Key::ShutdownGraceSecs => "server.shutdown_grace_secs",
+                Key::MaxBodyBytes => "server.max_body_bytes",
             }
         }
     }
@@ -2444,7 +2475,7 @@ pub mod gtag {
     }
 }
 
-// brocanth-digest: 9ea805cdb05e17a4
+// brocanth-digest: 0f76fa0484c9d674
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.

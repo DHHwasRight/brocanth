@@ -81,6 +81,10 @@ pub struct RoutesConfig {
     pub path: String,
     /// The largest file accepted, in bytes.
     pub max_bytes: usize,
+    /// The server's request body cap, `[server] max_body_bytes`. A
+    /// `max_bytes` above it is refused at start: the server would cut the
+    /// upload off with a 413 first. `None` skips the check.
+    pub server_max_body: Option<usize>,
     /// The multipart field that holds the file.
     pub field: String,
     /// Serve a file to a request with no token.
@@ -99,8 +103,8 @@ pub struct RoutesConfig {
     pub csrf_header: String,
 }
 
-/// The largest file by default: 2 MiB, which is also what the server
-/// buffers of a request body today.
+/// The largest file by default: 2 MiB, well under the server's default
+/// request body cap of 16 MiB.
 pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 pub use crate::spec::DEFAULT_THUMB_SIZES;
@@ -110,6 +114,7 @@ impl Default for RoutesConfig {
         Self {
             path: "/files".to_string(),
             max_bytes: DEFAULT_MAX_BYTES,
+            server_max_body: None,
             field: "file".to_string(),
             public: false,
             thumbnails: true,
@@ -207,7 +212,8 @@ impl FileRoutes {
     /// upload through when `guard` says so.
     ///
     /// # Errors
-    /// The path does not start with `/`, or a limit is zero.
+    /// The path does not start with `/`, a limit is zero, or `max_bytes` is
+    /// above `server_max_body`.
     pub fn new(
         store: Arc<dyn Storage>,
         tokens: FileTokens,
@@ -227,6 +233,13 @@ impl FileRoutes {
                 "[storage_routes] max_bytes is 0, so no upload is ever accepted\n\
                  help: set it to the largest file you take, in bytes",
             ));
+        }
+        if let Some(cap) = config.server_max_body.filter(|cap| config.max_bytes > *cap) {
+            return Err(PluginError::new(format!(
+                "[storage_routes] max_bytes is {}, above the server's request body cap of {cap} bytes, so a file that large gets 413 before it reaches the routes\n\
+                 help: lower `max_bytes` under [storage_routes] to at most {cap}, or raise `max_body_bytes` under [server]",
+                config.max_bytes
+            )));
         }
         if config.thumbnails && config.thumb_sizes.is_empty() {
             return Err(PluginError::new(

@@ -84,7 +84,7 @@ Section `[storage_routes]`, the plugin's instance name, not the module key. Envi
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `max_bytes` | integer | `2097152` | `--storage_routes.max_bytes` | The largest file accepted, in bytes. The server buffers at most 2 MiB of a body today, so a larger value takes effect only when that limit moves. |
+| `max_bytes` | integer | `2097152` | `--storage_routes.max_bytes` | The largest file accepted, in bytes. At most `[server] max_body_bytes` (16 MiB by default): a larger value stops the start, because the server would refuse the upload first. |
 | `dedupe` | bool | `false` | `--storage_routes.dedupe` | Store identical uploads once, at their content address. Off, each upload has an address of its own. On, a delete removes the file for every holder: count the references before you delete. |
 | `thumb_sizes` | list | `["150x150t", "300x200", "600x600f"]` | `--storage_routes.thumb_sizes` | With [`storage-thumbnails`](storage-thumbnails.md) only. The only sizes `?thumb=` may ask for; any other is a 400. |
 
