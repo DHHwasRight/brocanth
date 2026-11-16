@@ -34,6 +34,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
@@ -49,6 +52,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
@@ -63,6 +69,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
@@ -109,6 +118,9 @@ jobs:
       BROCANTH_CACHE_TEST_REDIS: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
@@ -146,6 +158,9 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
@@ -163,6 +178,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # `zod` is a workspace dependency on ../zod (a sibling repository).
+      - name: Check out zod beside brocanth
+        run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
