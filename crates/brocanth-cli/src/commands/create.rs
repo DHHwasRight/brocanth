@@ -1094,6 +1094,14 @@ fn framework_settings(built: &mut Built) {
             "Seconds a stop waits for open requests, then for the plugins.",
         ),
     );
+    built.setting(
+        "server",
+        Setting::integer(
+            "max_body_bytes",
+            16_777_216,
+            "The largest request body the server reads, in bytes; a larger one gets 413.",
+        ),
+    );
     built.settings_type("server", "crate::plugins::ServerSettings");
 }
 
@@ -2530,6 +2538,7 @@ async fn run(
     let server = brocanth_server::Server::bind(addr)
         .await
         .map_err(|e| e.to_string())?
+        .max_body(plugins::max_body()?)
         .with_streams(app.core.streams().clone());
     let bound = server.local_addr().map_err(|e| e.to_string())?;
     let stopper = server.stopper();
@@ -4688,12 +4697,15 @@ const SERVER_SETTINGS: &str = r#"/// `[server]`: the settings the framework read
 pub struct ServerSettings {
     /// Seconds a stop waits for open requests, then for the plugins.
     pub shutdown_grace_secs: u64,
+    /// The largest request body the server reads, in bytes; a larger one gets 413.
+    pub max_body_bytes: usize,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             shutdown_grace_secs: crate::app::SHUTDOWN_GRACE.as_secs(),
+            max_body_bytes: brocanth_server::MAX_BODY,
         }
     }
 }
@@ -4724,6 +4736,28 @@ pub fn shutdown_grace() -> Result<std::time::Duration, String> {
             )
         })
 }
+
+/// `[server] max_body_bytes` from every settings layer, or
+/// [`brocanth_server::MAX_BODY`] when none sets it.
+pub fn max_body() -> Result<usize, String> {
+    let config = layers()?;
+    let Some(value) = config
+        .raw_section("server")
+        .and_then(|server| server.get("max_body_bytes"))
+    else {
+        return Ok(brocanth_server::MAX_BODY);
+    };
+    value
+        .as_integer()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .or_else(|| value.as_str().and_then(|bytes| bytes.trim().parse().ok()))
+        .ok_or_else(|| {
+            format!(
+                "`[server] max_body_bytes` is {}, and it must be a whole number of bytes\nhelp: set it to a whole number of bytes, such as 16777216 (16 MiB)",
+                value.display()
+            )
+        })
+}
 "#;
 
 /// `plugins::shutdown_grace` without it.
@@ -4732,6 +4766,12 @@ const GRACE_PLAIN: &str = r#"/// `[server] shutdown_grace_secs` from every setti
 pub fn shutdown_grace() -> Result<std::time::Duration, String> {
     let server = server_settings(&layers()?)?;
     Ok(std::time::Duration::from_secs(server.shutdown_grace_secs))
+}
+
+/// `[server] max_body_bytes` from every settings layer, or
+/// [`brocanth_server::MAX_BODY`] when none sets it.
+pub fn max_body() -> Result<usize, String> {
+    Ok(server_settings(&layers()?)?.max_body_bytes)
 }
 "#;
 
@@ -5910,7 +5950,10 @@ fn config_toml(a: &Answers, built: &Built) -> String {
          [server]\n\
          # Seconds a stop (SIGTERM or Ctrl-C) waits for open requests, then for the\n\
          # plugins. Keep it below the orchestrator's kill timeout: Kubernetes waits 30.\n\
-         shutdown_grace_secs = 25\n",
+         shutdown_grace_secs = 25\n\
+         # The largest request body the server reads, in bytes; a larger one gets 413.\n\
+         # An upload route refuses to start with a limit above it.\n\
+         max_body_bytes = 16777216\n",
         upper = a.ident().to_uppercase(),
         ident = a.ident(),
         env = DEFAULT_ENV,
@@ -8225,6 +8268,18 @@ mod tests {
             !ok && out.contains("--server.shutdown_grace_secs is \"soon\""),
             "{out}"
         );
+        // The body cap has a variable and a flag, and the flag is parsed.
+        let env = [("FLAGS_BARE_SERVER__MAX_BODY_BYTES", "1024")];
+        let (ok, out) = run(&bare, name, &["--settings"], &env);
+        assert!(
+            ok && merged(&out, "server.max_body_bytes").contains("1024  3 environment"),
+            "{out}"
+        );
+        let (ok, out) = run(&bare, name, &["--server.max_body_bytes=lots"], &[]);
+        assert!(
+            !ok && out.contains("--server.max_body_bytes is \"lots\""),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&bare);
 
         // A config file: the flags stay on, and the file is one more layer
@@ -8304,6 +8359,12 @@ mod tests {
         let (ok, out) = run(&configured, name, &line, &[]);
         assert!(
             !ok && out.contains("`[server] shutdown_grace_secs` is") && out.contains("help: "),
+            "{out}"
+        );
+        let line = ["serve", "--server.max_body_bytes=lots"];
+        let (ok, out) = run(&configured, name, &line, &[]);
+        assert!(
+            !ok && out.contains("`[server] max_body_bytes` is") && out.contains("help: "),
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&configured);
@@ -8392,7 +8453,7 @@ mod tests {
         let path = filed.join("config/development.toml");
         let toml = std::fs::read_to_string(&path).unwrap();
         let edited = toml
-            .replace("cookie = \"csrf_token\"", "cookie = \"xsrf_token\"")
+            .replace("cookie = \"__Host-csrf_token\"", "cookie = \"xsrf_token\"")
             .replace(
                 "# referrer_policy = \"strict-origin-when-cross-origin\"",
                 "referrer_policy = \"no-referrer\"",
@@ -8601,7 +8662,54 @@ mod tests {
         assert!(!response.ends_with("slept"), "{response}\n{log}");
         assert!(log.contains("did not finish in 1s"), "{log}");
 
+        // `[server] max_body_bytes` reaches the server: a body past it gets
+        // 413, and one under it reaches the routes.
+        let posted = |bytes: usize| post_with_body_cap(&binary, "16", bytes);
+        assert!(posted(17).starts_with("HTTP/1.1 413"), "{}", posted(17));
+        assert!(!posted(16).starts_with("HTTP/1.1 413"), "{}", posted(16));
+
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Starts `binary serve` with `[server] max_body_bytes` at `cap`
+    /// (through the environment), posts `bytes` bytes, and returns the
+    /// response.
+    #[cfg(unix)]
+    fn post_with_body_cap(binary: &Path, cap: &str, bytes: usize) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let mut child = Command::new(binary)
+            .args(["serve", "--addr", "127.0.0.1:0"])
+            .env("DRAIN_TEST_SERVER__MAX_BODY_BYTES", cap)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server");
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut log = String::new();
+        let addr = loop {
+            let mut line = String::new();
+            if stderr.read_line(&mut line).unwrap() == 0 {
+                panic!("the server stopped before it listened:\n{log}");
+            }
+            log.push_str(&line);
+            if let Some(at) = line.trim().split("listening on http://").nth(1) {
+                break at.to_string();
+            }
+        };
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        write!(
+            stream,
+            "POST /up HTTP/1.1\r\nHost: test\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n{}",
+            "x".repeat(bytes)
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        let _ = child.kill();
+        let _ = child.wait();
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     /// Starts `binary serve` on a free port, sends one slow request, sends

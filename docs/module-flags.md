@@ -377,7 +377,7 @@ variable a pointer flag names.
 
 | File | Owner | Holds |
 |---|---|---|
-| `src/plugins/mod.rs` | generator | `SETTINGS`, `Name`, `names`, `code`, `given`, `layers`, `flag_args` or `read_line`, `refuse_off_flags`, one `<section>_settings` per section, `settings_report`; `ServerSettings` and `shutdown_grace` |
+| `src/plugins/mod.rs` | generator | `SETTINGS`, `Name`, `names`, `code`, `given`, `layers`, `flag_args` or `read_line`, `refuse_off_flags`, one `<section>_settings` per section, `settings_report`; `ServerSettings`, `shutdown_grace` and `max_body` |
 | `src/modules/<key>.rs` | project | `flags`, `rename`, `set`, and the module's other choices |
 | `src/modules/brocanth.rs` | project | the `[server]` renames and values |
 | `src/plugins/shape.rs` | generator | `Flags`, `Flag`, and each module's `Key` |
@@ -455,8 +455,9 @@ with 429.
 
 ## The framework's own settings: `[server]`
 
-The framework declares `[server] shutdown_grace_secs` the way a module
-declares its settings. So it has the same ways in:
+The framework declares `[server] shutdown_grace_secs` and `[server]
+max_body_bytes` the way a module declares its settings. So each has the
+same ways in:
 
 - the flag `--server.shutdown_grace_secs=SECS`;
 - the variable `$<APP>_SERVER__SHUTDOWN_GRACE_SECS`;
@@ -485,6 +486,12 @@ How it is built:
 - `plugins::shutdown_grace` reads the raw `[server]` section of
   `plugins::layers()` with a file, and `server_settings(&layers()?)`
   without one.
+- `max_body_bytes` (default `brocanth_server::MAX_BODY`, 16 MiB) is the
+  request body cap. `plugins::max_body` reads it the same way, and `run`
+  in `src/app.rs` hands it to `Server::max_body`. A larger body gets 413
+  before a handler runs. The storage routes refuse to start when their
+  `max_bytes` is above it: an upload the server cuts off at the cap would
+  fail with no clear cause.
 - `config/<env>.toml` still writes `[server]` itself, beside `[app]`,
   because `brocanth-config` owns both sections (`CORE_SECTIONS`).
 

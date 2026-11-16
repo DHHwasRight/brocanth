@@ -59,7 +59,7 @@ Section `[csrf]`, the plugin's instance name, not the module key. Environment va
 
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
-| `cookie` | text | `"csrf_token"` | `--csrf.cookie` | The cookie this hook owns. |
+| `cookie` | text | `"__Host-csrf_token"` | `--csrf.cookie` | The cookie this hook owns. Keep the `__Host-` prefix: a browser stores it only from this host, over HTTPS, so a sibling subdomain cannot plant the cookie. With `secure` off the prefix is dropped on the wire. |
 | `field` | text | `"_csrf_token"` | `--csrf.field` | The form field the token comes back in. |
 | `header` | text | `"x-csrf-token"` (commented out) | `--csrf.header` | The header a fetch caller may send instead of the field. Empty means none. While it is set, the cookie is not HttpOnly: a script reads it. |
 | `exempt` | list | `[]` | none (a list) | Paths never checked, each with everything under it. For a caller that is not a browser: a webhook, a device. |

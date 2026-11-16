@@ -650,8 +650,8 @@ fn routes_settings(thumbnails: bool) -> Vec<Setting> {
             "The largest file accepted, in bytes.",
         )
         .note(
-            "The server buffers at most 2 MiB of a request body today, so a larger\n\
-             value takes effect only when that limit moves.",
+            "At most `max_body_bytes` under [server] (16 MiB by default): a larger value\n\
+             stops the start, because the server would refuse the upload first.",
         ),
         Setting::bool(
             "dedupe",
@@ -857,6 +857,7 @@ impl Plugin for StorageRoutes {
 @THUMB_PARSE@        let config = RoutesConfig {
             path: @PATH@.to_string(),
             max_bytes: self.settings.max_bytes,
+            server_max_body: Some(crate::plugins::max_body().map_err(PluginError::new)?),
             public: @PUBLIC@,
             @THUMBNAILS@
             dedupe: self.settings.dedupe,

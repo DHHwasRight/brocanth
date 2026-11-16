@@ -922,10 +922,39 @@ fn a_path_or_a_limit_that_cannot_work_is_refused_when_built() {
 }
 
 #[test]
+fn an_upload_limit_above_the_server_cap_is_refused_when_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+    let build = |max_bytes: usize, server_max_body: Option<usize>| {
+        FileRoutes::new(
+            store.clone(),
+            tokens(),
+            RoutesConfig {
+                max_bytes,
+                server_max_body,
+                ..RoutesConfig::default()
+            },
+            |_: &http::Request<Vec<u8>>, _: &brocanth::plugin_hooks::RequestState| true,
+        )
+    };
+    let err = build(2_000, Some(1_000)).expect_err("above the cap");
+    let text = err.to_string();
+    assert!(text.contains("max_bytes is 2000"), "{text}");
+    assert!(
+        text.contains("help:") && text.contains("max_body_bytes"),
+        "{text}"
+    );
+
+    build(1_000, Some(1_000)).expect("equal to the cap");
+    build(usize::MAX, None).expect("no cap known");
+}
+
+#[test]
 fn the_defaults_are_what_the_module_doc_says() {
     let config = RoutesConfig::default();
     assert_eq!(config.path, "/files");
     assert_eq!(config.max_bytes, 2_097_152);
+    assert_eq!(config.server_max_body, None);
     assert_eq!(config.field, "file");
     assert!(!config.public);
     assert!(config.thumbnails);
