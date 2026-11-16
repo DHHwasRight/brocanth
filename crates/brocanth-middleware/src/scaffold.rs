@@ -195,16 +195,15 @@ impl Module for Csrf {
         )
         .part_of("middleware")
         .because("the hook is `brocanth_middleware::Csrf`, so the crate arrives with that choice")
-        .after("middleware")
         .hook(
             "check",
             "refuse an unsafe request that does not send the token back",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Guard),
         )
         .hook(
             "mint",
             "set the token cookie on a response",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Guard),
         )
         .absent(
             "csrf",
@@ -327,11 +326,10 @@ impl Module for SecurityHeaders {
         .because(
             "the hook is `brocanth_middleware::SecurityHeaders`, so the crate arrives with that choice",
         )
-        .after("middleware-csrf")
         .hook(
             "set",
             "send the policy headers on each response",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Encode),
         )
         .absent(
             "security-headers",
@@ -482,16 +480,15 @@ impl Module for RateLimit {
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
         .because("the hook is `brocanth_middleware::RateLimit`, so the crate arrives with that choice")
-        .after("middleware-security-headers")
         .hook(
             "count",
             "count each request against its rule, and answer 429 past the limit",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Guard),
         )
         .hook(
             "headers",
             "send the RateLimit headers on each response a rule covers",
-            Hook::on(),
+            Hook::on().phase(brocanth_scaffold::Phase::Encode),
         )
         .absent(
             "rate-limit",
@@ -720,14 +717,13 @@ impl Module for ConditionalGet {
         .because(
             "the hook is `brocanth_middleware::ConditionalGet`, so the crate arrives with that choice",
         )
-        .after("middleware-rate-limit")
         // The module is this one hook. A switch in the module file would
         // only repeat `brocanth remove middleware-conditional-get`, and
         // `etag` and `last_modified` already turn each half off.
         .hook(
             "check",
             "tag each 200 to a GET with a weak ETag, and answer 304 when it matches",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Encode),
         )
         .absent(
             "conditional-get",
@@ -818,14 +814,13 @@ impl Module for Compression {
         .because(
             "the hook is `brocanth_middleware::Compression`, so the crate arrives with that choice",
         )
-        .after("middleware-conditional-get")
         // The module is this one hook, so it has no switch of its own: a
         // project behind a CDN that compresses removes the module, and one
         // that wants only gzip sets `brotli = false`.
         .hook(
             "encode",
             "compress a buffered text body with gzip or brotli, as Accept-Encoding asks",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Encode),
         )
         .absent(
             "compression",
@@ -911,7 +906,8 @@ const COMPRESSION_AGENTS: &str = "\n\
     \n\
     A stream is never compressed. To keep a buffered body as it is, set\n\
     `Cache-Control: no-transform`. A hook of your own that rewrites the\n\
-    body goes in `runs_after`, so compression waits for it.\n";
+    body runs before compression when it is in any phase but `Encode`;\n\
+    one in `Phase::Encode` goes in `runs_after`.\n";
 
 /// Messages that survive one redirect, as a choice on the menu.
 ///
@@ -933,16 +929,15 @@ impl Module for Flash {
         )
         .asked_in("doors", "Show \"Saved\" on the page a form redirects to")
         .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
-        .after("middleware-rate-limit")
         .hook(
             "read",
             "read the messages the last response left in the cookie",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
         .hook(
             "write",
             "draw the messages into `<div id=\"flash\">` and set or clear the cookie",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
         .absent(
             "flash",

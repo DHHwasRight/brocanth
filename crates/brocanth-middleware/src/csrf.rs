@@ -385,18 +385,20 @@ impl HookSource for Csrf {
             })?;
         registrar.request(
             "check",
-            // After the method override, so a POST that asked to be a
-            // DELETE is checked as the verb it became. Both verbs are
-            // unsafe, so this is about what a log says rather than what
-            // is refused -- and `_if_present`, because the override is
-            // its own plugin and most applications do not register it.
-            brocanth::plugin_order::Order::new().after_if_present("method-override.rewrite"),
+            // `Guard`, so it runs after the method override (`Identify`)
+            // and checks a POST that asked to be a DELETE as the verb it
+            // became. Last in its phase, so a hook that answers a caller
+            // with no token (a webhook, a beacon) runs first and names
+            // nothing.
+            brocanth::plugin_order::Phase::Guard,
+            brocanth::plugin_order::Order::new().last(),
             Hook {
                 config: self.config.clone(),
             },
         );
         registrar.response(
             "mint",
+            brocanth::plugin_order::Phase::Guard,
             brocanth::plugin_order::Order::new(),
             Hook {
                 config: self.config.clone(),

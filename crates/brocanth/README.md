@@ -72,7 +72,7 @@ use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
     Flow, HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState, Response,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 
 /// Answers 403 for every path under `/private`.
 struct Guard;
@@ -92,7 +92,7 @@ impl HookSource for Guard {
     type Families = OnRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.request("deny", Order::new(), Deny);
+        registrar.request("deny", Phase::Guard, Order::new(), Deny);
         Ok(())
     }
 }

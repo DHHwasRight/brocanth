@@ -15,7 +15,7 @@ use brocanth::plugin_hooks::{
     Flow, HandlerError, HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState,
     Response,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 
 #[derive(Clone, Default)]
 struct Rec(Arc<Mutex<Vec<String>>>);
@@ -71,6 +71,7 @@ impl HookSource for RateLimit {
         ] {
             r.request(
                 name,
+                Phase::Guard,
                 Order::new(),
                 Step {
                     rec: self.0.clone(),
@@ -102,6 +103,7 @@ impl HookSource for Audit {
     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         r.request(
             "trail",
+            Phase::Guard,
             self.1.clone(),
             Step {
                 rec: self.0.clone(),
@@ -358,6 +360,7 @@ impl HookSource for Counter {
     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         r.request(
             "count",
+            Phase::Guard,
             Order::new(),
             Step {
                 rec: self.0.clone(),
@@ -367,6 +370,7 @@ impl HookSource for Counter {
         if self.1 {
             r.request(
                 "collect",
+                Phase::Guard,
                 Order::new(),
                 Step {
                     rec: self.0.clone(),
@@ -441,6 +445,7 @@ impl HookSource for Csrf {
     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         r.request(
             "check",
+            Phase::Guard,
             Order::new(),
             Step {
                 rec: self.0.clone(),

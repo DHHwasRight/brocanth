@@ -75,10 +75,11 @@
 //!
 //! # Order
 //!
-//! Response hooks run in reverse declared order. Declare this plugin so its
-//! response hook runs **before** any hook that rewrites the body
-//! (compression, `ETag`). On a hit those hooks run again over the stored
-//! body, so the store must hold the handler's own bytes.
+//! Both hooks are in `Phase::Cache`. A response passes `Cache` first, so the
+//! store runs **before** any hook that rewrites the body (the flash message
+//! in `Identify`, compression and `ETag` in `Encode`), and no plugin names
+//! another. On a hit those hooks run again over the stored body, so the
+//! store must hold the handler's own bytes.
 //!
 //! # What it does about failure
 //!
@@ -111,7 +112,7 @@ use brocanth::plugin_hooks::{
     AsyncRequestHook, BodyShape, Both, Flow, HookRegistrar, HookSource, OnAsyncRequest, OnResponse,
     Request, RequestState, Response, ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::BoxFuture;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -312,15 +313,16 @@ impl RouteCacheConfig {
         self
     }
 
-    /// Where the lookup hook sits in the request chain.
+    /// Where the lookup hook sits inside `Phase::Cache` of the request
+    /// chain.
     #[must_use]
     pub fn request_order(mut self, order: Order) -> Self {
         self.request_order = order;
         self
     }
 
-    /// Where the store hook sits in the response chain. See the module
-    /// documentation on order.
+    /// Where the store hook sits inside `Phase::Cache` of the response
+    /// chain. See the module documentation on order.
     #[must_use]
     pub fn response_order(mut self, order: Order) -> Self {
         self.response_order = order;
@@ -375,13 +377,18 @@ impl HookSource for RouteCache {
     type Families = Both<OnAsyncRequest, OnResponse>;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        // `Cache` both ways: the lookup runs after every guard, and on the
+        // way out the store sees the handler's page before any other phase
+        // writes into it.
         registrar.request_async(
             "lookup",
+            Phase::Cache,
             self.request_order.clone(),
             Lookup(self.inner.clone()),
         );
         registrar.response(
             "store",
+            Phase::Cache,
             self.response_order.clone(),
             Store(self.inner.clone()),
         );

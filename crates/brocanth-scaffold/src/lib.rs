@@ -393,6 +393,10 @@ impl Manifest {
     /// A hook that is not [`Hook::required`] becomes a `bool` in the
     /// module file, and the generated registration passes the hooks that
     /// are off to `AppBuilder::hooks_off`.
+    ///
+    /// A request or response hook names its [`Phase`] too:
+    /// `Hook::required().phase(Phase::Guard)`. "Required" says whether a
+    /// project may turn the hook off; the phase says when it runs.
     pub fn hook(mut self, name: &'static str, what: &'static str, hook: Hook) -> Self {
         self.hooks.push((name, what, hook));
         self
@@ -648,6 +652,10 @@ pub struct Hook {
     /// On unless the module file says otherwise. Always true for a
     /// required hook.
     pub on: bool,
+    /// When a request or response hook runs; `None` for an error or a
+    /// model hook. Independent of `required`, which says whether a project
+    /// may turn the hook off.
+    pub phase: Option<Phase>,
 }
 
 impl Hook {
@@ -656,6 +664,7 @@ impl Hook {
         Self {
             required: false,
             on: true,
+            phase: None,
         }
     }
 
@@ -664,6 +673,7 @@ impl Hook {
         Self {
             required: false,
             on: false,
+            phase: None,
         }
     }
 
@@ -673,7 +683,52 @@ impl Hook {
         Self {
             required: true,
             on: true,
+            phase: None,
         }
+    }
+
+    /// The phase the plugin registers this request or response hook in.
+    /// A test in `brocanth-cli` holds it to the phase that runs.
+    #[must_use]
+    pub fn phase(mut self, phase: Phase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+}
+
+/// When a request or response hook runs: the phases of
+/// `brocanth::plugin_order::Phase`, by name.
+///
+/// A copy, because the CLI does not link the core. The generated code
+/// names the core's type, and `brocanth-cli`'s `manifest_hooks` test
+/// compares the two for every hooking module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Phase {
+    /// Who the caller is: proxy headers, method override, locale, flash.
+    Identify,
+    /// Whether the request may go on: rate limit, CSRF, CORS.
+    Guard,
+    /// An answer from a store: the route cache.
+    Cache,
+    /// The bytes on the wire: `ETag`, compression, policy headers.
+    Encode,
+}
+
+impl Phase {
+    /// The name, as the core's `Phase` prints it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Identify => "Identify",
+            Phase::Guard => "Guard",
+            Phase::Cache => "Cache",
+            Phase::Encode => "Encode",
+        }
+    }
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 

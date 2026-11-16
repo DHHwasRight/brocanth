@@ -57,7 +57,7 @@ use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
     ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use http::header::{
     HeaderValue, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LENGTH, CONTENT_TYPE,
     ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
@@ -109,15 +109,13 @@ impl HookSource for ConditionalGet {
     type Families = OnResponse;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        // Declared after compression and before the route cache, so on the
-        // way out it runs after the cache stored the page and before the
-        // body is compressed.
-        let order = Order::new()
-            .after_if_present("compression")
-            .before_if_present("route_cache");
+        // `Encode`, so on the way out it tags the body after every other
+        // phase wrote it and the cache stored it. Compression is first in
+        // `Encode`, so this hook runs before the body is compressed.
         registrar.response(
             "check",
-            order,
+            Phase::Encode,
+            Order::new(),
             Check {
                 config: self.config.clone(),
             },

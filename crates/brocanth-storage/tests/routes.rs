@@ -11,7 +11,7 @@ use brocanth::plugin_api::{Plugin, PluginError};
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::routing::Verb;
 use brocanth_middleware::{Csrf, CsrfConfig};
 use brocanth_storage::routes::{FileRoutes, RoutesConfig};
@@ -59,16 +59,8 @@ impl HookSource for Files {
     type Families = OnAsyncRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.request_async(
-            "lift",
-            Order::new().before_if_present("csrf.check"),
-            self.routes.csrf_lift(),
-        );
-        registrar.request_async(
-            "answer",
-            Order::new().after_if_present("csrf.check"),
-            self.routes.clone(),
-        );
+        registrar.request_async("lift", Phase::Guard, Order::new(), self.routes.csrf_lift());
+        registrar.request_async("answer", Phase::Cache, Order::new(), self.routes.clone());
         Ok(())
     }
 }

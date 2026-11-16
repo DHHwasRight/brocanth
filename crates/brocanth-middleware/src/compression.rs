@@ -44,14 +44,16 @@
 //!
 //! # Order
 //!
-//! Response hooks run in reverse declared order. Compression must run
-//! **last**, after every hook that reads or rewrites the body. So its hook
-//! is declared before the ones this workspace knows: `conditional_get`
-//! (a 304 is decided over the identity body, and then nothing is
-//! compressed), `route_cache` (the cache stores the identity body and a hit
-//! is compressed again for its client), and `gtag` and `beacon` (both
-//! insert markup into the HTML). Add an application hook that rewrites the
-//! body to [`CompressionConfig::runs_after`].
+//! Compression must run **last**, after every hook that reads or rewrites
+//! the body. Its hook is in `Phase::Encode`, which response hooks reach
+//! last, and first in that phase, which response hooks leave last. So it
+//! names none of the hooks it follows: `conditional_get` (a 304 is decided
+//! over the identity body, and then nothing is compressed), `route_cache`
+//! (the cache stores the identity body and a hit is compressed again for
+//! its client), and `gtag` and `beacon` (both insert markup into the
+//! HTML). An application hook in another phase runs before it as well; one
+//! in `Encode` that rewrites the body goes in
+//! [`CompressionConfig::runs_after`].
 
 use std::io::Write as _;
 
@@ -61,16 +63,10 @@ use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
     ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use http::header::{
     HeaderValue, ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, ETAG,
 };
-
-/// The hooks a compressing hook must run after, when they are installed.
-///
-/// Instance names, so every hook of each instance counts. Each one reads
-/// or rewrites the identity body.
-const RUNS_AFTER: [&str; 4] = ["conditional_get", "route_cache", "gtag", "beacon"];
 
 /// What [`Compression`] compresses, and how hard.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,9 +95,9 @@ pub struct CompressionConfig {
     /// takes every `text/` type. Matched without case.
     pub types: Vec<String>,
     /// More hooks whose response half runs before this one, when they are
-    /// installed: an application hook that rewrites the body. An instance
-    /// name or `instance.hook`. The four this workspace knows are always
-    /// in the list.
+    /// installed: an application hook in `Phase::Encode` that rewrites the
+    /// body. An instance name or `instance.hook`. A hook of another phase
+    /// runs before this one already, and naming it stops the build.
     pub runs_after: Vec<String>,
 }
 
@@ -194,16 +190,15 @@ impl HookSource for Compression {
         self.config
             .check()
             .map_err(|why| PluginError::new(format!("compression: {why}")))?;
-        let mut order = Order::new();
-        for id in RUNS_AFTER
-            .iter()
-            .map(|id| id.to_string())
-            .chain(self.config.runs_after.iter().cloned())
-        {
-            order = order.before_if_present(id);
+        // First in `Encode`: response hooks leave a phase in reverse, so
+        // this one touches the body last.
+        let mut order = Order::new().first();
+        for id in &self.config.runs_after {
+            order = order.before_if_present(id.clone());
         }
         registrar.response(
             "encode",
+            Phase::Encode,
             order,
             Encode {
                 config: self.config.clone(),

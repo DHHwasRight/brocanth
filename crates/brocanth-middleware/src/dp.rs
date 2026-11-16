@@ -378,8 +378,9 @@ impl HookSource for DpSwap {
     type Families = Both<OnRequest, OnResponse>;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.request("read", brocanth::plugin_order::Order::new(), Hook);
-        registrar.response("vary", brocanth::plugin_order::Order::new(), Hook);
+        use brocanth::plugin_order::{Order, Phase};
+        registrar.request("read", Phase::Identify, Order::new(), Hook);
+        registrar.response("vary", Phase::Identify, Order::new(), Hook);
         Ok(())
     }
 }

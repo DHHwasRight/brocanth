@@ -91,7 +91,9 @@ impl HookSource for MethodOverride {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "rewrite",
-            // Before anything that reads the verb, which is everything.
+            // Before anything that reads the verb, which is everything:
+            // the guards run after every `Identify` hook.
+            brocanth::plugin_order::Phase::Identify,
             brocanth::plugin_order::Order::new(),
             Hook {
                 config: self.config.clone(),

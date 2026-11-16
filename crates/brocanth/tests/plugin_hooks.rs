@@ -18,7 +18,7 @@ use brocanth::plugin_hooks::{
     ResponseHook,
 };
 use brocanth::plugin_model::{ModelEvent, ModelHook};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{Handler, RouteBundle, RouteCx, RouteError, RouteSource};
 use brocanth::plugin_shutdown::{ShutdownCx, ShutdownPhase, ShutdownReason};
 use brocanth::routing::Verb;
@@ -176,8 +176,8 @@ impl HookSource for Trace {
             fail_before: self.fail_before,
             fail_response: self.fail_response,
         };
-        registrar.request("trace", self.order.clone(), hook());
-        registrar.response("rewrite", self.order.clone(), hook());
+        registrar.request("trace", Phase::Guard, self.order.clone(), hook());
+        registrar.response("rewrite", Phase::Guard, self.order.clone(), hook());
         Ok(())
     }
 }

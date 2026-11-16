@@ -70,12 +70,11 @@ impl HookSource for Gtag {
         if self.config.consent_log.is_some() {
             registrar.request(
                 "consent-log",
-                // After the locale is known, so the record can read the
-                // catalogs, and after the rate limiter, when present, so a
-                // flood is refused first.
-                brocanth::plugin_order::Order::new()
-                    .after_if_present("i18n.negotiate")
-                    .after_if_present("rate_limit.count"),
+                // `Guard`, so after the locale is known (`Identify`) and the
+                // record can read the catalogs. The rate limiter counts
+                // first in `Guard`, so a flood is refused before this hook.
+                brocanth::plugin_order::Phase::Guard,
+                brocanth::plugin_order::Order::new(),
                 Record {
                     log: Arc::clone(&self.log),
                     banner: self.config.banner.clone(),
@@ -86,6 +85,9 @@ impl HookSource for Gtag {
         let markup = self.config.markup();
         registrar.response(
             "insert",
+            // On the way out after `Cache` stored the page, before `Encode`
+            // tags and compresses it.
+            brocanth::plugin_order::Phase::Identify,
             brocanth::plugin_order::Order::new(),
             Insert {
                 config: self.config.clone(),

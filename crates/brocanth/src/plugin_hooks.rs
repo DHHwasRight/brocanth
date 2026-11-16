@@ -35,6 +35,11 @@
 //! after_dispatch    request hooks, reverse declared order   read-only
 //! ```
 //!
+//! "Declared order" is the order of the phases first, then the [`Order`]
+//! inside each phase: request hooks run `Identify`, `Guard`, `Cache`, and
+//! response hooks run `Cache`, `Guard`, `Identify`, `Encode`. See
+//! [`Phase`].
+//!
 //! Response hooks run inside-out, like an onion, so a hook declared *after*
 //! another sees the response *first*. That is what compression needs: an ETag
 //! hook ordered before it computes the tag over the body the client will
@@ -91,7 +96,7 @@ use std::marker::PhantomData;
 use crate::plugin_api::{Plugin, PluginError};
 use crate::plugin_body::{Body, Streaming};
 use crate::plugin_model::{ModelEvent, ModelHook, ModelHooks};
-use crate::plugin_order::{HookId, Order, Ordered};
+use crate::plugin_order::{HookId, Order, Ordered, Phase};
 use crate::plugin_routes::BoxFuture;
 
 /// The request a hook sees. Buffered, because the framework buffers: PLAN.md
@@ -793,23 +798,34 @@ impl<'a> HookRegistrar<'a> {
         true
     }
 
-    pub fn request(&mut self, name: &str, order: Order, hook: impl RequestHook) -> &mut Self {
+    /// A request hook, in `phase`. The [`Order`] places it inside that
+    /// phase; see [`Phase`] for the order of the phases.
+    pub fn request(
+        &mut self,
+        name: &str,
+        phase: Phase,
+        order: Order,
+        hook: impl RequestHook,
+    ) -> &mut Self {
         if self.is_off(name, Chain::Request) {
             return self;
         }
-        self.request.push(Ordered::new(
-            HookId::new(self.instance, name),
-            order,
-            RequestStep::Sync(Box::new(hook)),
-        ));
+        self.request.push(
+            Ordered::new(
+                HookId::new(self.instance, name),
+                order,
+                RequestStep::Sync(Box::new(hook)),
+            )
+            .in_phase(phase),
+        );
         self
     }
 
     /// A request hook that waits. See [`AsyncRequestHook`].
     ///
     /// It goes into the **same** list as [`HookRegistrar::request`], so an
-    /// `Order` may name a sync hook and be obeyed, and a sync hook may name
-    /// this one and be obeyed. The plugin must also name
+    /// `Order` may name a sync hook of its phase and be obeyed, and a sync
+    /// hook may name this one and be obeyed. The plugin must also name
     /// [`OnAsyncRequest`] in its [`HookSource::Families`]; it is the record
     /// that decides whether the chain survives compilation at all, so a hook
     /// registered here and missing from there fails the build rather than
@@ -817,29 +833,45 @@ impl<'a> HookRegistrar<'a> {
     pub fn request_async(
         &mut self,
         name: &str,
+        phase: Phase,
         order: Order,
         hook: impl AsyncRequestHook,
     ) -> &mut Self {
         if self.is_off(name, Chain::Request) {
             return self;
         }
-        self.request.push(Ordered::new(
-            HookId::new(self.instance, name),
-            order,
-            RequestStep::Async(Box::new(hook)),
-        ));
+        self.request.push(
+            Ordered::new(
+                HookId::new(self.instance, name),
+                order,
+                RequestStep::Async(Box::new(hook)),
+            )
+            .in_phase(phase),
+        );
         self
     }
 
-    pub fn response(&mut self, name: &str, order: Order, hook: impl ResponseHook) -> &mut Self {
+    /// A response hook, in `phase`. Response hooks run outward: `Cache`,
+    /// `Guard`, `Identify`, then `Encode`, so `Encode` sees the bytes the
+    /// client gets.
+    pub fn response(
+        &mut self,
+        name: &str,
+        phase: Phase,
+        order: Order,
+        hook: impl ResponseHook,
+    ) -> &mut Self {
         if self.is_off(name, Chain::Response) {
             return self;
         }
-        self.response.push(Ordered::new(
-            HookId::new(self.instance, name),
-            order,
-            Box::new(hook) as Box<dyn ResponseHook>,
-        ));
+        self.response.push(
+            Ordered::new(
+                HookId::new(self.instance, name),
+                order,
+                Box::new(hook) as Box<dyn ResponseHook>,
+            )
+            .in_phase(phase),
+        );
         self
     }
 
@@ -935,6 +967,28 @@ pub fn hook_names<P: HookSource>(plugin: &P) -> Result<Vec<String>, PluginError>
             });
     plugin.install_hooks(&mut registrar)?;
     Ok(seen)
+}
+
+/// The phase of each request and response hook `plugin` registers, in
+/// registration order: `[("count", Phase::Guard), ("headers",
+/// Phase::Encode)]`. An error or model hook has no phase and is not listed.
+///
+/// A test holds these to the phases the crate's scaffold manifest declares
+/// (`Hook::phase`), so `explain` cannot print a phase that does not run.
+pub fn hook_phases<P: HookSource>(plugin: &P) -> Result<Vec<(String, Phase)>, PluginError> {
+    let mut request = Vec::new();
+    let mut response = Vec::new();
+    let mut error = Vec::new();
+    let mut model = ModelHooks::new();
+    let mut registrar =
+        HookRegistrar::new(P::NAME, &mut request, &mut response, &mut error, &mut model);
+    plugin.install_hooks(&mut registrar)?;
+    let request = request.iter().map(|o| (o.id.name(), o.phase));
+    let response = response.iter().map(|o| (o.id.name(), o.phase));
+    Ok(request
+        .chain(response)
+        .filter_map(|(name, phase)| phase.map(|phase| (name.to_string(), phase)))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,7 +1100,7 @@ impl Pipeline {
     /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
     /// #     RequestState, Response,
     /// # };
-    /// # use brocanth::plugin_order::Order;
+    /// # use brocanth::plugin_order::{Order, Phase};
     /// # use brocanth::plugin_routes::BoxFuture;
     /// # struct Session;
     /// # impl Plugin for Session {
@@ -1068,7 +1122,7 @@ impl Pipeline {
     /// # impl HookSource for Session {
     /// #     type Families = OnAsyncRequest;
     /// #     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-    /// #         r.request_async("load", Order::new(), Session);
+    /// #         r.request_async("load", Phase::Identify, Order::new(), Session);
     /// #         Ok(())
     /// #     }
     /// # }
@@ -1093,7 +1147,7 @@ impl Pipeline {
     /// #     AsyncRequestHook, Flow, HookRegistrar, HookSource, OnAsyncRequest, Request,
     /// #     RequestState, Response,
     /// # };
-    /// # use brocanth::plugin_order::Order;
+    /// # use brocanth::plugin_order::{Order, Phase};
     /// # use brocanth::plugin_routes::BoxFuture;
     /// # struct Session;
     /// # impl Plugin for Session {
@@ -1115,7 +1169,7 @@ impl Pipeline {
     /// # impl HookSource for Session {
     /// #     type Families = OnAsyncRequest;
     /// #     fn install_hooks(&self, r: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-    /// #         r.request_async("load", Order::new(), Session);
+    /// #         r.request_async("load", Phase::Identify, Order::new(), Session);
     /// #         Ok(())
     /// #     }
     /// # }

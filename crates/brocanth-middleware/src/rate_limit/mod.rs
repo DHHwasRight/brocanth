@@ -95,7 +95,7 @@ use brocanth::plugin_hooks::{
     AsyncRequestHook, BodyShape, Both, Flow, HookRegistrar, HookSource, OnAsyncRequest, OnRequest,
     OnResponse, Request, RequestHook, RequestState, Response, ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::BoxFuture;
 use sha2::Digest as _;
 
@@ -246,9 +246,10 @@ pub struct RateLimitConfig {
     pub ip_header: Option<String>,
     /// The session cookie's name, for [`Key::Session`].
     pub session_cookie: Option<String>,
-    /// Hook ids this hook runs after, when they are installed: the hook
-    /// that puts a [`Subject`] on the state, for one.
-    /// `proxy-headers.read` is always in the list.
+    /// Hook ids in `Phase::Guard` this hook runs after, when they are
+    /// installed: the guard that puts a [`Subject`] on the state, for one.
+    /// A hook in `Identify` (the proxy reader) runs before this one
+    /// already, and naming it stops the build.
     pub after: Vec<String>,
     /// Let a request through when the store fails. One setting for every
     /// rule of this limiter.
@@ -300,7 +301,7 @@ impl RateLimitConfig {
         self
     }
 
-    /// Run after this hook id, when it is installed.
+    /// Run after this hook id of `Phase::Guard`, when it is installed.
     #[must_use]
     pub fn after(mut self, hook: impl Into<String>) -> Self {
         self.after.push(hook.into());
@@ -639,8 +640,10 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn order(config: &RateLimitConfig) -> Order {
-    // After the proxy reader, so `ClientInfo` is there to read.
-    let mut order = Order::new().after_if_present("proxy-headers.read");
+    // In `Guard`, so after the proxy reader (`Identify`) and `ClientInfo`
+    // is there to read. First in its phase, so a flood is refused before
+    // any other guard or hook that answers does work.
+    let mut order = Order::new().first();
     for hook in &config.after {
         order = order.after_if_present(hook.clone());
     }
@@ -709,6 +712,7 @@ impl HookSource for RateLimit {
             .map_err(|why| PluginError::new(format!("rate_limit: {why}")))?;
         registrar.request(
             "count",
+            Phase::Guard,
             order(&self.config),
             Local {
                 limiter: Limiter {
@@ -717,7 +721,7 @@ impl HookSource for RateLimit {
                 store: self.store.clone(),
             },
         );
-        registrar.response("headers", Order::new(), Headers);
+        registrar.response("headers", Phase::Encode, Order::new(), Headers);
         Ok(())
     }
 }
@@ -787,6 +791,7 @@ impl HookSource for SharedRateLimit {
             .map_err(|why| PluginError::new(format!("rate_limit: {why}")))?;
         registrar.request_async(
             "count",
+            Phase::Guard,
             order(&self.config.config),
             Remote {
                 limiter: Limiter {
@@ -795,7 +800,7 @@ impl HookSource for SharedRateLimit {
                 store: self.config.store.clone(),
             },
         );
-        registrar.response("headers", Order::new(), Headers);
+        registrar.response("headers", Phase::Encode, Order::new(), Headers);
         Ok(())
     }
 }

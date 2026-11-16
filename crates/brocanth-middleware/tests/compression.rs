@@ -12,7 +12,7 @@ use brocanth::plugin_hooks::{
     BodyShape, HookFamilies, HookRegistrar, HookSource, OnResponse, Request, RequestState,
     ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{Handler, RouteCx};
 use brocanth::routing::{Router, Verb};
 use brocanth_middleware::{Compression, CompressionConfig, ConditionalGet, ConditionalGetConfig};
@@ -402,7 +402,7 @@ impl HookSource for Inserter {
     type Families = OnResponse;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("insert", Order::new(), Insert);
+        registrar.response("insert", Phase::Identify, Order::new(), Insert);
         Ok(())
     }
 }
@@ -1073,7 +1073,9 @@ impl HookSource for Footer {
     type Families = OnResponse;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.response("append", Order::new(), Insert);
+        // First in `Encode`, as compression is: only `runs_after` puts it
+        // ahead of compression on the way out.
+        registrar.response("append", Phase::Encode, Order::new().first(), Insert);
         Ok(())
     }
 }

@@ -27,7 +27,7 @@ use brocanth::plugin_hooks::{
     BodyShape, Both, Flow, HookRegistrar, HookSource, OnRequest, OnResponse, Request, RequestHook,
     RequestState, ResponseHead, ResponseHook,
 };
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use http::header::{
     HeaderValue, ACCEPT, CONTENT_LANGUAGE, COOKIE, LOCATION, SET_COOKIE, UPGRADE, VARY,
 };
@@ -152,6 +152,7 @@ impl<L: Locales> HookSource for I18nHook<L> {
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
         registrar.request(
             "negotiate",
+            Phase::Identify,
             Order::new(),
             Negotiate {
                 negotiator: self.negotiator.clone(),
@@ -167,6 +168,7 @@ impl<L: Locales> HookSource for I18nHook<L> {
         };
         registrar.response(
             "content-language",
+            Phase::Identify,
             Order::new(),
             Stamp::<L> {
                 vary_cookie: config.cookie.is_some(),

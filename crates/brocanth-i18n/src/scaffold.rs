@@ -70,12 +70,12 @@ impl Module for I18n {
         .hook(
             "negotiate",
             "choose the request's locale before the page runs",
-            Hook::required(),
+            Hook::required().phase(brocanth_scaffold::Phase::Identify),
         )
         .hook(
             "content-language",
             "send Content-Language and Vary, and keep a locale the query chose in the cookie",
-            Hook::on(),
+            Hook::on().phase(brocanth_scaffold::Phase::Identify),
         )
         .absent(
             "brocanth-i18n",

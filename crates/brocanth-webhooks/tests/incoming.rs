@@ -9,7 +9,7 @@ use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_body::Body;
 use brocanth::plugin_context::{Base, NoContext};
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest};
-use brocanth::plugin_order::Order;
+use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{Handler as Route, RouteCx};
 use brocanth::routing::{Router, Verb};
 use brocanth_middleware::{Csrf, CsrfConfig};
@@ -56,11 +56,7 @@ impl HookSource for Hooks {
     type Families = OnAsyncRequest;
 
     fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
-        registrar.request_async(
-            "receive",
-            Order::new().before_if_present("csrf.check"),
-            self.receiver.clone(),
-        );
+        registrar.request_async("receive", Phase::Guard, Order::new(), self.receiver.clone());
         Ok(())
     }
 }
