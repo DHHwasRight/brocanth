@@ -29,14 +29,25 @@
 //! - `data/`: the cluster. It survives a restart. Delete the directory to
 //!   start from an empty database.
 //! - `password`: the superuser password, made at the first start.
+//! - `setup.lock`, `users.lock`: see [`EmbeddedPostgres::start`].
+//!
+//! One server per directory. Every [`EmbeddedPostgres`] on one directory
+//! shares it: the handles of one process through a registry keyed by the
+//! canonical directory, the processes through the two lock files. Tests
+//! that run in parallel, and a second terminal, join the running server.
+//! The last handle released stops it.
 //!
 //! Every call blocks. Each one runs on a thread of its own with its own
 //! runtime, so a plugin hook calls it on any runtime, current-thread
 //! included, and a command calls it with none.
 
 use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
+use std::fs::{File, TryLockError};
 use std::hash::{BuildHasher, Hasher};
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use postgresql_archive::configuration::theseus;
@@ -139,14 +150,17 @@ pub enum EmbeddedError {
     },
 }
 
-/// A running development server. Stop it with [`EmbeddedPostgres::stop`];
-/// a drop stops it too, without waiting for an answer.
+/// A handle on the development server of one directory. Release it with
+/// [`EmbeddedPostgres::stop`]; a drop releases it too.
+///
+/// Every handle on one directory shares one server, in this process and
+/// across processes. The last handle released stops it.
 pub struct EmbeddedPostgres {
-    /// `None` once stopped.
-    server: Option<PostgreSQL>,
+    /// `None` once released.
+    shared: Option<Arc<Mutex<Shared>>>,
+    dir: PathBuf,
     url: String,
     redacted: String,
-    version: String,
     data_dir: PathBuf,
 }
 
@@ -154,22 +168,59 @@ impl std::fmt::Debug for EmbeddedPostgres {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EmbeddedPostgres")
             .field("url", &self.redacted)
-            .field("version", &self.version)
+            .field("version", &POSTGRES_VERSION)
             .finish()
     }
 }
 
+/// The server of one directory, as this process sees it.
+#[derive(Default)]
+struct Shared {
+    /// The handles of this process that hold the server.
+    users: usize,
+    /// Set while `users > 0`.
+    running: Option<Running>,
+}
+
+struct Running {
+    /// The settings the server answers on: the port is the real one.
+    settings: Settings,
+    /// A shared lock on `users.lock`, held while this process uses the
+    /// server. The operating system drops it when the process dies.
+    _in_use: File,
+}
+
+/// One entry per canonical directory, for the life of the process.
+fn registry(dir: &Path) -> Arc<Mutex<Shared>> {
+    static REGISTRY: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<Shared>>>>> =
+        LazyLock::new(Mutex::default);
+    let mut map = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
+    map.entry(dir.to_path_buf()).or_default().clone()
+}
+
 impl EmbeddedPostgres {
-    /// Extracts the binaries on the first call, initialises the cluster if
-    /// `data/` is empty, starts the server and creates the database.
+    /// Joins the server of `config.dir`, or starts it.
     ///
-    /// A server that a killed process left running on the same `data/` is
-    /// stopped first, so a restart after `kill -9` works.
+    /// The first start installs the binaries and initialises `data/`. When
+    /// a handle of this process or of another process holds the server, the
+    /// call joins it: same port, same password. Otherwise it starts the
+    /// server. Every call creates `config.database` if it is missing.
+    ///
+    /// Two lock files in the directory order the processes:
+    ///
+    /// - `setup.lock`, exclusive, is held while a process installs,
+    ///   initialises, starts, joins or stops. A second process waits for the
+    ///   first to finish, and `initdb` runs once.
+    /// - `users.lock`, shared, is held by each process that uses the server.
+    ///   A process that dies, `kill -9` included, drops its lock. A server
+    ///   that runs while nobody holds `users.lock` is an orphan: the next
+    ///   start stops it and starts it again.
     ///
     /// # Errors
     ///
     /// [`EmbeddedError`], with a `help:` line, when a directory cannot be
-    /// written, the port is taken, or the server does not answer.
+    /// written, the archive cannot be installed, the port is taken, or the
+    /// server does not answer.
     pub fn start(config: &EmbeddedConfig) -> Result<Self, EmbeddedError> {
         if config.database.is_empty() {
             return Err(EmbeddedError::Config {
@@ -184,71 +235,43 @@ impl EmbeddedPostgres {
             source,
             help: "set `dir` under [db_embedded] to a directory this process can write",
         })?;
-        let settings = Settings {
-            installation_dir: dir.join("server"),
-            password_file: dir.join("password"),
-            data_dir: dir.join("data"),
-            host: "localhost".to_string(),
-            port: config.port,
-            password: password(&dir.join("password"))?,
-            version: pinned_version(),
-            // The cluster survives the process: a drop stops the server and
-            // keeps the files.
-            temporary: false,
-            timeout: Some(config.timeout),
-            ..settings_without_temp_dirs()
-        };
-        let data_dir = settings.data_dir.clone();
-        let database = config.database.clone();
-        on_own_runtime(move || async move {
-            install(&settings.installation_dir).await?;
-            let mut server = PostgreSQL::new(settings);
-            server.setup().await.map_err(|e| EmbeddedError::Server {
-                action: "set up",
-                message: e.to_string(),
-                help: format!(
-                    "delete {} to extract and initialise it again",
-                    data_dir.parent().unwrap_or(&data_dir).display()
-                ),
-            })?;
-            if server.status() == Status::Started {
-                // A `postmaster.pid` from a process that did not stop it:
-                // `pg_ctl stop` ends an orphan, and a stale file is removed
-                // by the next start.
-                let _ = server.stop().await;
-            }
-            server.start().await.map_err(|e| EmbeddedError::Server {
-                action: "start",
-                message: e.to_string(),
-                help: format!(
-                    "read {}; a taken port is fixed by `port = 0` under [db_embedded]",
-                    data_dir.join("start.log").display()
-                ),
-            })?;
-            let exists = server
-                .database_exists(&database)
-                .await
-                .map_err(|e| create_error(&e))?;
-            if !exists {
-                server
-                    .create_database(&database)
-                    .await
-                    .map_err(|e| create_error(&e))?;
-            }
-            let settings = server.settings();
-            let url = settings.url(&database);
-            let redacted = format!(
-                "postgresql://{}:<redacted>@{}:{}/{database}",
-                settings.username, settings.host, settings.port
-            );
-            let version = settings.version.to_string();
-            Ok(Self {
-                server: Some(server),
-                url,
-                redacted,
-                version: version.trim_start_matches('=').to_string(),
-                data_dir,
+        let dir = std::fs::canonicalize(&dir).map_err(|source| EmbeddedError::Io {
+            path: dir.display().to_string(),
+            source,
+            help: "set `dir` under [db_embedded] to a directory this process can read",
+        })?;
+        let shared = registry(&dir);
+        let (config, held) = (config.clone(), shared.clone());
+        let task_dir = dir.clone();
+        let url = on_own_runtime(move |runtime| {
+            let dir = task_dir;
+            // Held to the end: the handles of this process take turns.
+            let mut guard = held.lock().unwrap_or_else(PoisonError::into_inner);
+            let state: &mut Shared = &mut guard;
+            let _setup = lock_file(&dir.join("setup.lock"))?;
+            runtime.block_on(async {
+                if state.running.is_none() {
+                    state.running = Some(join_or_start(&dir, &config).await?);
+                }
+                state.users += 1;
+                let settings = state.running.as_ref().map(|r| r.settings.clone());
+                let settings = settings.expect("set above");
+                match ensure_database(&settings, &config.database).await {
+                    Ok(()) => Ok(settings.url(&config.database)),
+                    Err(e) => {
+                        let _ = release(state, &dir).await;
+                        Err(e)
+                    }
+                }
             })
+        })?;
+        let redacted = redact(&url);
+        Ok(Self {
+            shared: Some(shared),
+            data_dir: dir.join("data"),
+            dir,
+            url,
+            redacted,
         })
     }
 
@@ -264,7 +287,7 @@ impl EmbeddedPostgres {
 
     /// The server's version: [`POSTGRES_VERSION`].
     pub fn version(&self) -> &str {
-        &self.version
+        POSTGRES_VERSION
     }
 
     /// The cluster's directory.
@@ -272,8 +295,10 @@ impl EmbeddedPostgres {
         &self.data_dir
     }
 
-    /// Stops the server with `pg_ctl stop -m fast` and waits for it: open
-    /// connections are closed, and each transaction in flight rolls back.
+    /// Releases this handle. The last handle on the directory, in every
+    /// process, stops the server with `pg_ctl stop -m fast` and waits for it:
+    /// open connections are closed, and each transaction in flight rolls
+    /// back. Close the pool first.
     ///
     /// A server that already stopped is not an error: Ctrl-C in a terminal
     /// reaches the server too, and it stops on its own.
@@ -282,35 +307,244 @@ impl EmbeddedPostgres {
     ///
     /// [`EmbeddedError::Server`] when the server still runs after the call.
     pub fn stop(mut self) -> Result<(), EmbeddedError> {
-        let Some(server) = self.server.take() else {
+        self.release()
+    }
+
+    fn release(&mut self) -> Result<(), EmbeddedError> {
+        let Some(shared) = self.shared.take() else {
             return Ok(());
         };
-        let log = self.data_dir.join("start.log");
-        on_own_runtime(move || async move {
-            if server.status() != Status::Started {
-                return Ok(());
-            }
-            match server.stop().await {
-                Ok(()) => Ok(()),
-                Err(_) if server.status() != Status::Started => Ok(()),
-                Err(e) => Err(EmbeddedError::Server {
-                    action: "stop",
-                    message: e.to_string(),
-                    help: format!(
-                        "read {}; `pg_ctl stop -D <dir>/data` stops it by hand",
-                        log.display()
-                    ),
-                }),
-            }
+        let dir = self.dir.clone();
+        on_own_runtime(move |runtime| {
+            let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            let _setup = lock_file(&dir.join("setup.lock"))?;
+            runtime.block_on(release(&mut guard, &dir))
         })
     }
 }
 
 impl Drop for EmbeddedPostgres {
     fn drop(&mut self) {
-        // `PostgreSQL`'s own drop runs `pg_ctl stop -m fast` when the server
-        // runs, and keeps the files because `temporary` is false.
-        drop(self.server.take());
+        // A panic or an early error: release the server, and stop it when
+        // this was the last handle. Nobody reads an error here.
+        let _ = self.release();
+    }
+}
+
+/// Installs and initialises when needed, then joins the server another
+/// process runs, or starts it. The caller holds `setup.lock`.
+async fn join_or_start(dir: &Path, config: &EmbeddedConfig) -> Result<Running, EmbeddedError> {
+    let settings = Settings {
+        installation_dir: dir.join("server"),
+        password_file: dir.join("password"),
+        data_dir: dir.join("data"),
+        host: "localhost".to_string(),
+        port: config.port,
+        password: password(&dir.join("password"))?,
+        version: pinned_version(),
+        // The cluster survives the process: a stop keeps the files.
+        temporary: false,
+        timeout: Some(config.timeout),
+        ..settings_without_temp_dirs()
+    };
+    install(&settings.installation_dir).await?;
+    initialise(&settings).await?;
+    let users_file = dir.join("users.lock");
+    let users = open_lock(&users_file)?;
+    let lock_io = |source| EmbeddedError::Io {
+        path: users_file.display().to_string(),
+        source,
+        help: "set `dir` under [db_embedded] to a directory on a local disk",
+    };
+    let mut server = ManuallyDrop::new(PostgreSQL::new(settings));
+    let settings = match users.try_lock() {
+        Ok(()) => {
+            // No other process uses the server. A `postmaster.pid` is an
+            // orphan's, from a process killed with its server running, or a
+            // stale file: `pg_ctl stop` ends the one, the start removes the
+            // other.
+            if server.status() == Status::Started {
+                let _ = server.stop().await;
+            }
+            server.start().await.map_err(|e| EmbeddedError::Server {
+                action: "start",
+                message: e.to_string(),
+                help: format!(
+                    "read {}; a taken port is fixed by `port = 0` under [db_embedded]",
+                    dir.join("data/start.log").display()
+                ),
+            })?;
+            // Still under `setup.lock`: no process sees the switch.
+            users.unlock().map_err(lock_io)?;
+            server.settings().clone()
+        }
+        Err(TryLockError::WouldBlock) => {
+            // Another process holds the server and started it under
+            // `setup.lock`: take its port.
+            let mut settings = server.settings().clone();
+            settings.port = running_port(&settings.data_dir)?;
+            settings
+        }
+        Err(TryLockError::Error(source)) => return Err(lock_io(source)),
+    };
+    users.lock_shared().map_err(lock_io)?;
+    Ok(Running {
+        settings,
+        _in_use: users,
+    })
+}
+
+/// Drops one user. The last user of this process drops the process's
+/// `users.lock`, and stops the server when no other process holds one. The
+/// caller holds `setup.lock`.
+async fn release(state: &mut Shared, dir: &Path) -> Result<(), EmbeddedError> {
+    state.users = state.users.saturating_sub(1);
+    if state.users > 0 {
+        return Ok(());
+    }
+    let Some(Running {
+        settings,
+        _in_use: in_use,
+    }) = state.running.take()
+    else {
+        return Ok(());
+    };
+    drop(in_use);
+    let users = open_lock(&dir.join("users.lock"))?;
+    if users.try_lock().is_err() {
+        // Another process uses the server: it stops it.
+        return Ok(());
+    }
+    let server = ManuallyDrop::new(PostgreSQL::new(settings));
+    if server.status() != Status::Started {
+        return Ok(());
+    }
+    match server.stop().await {
+        Ok(()) => Ok(()),
+        Err(_) if server.status() != Status::Started => Ok(()),
+        Err(e) => Err(EmbeddedError::Server {
+            action: "stop",
+            message: e.to_string(),
+            help: format!(
+                "read {}; `pg_ctl stop -D {}` stops it by hand",
+                dir.join("data/start.log").display(),
+                dir.join("data").display()
+            ),
+        }),
+    }
+}
+
+/// Runs `initdb` once, into `data.partial/`, and renames it to `data/`: a
+/// process killed during `initdb` leaves no `data/` that looks initialised.
+/// The caller holds `setup.lock`.
+async fn initialise(settings: &Settings) -> Result<(), EmbeddedError> {
+    let data = &settings.data_dir;
+    if data.join("postgresql.conf").exists() {
+        return Ok(());
+    }
+    let io = |path: &Path, source| EmbeddedError::Io {
+        path: path.display().to_string(),
+        source,
+        help: "set `dir` under [db_embedded] to a directory this process can write",
+    };
+    if data.exists() {
+        // Empty: remove it so the rename succeeds. Not empty: refuse, the
+        // files are someone's.
+        std::fs::remove_dir(data).map_err(|_| EmbeddedError::Server {
+            action: "set up",
+            message: format!("{} has files but no cluster", data.display()),
+            help: format!(
+                "an initdb stopped halfway: delete {} and start again",
+                data.display()
+            ),
+        })?;
+    }
+    let partial = data.with_extension("partial");
+    if partial.exists() {
+        std::fs::remove_dir_all(&partial).map_err(|e| io(&partial, e))?;
+    }
+    let mut init = settings.clone();
+    init.data_dir.clone_from(&partial);
+    let mut server = ManuallyDrop::new(PostgreSQL::new(init));
+    server.setup().await.map_err(|e| EmbeddedError::Server {
+        action: "set up",
+        message: e.to_string(),
+        help: format!(
+            "delete {} to install and initialise it again",
+            data.parent().unwrap_or(data).display()
+        ),
+    })?;
+    std::fs::rename(&partial, data).map_err(|e| io(data, e))
+}
+
+/// Creates `database` when it is missing. The caller holds `setup.lock`,
+/// so two processes do not both create it.
+async fn ensure_database(settings: &Settings, database: &str) -> Result<(), EmbeddedError> {
+    let server = ManuallyDrop::new(PostgreSQL::new(settings.clone()));
+    let exists = server
+        .database_exists(database)
+        .await
+        .map_err(|e| create_error(&e))?;
+    if !exists {
+        server
+            .create_database(database)
+            .await
+            .map_err(|e| create_error(&e))?;
+    }
+    Ok(())
+}
+
+/// The port in `postmaster.pid`: its fourth line.
+fn running_port(data_dir: &Path) -> Result<u16, EmbeddedError> {
+    let file = data_dir.join("postmaster.pid");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    text.lines()
+        .nth(3)
+        .and_then(|line| line.trim().parse().ok())
+        .ok_or_else(|| EmbeddedError::Server {
+            action: "join the running server",
+            message: format!(
+                "another process uses {}, and {} names no port",
+                data_dir.display(),
+                file.display()
+            ),
+            help: "stop the other application on this `dir` and start again".to_string(),
+        })
+}
+
+fn open_lock(path: &Path) -> Result<File, EmbeddedError> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|source| EmbeddedError::Io {
+            path: path.display().to_string(),
+            source,
+            help: "set `dir` under [db_embedded] to a directory this process can write",
+        })
+}
+
+/// Opens `path` and locks it, exclusive; it waits for the lock.
+fn lock_file(path: &Path) -> Result<File, EmbeddedError> {
+    let file = open_lock(path)?;
+    file.lock().map_err(|source| EmbeddedError::Io {
+        path: path.display().to_string(),
+        source,
+        help: "set `dir` under [db_embedded] to a directory on a local disk",
+    })?;
+    Ok(file)
+}
+
+/// The URL with its password replaced.
+fn redact(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme), Some(at)) => {
+            let user_start = scheme + 3;
+            let user_end = url[user_start..at].find(':').map_or(at, |i| user_start + i);
+            format!("{}:<redacted>{}", &url[..user_end], &url[at..])
+        }
+        _ => "<redacted>".to_string(),
     }
 }
 
@@ -486,10 +720,9 @@ fn password(file: &Path) -> Result<String, EmbeddedError> {
 ///
 /// A plugin hook is synchronous and may run inside the application's
 /// runtime, where `block_on` panics. A thread of its own has no runtime.
-fn on_own_runtime<F, Fut, T>(work: F) -> Result<T, EmbeddedError>
+fn on_own_runtime<F, T>(work: F) -> Result<T, EmbeddedError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<T, EmbeddedError>>,
+    F: FnOnce(&tokio::runtime::Runtime) -> Result<T, EmbeddedError> + Send + 'static,
     T: Send + 'static,
 {
     std::thread::spawn(move || {
@@ -501,7 +734,7 @@ where
                 source,
                 help: "the process could not make a thread's runtime: check its limits",
             })?;
-        runtime.block_on(work())
+        work(&runtime)
     })
     .join()
     .unwrap_or_else(|_| {
@@ -526,6 +759,28 @@ mod tests {
         assert_eq!(made.len(), 32);
         assert_eq!(password(&file).expect("read"), made);
         std::fs::remove_dir_all(&dir).expect("removed");
+    }
+
+    #[test]
+    fn a_redacted_url_keeps_all_but_the_password() {
+        assert_eq!(
+            redact("postgresql://postgres:secret@localhost:5432/app"),
+            "postgresql://postgres:<redacted>@localhost:5432/app"
+        );
+    }
+
+    #[test]
+    fn the_port_is_the_fourth_line_of_postmaster_pid() {
+        let dir = std::env::temp_dir().join(format!("brocanth-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        std::fs::write(
+            dir.join("postmaster.pid"),
+            "123\n/data\n1700000000\n54321\n",
+        )
+        .expect("written");
+        assert_eq!(running_port(&dir).expect("a port"), 54321);
+        std::fs::remove_dir_all(&dir).expect("removed");
+        assert!(running_port(&dir).is_err());
     }
 
     #[test]

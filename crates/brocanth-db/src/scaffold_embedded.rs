@@ -8,7 +8,8 @@
 //! What a project gets:
 //!
 //! - `src/plugins/db_embedded/mod.rs`: the plugin. It refuses to start
-//!   outside `development` and `test`, and stops the server on shutdown.
+//!   outside `development` and `test`, and releases the server on
+//!   shutdown.
 //! - `brocanth-db` with the feature `embedded`, which installs one pinned
 //!   Postgres release at the first start. The build needs no network.
 //! - `[db_embedded]` in the config file: the directory, the port, the
@@ -111,6 +112,10 @@ The build needs no network. The first start installs Postgres
 file, for a machine with no network), the cache in `~/.theseus/postgresql`,
 or one download from GitHub (set `GITHUB_TOKEN` behind a rate limit).
 
+Every application started on `tmp/postgres` uses one server: tests that run
+in parallel, and a second terminal, join the server that runs. The last one
+to stop stops it.
+
 It is for development only. It refuses to start when `$<APP>_ENV` is not
 `development` or `test`, and `brocanth check --deploy` reports it. Before a
 deploy, run `brocanth remove db-embedded` and set `[db] url`.
@@ -128,7 +133,9 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! `configure` starts it, before the `db` plugin, and publishes its URL. The
 //! `db` plugin opens its pool on that URL and not on `[db] url`. `shutdown`
-//! stops the server after the pool closed.
+//! releases the server after the pool closed; the last user stops it.
+//! Applications on the same `dir`, in this process or another, share one
+//! server.
 //!
 //! Never in production: it refuses to start outside `development` and
 //! `test`, and `brocanth check --deploy` reports the module. Delete the
@@ -212,7 +219,8 @@ impl Plugin for DbEmbedded {{
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {{
         check_environment(&environment())?;
         // Blocks until the server answers: the first start installs the
-        // binaries and runs initdb, a few seconds; a later one starts it.
+        // binaries and runs initdb, a few seconds; a later one starts it, or
+        // joins the server another application on `dir` runs.
         let server = EmbeddedPostgres::start(&self.config)
             .map_err(|e| PluginError::new(format!("[db_embedded] {{e}}")))?;
         let version = server.version();

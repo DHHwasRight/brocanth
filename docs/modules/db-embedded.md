@@ -39,14 +39,45 @@ that has `db`.
   `tmp/postgres/data` and creates the database. It takes a few seconds. A
   later start only starts the server.
 - `shutdown` runs in reverse order: `db` closes its pool, then this plugin
-  stops the server with `pg_ctl stop -m fast` and waits for it. A drop of
-  the handle (a panic, an early error) stops it too.
+  releases the server. The last user stops it with `pg_ctl stop -m fast`
+  and waits for it. A drop of the handle (a panic, an early error) releases
+  it too.
 - The server is a child process that `pg_ctl` detaches. It listens on
   localhost only (`127.0.0.1` and `::1`). So Ctrl-C reaches the application,
   and the application stops the server; a server that stopped already is
   not an error.
 - A server left running by a killed process (`kill -9`) is stopped at the
   next start, so the start does not fail on a stale `postmaster.pid`.
+
+## One server per directory
+
+Every application started on one `dir` uses one server: the tests of a
+project, which build an application each and run in parallel, and a second
+terminal. Two servers on one `data/` cannot run: the second `pg_ctl start`
+fails, and a second `initdb` refuses a directory that is not empty.
+
+- **In one process**, a registry keyed by the canonical directory holds the
+  server and counts its users. The first start sets it up and starts it;
+  the others join it. Each start creates its own database if it is missing.
+  The last release stops it.
+- **Across processes**, two lock files in `dir` order the work:
+  - `setup.lock`, exclusive, while a process installs, runs `initdb`,
+    starts, joins or stops. A second process waits for the first, so
+    `initdb` runs once. `initdb` writes `data.partial/`, renamed to
+    `data/` when it is done.
+  - `users.lock`, shared, held by each process that uses the server. A
+    process that joins reads the port from `data/postmaster.pid` and the
+    password from `password`. A process that releases stops the server
+    only when no other process holds `users.lock`.
+- The operating system drops the locks of a dead process. A server that
+  runs while nobody holds `users.lock` is an orphan of a `kill -9`: the next
+  start stops it and starts it again.
+- The first start chooses the port. A process that joins uses that port,
+  whatever its own `port` says.
+
+**Reason:** one cluster has one postmaster. Sharing the running server is
+what a developer expects from `cargo test` and from a second terminal; a
+server per test would need a data directory per test and an `initdb` each.
 
 ## Never in production
 
@@ -132,6 +163,7 @@ machine, unless `BROCANTH_EMBEDDED_TEST=1` lets them download it.
 | `tmp/postgres/server/<version>/` | the extracted binaries: 270 MB on `aarch64-apple-darwin` | extracted once |
 | `tmp/postgres/data/` | the cluster; `start.log` is the server's log. 47 MB empty | survives a restart |
 | `tmp/postgres/password` | the superuser password, made at the first start | goes with `data/` |
+| `tmp/postgres/setup.lock`, `users.lock` | the locks of [One server per directory](#one-server-per-directory) | empty files |
 
 `[db_embedded] dir` moves all three. The path is relative to the working
 directory: `cargo run` starts in the project root. `.gitignore` gets
