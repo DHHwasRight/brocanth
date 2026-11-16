@@ -35,7 +35,7 @@ An option is set at build time in `src/modules/gtag.rs`. A setting is read at ru
 | Exports | none |
 | Hooks | `consent-log` (Guard, required): record each consent choice, while `consent_log` names a file; `insert` (Identify, required): put the banner and the tag into each HTML page |
 | Options (build time) | none |
-| Settings (run time) | `[gtag]`: `enabled`, `measurement_id`, `consent_mode`, `respect_gpc`, `consent_days`, `send_title`, `allow_params`, `exclude`, `cookie_domain`, `consent_log`, `banner.text`, `banner.accept`, `banner.refuse`, `banner.manage`, `banner.policy_url`, `banner.policy` |
+| Settings (run time) | `[gtag]`: `enabled`, `measurement_id`, `consent_mode`, `respect_gpc`, `consent_days`, `send_title`, `allow_params`, `exclude`, `cookie_domain`, `consent_log`, `consent_log_retention_days`, `banner.text`, `banner.accept`, `banner.refuse`, `banner.manage`, `banner.policy_url`, `banner.policy` |
 <!-- end generated: capabilities -->
 
 With [`i18n`](i18n.md), the banner's words come from the catalogs, in the
@@ -89,6 +89,7 @@ Section `[gtag]`. Environment variable: `$<APP>_GTAG__<KEY>` (a dot in the key i
 | `exclude` | list | `[]` | none (a list) | Paths that never get the tag, each with everything under it. With `admin`, the registration adds the admin's `mount_at`, read from `src/modules/admin.rs`. |
 | `cookie_domain` | text | `""` | `--gtag.cookie_domain` | The domain Google's cookies live on, such as `example.co.uk`; none lets the tag pick it. Empty means none. |
 | `consent_log` | text | `""` | `--gtag.consent_log` | A file each consent choice is appended to, such as `log/consent.jsonl`. Empty means none. A server only: a static export has no one to report a choice to. |
+| `consent_log_retention_days` | integer | `395` | `--gtag.consent_log_retention_days` | How long a line stays in the consent log, in days. About 13 months. The server drops older lines at the start and once a day: a consent record must outlive the choice it proves, but not keep personal data with no purpose. |
 | `banner.text` | text | English | `--gtag.banner.text` | The sentence the banner asks with. |
 | `banner.accept` | text | `"Accept"` | `--gtag.banner.accept` | The button that accepts. |
 | `banner.refuse` | text | `"Refuse"` | `--gtag.banner.refuse` | The button that refuses. |

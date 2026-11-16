@@ -73,6 +73,10 @@ pub const CONSENT_PATH: &str = "/__consent";
 /// reports cannot fill the disk.
 pub const CONSENT_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The default of [`GtagConfig::consent_log_retention_days`]: about 13
+/// months, a common retention for consent records.
+pub const CONSENT_LOG_RETENTION_DAYS: u32 = 395;
+
 /// How the tag waits for consent.
 pub const CONSENT_MODES: &[&str] = &["basic", "advanced"];
 
@@ -213,8 +217,16 @@ pub struct GtagConfig {
     /// The file is per instance: each server writes its own, and a
     /// container loses it when it stops, unless the path is on a volume
     /// that outlives it. A thread writes it, never the request. Past
-    /// [`CONSENT_LOG_MAX_BYTES`], it is rotated to `<file>.1`.
+    /// [`CONSENT_LOG_MAX_BYTES`], it is rotated to `<file>.1`. Lines older
+    /// than [`consent_log_retention_days`](Self::consent_log_retention_days)
+    /// are dropped.
     pub consent_log: Option<String>,
+    /// How long a line stays in the consent log, in days. The writer drops
+    /// older lines at the start and once a day, from the file and from
+    /// `<file>.1`. 395 days (about 13 months) by default: long enough to
+    /// show consent for the whole time a choice and its renewal apply,
+    /// short enough that the log does not keep records past their use.
+    pub consent_log_retention_days: u32,
     /// What the banner says.
     pub banner: Banner,
     /// With the `i18n` feature, the banner's words come from the request's
@@ -248,6 +260,7 @@ impl Default for GtagConfig {
             exclude: Vec::new(),
             cookie_domain: None,
             consent_log: None,
+            consent_log_retention_days: CONSENT_LOG_RETENTION_DAYS,
             banner: Banner::default(),
             translate: true,
         }
@@ -321,6 +334,13 @@ impl GtagConfig {
             return Err(
                 "[gtag] `consent_days` is 0, so the banner asks on every page\n\
                         help: use 182, the six months the CNIL recommends"
+                    .into(),
+            );
+        }
+        if self.consent_log_retention_days == 0 {
+            return Err(
+                "[gtag] `consent_log_retention_days` is 0, so the log keeps no record\n\
+                        help: use 395, about 13 months, or leave out `consent_log` to record nothing"
                     .into(),
             );
         }
