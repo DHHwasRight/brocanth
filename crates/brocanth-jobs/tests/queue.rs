@@ -380,10 +380,12 @@ async fn a_unique_key_prevents_a_duplicate(queue: Queue) {
 async fn shutdown_finishes_what_it_can_and_returns_the_rest(queue: Queue) {
     let token = token("shutdown");
 
+    // Long enough that the shutdown below finds it still running, and well
+    // inside the 2 s grace.
     let slow = queue
         .enqueue(Slow {
             token: token.clone(),
-            millis: 200,
+            millis: 1_000,
         })
         .await
         .expect("enqueue");
@@ -402,8 +404,12 @@ async fn shutdown_finishes_what_it_can_and_returns_the_rest(queue: Queue) {
         .start()
         .expect("start");
 
-    wait_for("both jobs to start", Duration::from_secs(5), || async {
-        queue.stats().await.expect("stats").running == 2
+    // Wait on what the jobs record, not on `stats().running == 2`. That
+    // count is 2 only while both run, so a poll slowed by load could miss
+    // the window and then wait for a 2 that never comes back.
+    wait_for("both jobs to start", Duration::from_secs(30), || async {
+        let seen = log(&token);
+        seen.contains(&"slow started".to_string()) && seen.contains(&"hang started".to_string())
     })
     .await;
 
