@@ -8447,7 +8447,7 @@ mod tests {
         let path = filed.join("config/development.toml");
         let toml = std::fs::read_to_string(&path).unwrap();
         let edited = toml
-            .replace("cookie = \"csrf_token\"", "cookie = \"xsrf_token\"")
+            .replace("cookie = \"__Host-csrf_token\"", "cookie = \"xsrf_token\"")
             .replace(
                 "# referrer_policy = \"strict-origin-when-cross-origin\"",
                 "referrer_policy = \"no-referrer\"",

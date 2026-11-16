@@ -3538,7 +3538,10 @@ absolute_timeout = 2592000
 
 [csrf]
 # The cookie this hook owns.
-cookie = "csrf_token"
+# Keep the `__Host-` prefix: a browser stores it only from this host,
+# over HTTPS, so a sibling subdomain cannot plant the cookie. With
+# `secure` off the prefix is dropped on the wire.
+cookie = "__Host-csrf_token"
 # The form field the token comes back in.
 field = "_csrf_token"
 # The header a fetch caller may send instead of the field. Empty means none.

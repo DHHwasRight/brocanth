@@ -238,7 +238,11 @@ impl Module for Csrf {
                 adjust: None,
             },
             vec![
-                Setting::text("cookie", "csrf_token", "The cookie this hook owns."),
+                Setting::text("cookie", "__Host-csrf_token", "The cookie this hook owns.").note(
+                    "Keep the `__Host-` prefix: a browser stores it only from this host,\n\
+                         over HTTPS, so a sibling subdomain cannot plant the cookie. With\n\
+                         `secure` off the prefix is dropped on the wire.",
+                ),
                 Setting::text(
                     "field",
                     "_csrf_token",
