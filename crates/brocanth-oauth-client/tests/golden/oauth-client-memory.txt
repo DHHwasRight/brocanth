@@ -3996,10 +3996,6 @@ fn key(settings: &Settings) -> Result<Key, PluginError> {
     }
 }
 
-/// The routes this run built, for [`mount`]. The route table is built
-/// before the plugins start, so a request reads them when it arrives.
-static ROUTES: OnceLock<ConnectRoutes> = OnceLock::new();
-
 /// Builds the client over the token store, puts it on the context and in
 /// the admin tab.
 pub struct OauthClientPlugin {
@@ -4038,8 +4034,6 @@ impl Plugin for OauthClientPlugin {
         let client = builder
             .build()
             .map_err(|e| PluginError::new(format!("[oauth_client] {e}")))?;
-        let secure = base.starts_with("https://");
-        let _ = ROUTES.set(ConnectRoutes::new(client.clone(), mount, secure));
         self.client = Some(client);
         Ok(())
     }
@@ -4052,13 +4046,48 @@ impl Plugin for OauthClientPlugin {
 }
 
 /// The connect pages, under `prefix`.
+///
+/// The route table is built before the plugins start, so the pages are
+/// built later, by the first request that carries the client on its
+/// context. The cell belongs to this table, not to the process: two
+/// applications in one process (two tests, say) each use their own client.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
     let prefix = prefix.trim_end_matches('/');
     let rest = format!("{prefix}/{{*rest}}");
-    routes.route(prefix, Verb::Get, step())?;
-    routes.route(&rest, Verb::Get, step())?;
-    routes.route(&rest, Verb::Post, step())?;
+    let pages = Arc::new(Pages {
+        prefix: prefix.to_string(),
+        routes: OnceLock::new(),
+    });
+    routes.route(prefix, Verb::Get, step(Arc::clone(&pages)))?;
+    routes.route(&rest, Verb::Get, step(Arc::clone(&pages)))?;
+    routes.route(&rest, Verb::Post, step(pages))?;
     Ok(())
+}
+
+/// The connect pages of one route table, built by its first request.
+struct Pages {
+    prefix: String,
+    routes: OnceLock<ConnectRoutes>,
+}
+
+impl Pages {
+    /// The pages, over the client the plugin put on this request.
+    fn for_request(&self, ctx: &Ctx) -> Result<&ConnectRoutes, Error> {
+        if let Some(routes) = self.routes.get() {
+            return Ok(routes);
+        }
+        let Some(client) = ctx.provided::<OauthClient, _>() else {
+            return Err(Error::new(
+                503,
+                "oauth_client: the plugin did not start\n\
+                 help: register it in src/plugins/mod.rs",
+            ));
+        };
+        let secure = client.callback_base().starts_with("https://");
+        Ok(self
+            .routes
+            .get_or_init(|| ConnectRoutes::new(client.clone(), &self.prefix, secure)))
+    }
 }
 
 /// The signed-in account, or `None`. An operator who impersonates a
@@ -4089,17 +4118,12 @@ async fn account(ctx: &Ctx) -> Result<Option<String>, Error> {
 }
 
 /// One handler for every page. The routes read the path and decide.
-fn step() -> Handler {
-    Box::new(|ctx: &mut Ctx| {
+fn step(pages: Arc<Pages>) -> Handler {
+    Box::new(move |ctx: &mut Ctx| {
+        let pages = Arc::clone(&pages);
         Box::pin(async move {
             let ctx = &*ctx;
-            let Some(routes) = ROUTES.get() else {
-                return Err(Error::new(
-                    503,
-                    "oauth_client: the plugin did not start\n\
-                     help: register it in src/plugins/mod.rs",
-                ));
-            };
+            let routes = pages.for_request(ctx)?;
             let account = account(ctx).await?;
             let request = ConnectRequest {
                 post: ctx.verb == Verb::Post,

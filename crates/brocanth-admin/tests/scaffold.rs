@@ -13,6 +13,15 @@ fn shape(name: &str, picks: &[&'static str]) {
     let files = brocanth_cli::testing::generate("my-blog", picks, MODULES)
         .unwrap_or_else(|e| panic!("{e}"));
     testing::assert_formatted(&files);
+    // The admin reads its settings on the request: nothing is process-wide.
+    let (_, plugin) = files
+        .iter()
+        .find(|(path, _)| path == "src/plugins/admin/mod.rs")
+        .expect("the admin's file");
+    assert!(
+        !plugin.lines().any(|line| line.starts_with("static ")),
+        "{plugin}"
+    );
     testing::golden(
         format!("{}/tests/golden/{name}.txt", env!("CARGO_MANIFEST_DIR")),
         &testing::snapshot(&files),

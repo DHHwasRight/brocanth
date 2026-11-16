@@ -57,6 +57,8 @@ impl Module for Mail {
             "mail",
             "send mail through SMTP, or to the log or a folder in development",
         )
+        // `PgPending` creates it on first use, when the project has a pool.
+        .tables(&["brocanth_mail_pending"])
         .category(Category::Enhancer)
         .uses::<JobQueue>(
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",

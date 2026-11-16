@@ -279,6 +279,21 @@ macro_rules! admin_source {
                 Self { db, entries }
             }
 
+            /// The source with no connection, for `backend`: the models and
+            /// their columns, and no row. An admin built over it checks its
+            /// configuration before the database is open, at start. A read
+            /// or a write through it fails.
+            #[allow(dead_code)]
+            $vis fn unconnected(backend: $crate::brocanth_model::sea_orm::DbBackend) -> Self {
+                let entries = ::std::vec![
+                    $($crate::entry_of::<$entity>($module, backend),)*
+                ];
+                Self {
+                    db: ::std::default::Default::default(),
+                    entries,
+                }
+            }
+
             /// The connection, for a caller that wants to share it.
             $vis fn connection(&self) -> &$crate::brocanth_model::sea_orm::DatabaseConnection {
                 &self.db

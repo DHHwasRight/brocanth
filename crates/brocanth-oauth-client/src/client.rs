@@ -395,6 +395,13 @@ impl OauthClient {
         self.inner.allow_http
     }
 
+    /// The callback base, without a trailing slash: what
+    /// [`Builder::callback_base`] set. A connect page reads it to know
+    /// whether the site is served over https.
+    pub fn callback_base(&self) -> &str {
+        &self.inner.callback_base
+    }
+
     /// The redirect URI to register at provider `id`.
     pub fn redirect_uri(&self, id: &str) -> String {
         format!("{}/{id}/callback", self.inner.callback_base)
@@ -1019,6 +1026,20 @@ mod tests {
         let text = format!("{token:?}");
         assert!(!text.contains("secret"), "{text}");
         assert!(!token.expires_within(0, 10), "no expiry never runs out");
+    }
+
+    #[test]
+    fn the_client_says_its_callback_base() {
+        let client = OauthClient::builder(Key::from_bytes([7; 32]))
+            .store(Arc::new(crate::MemoryTokenStore::new()))
+            .callback_base("https://example.com/connections/")
+            .build()
+            .expect("a client");
+        assert_eq!(client.callback_base(), "https://example.com/connections");
+        assert_eq!(
+            client.redirect_uri("github"),
+            "https://example.com/connections/github/callback"
+        );
     }
 
     #[test]

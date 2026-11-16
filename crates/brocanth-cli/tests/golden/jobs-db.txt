@@ -2908,13 +2908,13 @@ concurrency = 5
 //! `pages::mounted` calls [`mount`] with the prefix. A page at that prefix
 //! is therefore a build error, not a race.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use brocanth::plugin_api::Plugin;
-use brocanth::plugin_context::NoContext;
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use brocanth_admin::policy::Principal;
-use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, Submission};
+use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, SharedData, Submission};
 
 use crate::pages::{Ctx, Handler, Response};
 
@@ -2953,26 +2953,54 @@ impl Default for Settings {
     }
 }
 
-/// The settings this run chose, kept for [`mount`].
-///
-/// `mount` runs when the route table is built, after the plugins are, and
-/// takes no argument it could carry them in. A test that builds the table
-/// without the application gets the defaults.
-static CHOSEN: OnceLock<Settings> = OnceLock::new();
+/// The settings this application chose, on each request's context, for
+/// [`Later`]. They are this application's: a second application in this
+/// process reads its own.
+pub struct Chosen(Arc<Settings>);
 
-/// Holds the admin's settings. It puts nothing on the context.
-pub struct AdminSettings;
+impl ContextItem for Chosen {}
+
+/// Holds the admin's settings and puts them on the context.
+pub struct AdminSettings {
+    settings: Arc<Settings>,
+}
 
 impl Plugin for AdminSettings {
     type Config = Settings;
-    type Provides = NoContext;
+    type Provides = ProvidesContext<Chosen>;
     const NAME: &'static str = "admin";
 
     fn new(config: Settings) -> Self {
-        // The first application built in this process decides.
-        let _ = CHOSEN.set(config);
-        Self
+        Self {
+            settings: Arc::new(config),
+        }
     }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // A configuration the admin refuses stops the start: the first
+        // request builds the admin, and a deploy must not wait for it.
+        let (config, _late) = configured(crate::modules::admin::MODULE.mount_at);
+        check(check_source(), config, &self.settings)
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Chosen(Arc::clone(&self.settings)));
+    }
+}
+
+/// The admin's configuration under `prefix`, and the cells its tabs read.
+/// `mount` builds it, and `AdminSettings::configure` builds it to check it.
+fn configured(prefix: &str) -> (AdminConfig, LateCells<Ctx>) {
+    // The titles, the link and the theme come with the first request: see
+    // `Later`.
+    let mut config = AdminConfig::new().at(prefix);
+    // The tabs other modules add, such as analytics. Each one is on or off in
+    // the module file of the module that adds it: `integrate.admin`. A tab
+    // reads what a plugin builds at start through `late`, which `screen`
+    // fills from each request's context: no tab reads a global.
+    let mut late = LateCells::new();
+    config = crate::plugins::admin_panels(config, &mut late);
+    (config, late)
 }
 
 /// Every screen of the admin, under `prefix`.
@@ -2981,9 +3009,96 @@ impl Plugin for AdminSettings {
 /// The admin parses its own paths, so the table gives it the whole path and
 /// does not split it into twelve routes.
 pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), BuildError> {
-    let defaults = Settings::default();
-    let settings = CHOSEN.get().unwrap_or(&defaults);
-    let mut config = AdminConfig::new().titled(&settings.title).at(prefix);
+    let (config, late) = configured(prefix);
+    // Built by the first request: see `Later`.
+    let admin = Arc::new(Later::new(config));
+    let late = Arc::new(late);
+    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
+    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
+    for pattern in [prefix, rest.as_str()] {
+        routes.route(pattern, Verb::Get, handler())?;
+        routes.route(pattern, Verb::Post, handler())?;
+    }
+    Ok(())
+}
+
+/// The admin, built once, by the first request.
+///
+/// `mount` runs when the route table is built, before the plugins start,
+/// and takes no argument that could carry the settings. The first request
+/// carries them on its context, and the admin is built from them then.
+/// They are this application's and not the process's: two applications in
+/// one process (two tests, say) each build their own admin.
+///
+/// A configuration the admin refuses -- a row policy for a model that is not
+/// listed, say -- is kept with its `help:` line, and every request answers
+/// with that error until the configuration is fixed.
+///
+/// One per route table. The table `src/app.rs` builds only ever sees a
+/// request the application dispatched. A table a test builds sees a `Ctx`
+/// built by hand, with nothing on it: that admin has the default settings.
+struct Later {
+    config: Mutex<Option<AdminConfig>>,
+    built: OnceLock<Result<Arc<Admin>, String>>,
+}
+
+impl Later {
+    fn new(config: AdminConfig) -> Self {
+        Self {
+            config: Mutex::new(Some(config)),
+            built: OnceLock::new(),
+        }
+    }
+
+    /// The admin, built by the first request that asks, or the error that
+    /// build failed with.
+    fn for_request(&self, ctx: &Ctx) -> Result<Arc<Admin>, brocanth_admin::AdminError> {
+        let built = self.built.get_or_init(|| {
+            let Some(config) = self
+                .config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            else {
+                return Err("the admin's build stopped before it finished\n\
+                            help: read the first error the server printed"
+                    .to_string());
+            };
+            let defaults = Settings::default();
+            let settings = ctx
+                .provided::<Chosen, _>()
+                .map_or(&defaults, |chosen| &*chosen.0);
+            let config = branded(config, settings);
+            // An empty in-memory source: no models, so no rows to read. Put
+            // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
+            // over your database connection.
+            let admin = Admin::try_new(Arc::new(Fixture::new()), config);
+            admin.map(Arc::new).map_err(|e| match e {
+                brocanth_admin::AdminError::Config(message) => message,
+                other => other.to_string(),
+            })
+        });
+        built.clone().map_err(brocanth_admin::AdminError::Config)
+    }
+}
+
+/// Builds the admin once over `data`, and drops it: an error is the one
+/// `Admin::new` gives, with its `help:` line. `AdminSettings::configure`
+/// runs it, so a configuration the admin refuses never serves.
+fn check(data: SharedData, config: AdminConfig, settings: &Settings) -> Result<(), PluginError> {
+    Admin::try_new(data, branded(config, settings))
+        .map(drop)
+        .map_err(|e| PluginError::new(e.to_string()))
+}
+
+/// The data source [`check`] builds the admin over.
+fn check_source() -> SharedData {
+    Arc::new(Fixture::new())
+}
+
+/// `config` with the titles, the "View site" link and the theme.
+fn branded(mut config: AdminConfig, settings: &Settings) -> AdminConfig {
+    config = config.titled(&settings.title);
     if let Some(header) = &settings.header {
         config = config.headed(header);
     }
@@ -2996,34 +3111,14 @@ pub fn mount(routes: &mut RouterBuilder<Handler>, prefix: &str) -> Result<(), Bu
     if let Some(href) = &settings.stylesheet {
         config = config.stylesheet(href);
     }
-    // The tabs other modules add, such as analytics. Each one is on or off in
-    // the module file of the module that adds it: `integrate.admin`. A tab
-    // reads what a plugin builds at start through `late`, which `screen`
-    // fills from each request's context: no tab reads a global.
-    let mut late = LateCells::new();
-    config = crate::plugins::admin_panels(config, &mut late);
-    let admin = Arc::new(Admin::new(
-        // An empty in-memory source: no models, so no rows to read. Put
-        // your own `AdminData` here, or `brocanth_admin_model::admin_source!`
-        // over your database connection.
-        Arc::new(Fixture::new()),
-        config,
-    ));
-    let late = Arc::new(late);
-    let handler = || screen(Arc::clone(&admin), Arc::clone(&late));
-    let rest = format!("{}/{{*rest}}", prefix.trim_end_matches('/'));
-    for pattern in [prefix, rest.as_str()] {
-        routes.route(pattern, Verb::Get, handler())?;
-        routes.route(pattern, Verb::Post, handler())?;
-    }
-    Ok(())
+    config
 }
 
 /// One handler for every screen. The admin reads the path and decides.
 ///
 /// The admin is async because a database is, and so is a handler in this
 /// table: the answer is awaited and holds no thread while it waits.
-fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
+fn screen(admin: Arc<Later>, late: Arc<LateCells<Ctx>>) -> Handler {
     Box::new(move |ctx: &mut Ctx| {
         let admin = Arc::clone(&admin);
         let late = Arc::clone(&late);
@@ -3032,6 +3127,7 @@ fn screen(admin: Arc<Admin>, late: Arc<LateCells<Ctx>>) -> Handler {
             // Each tab's handle, from the context the plugins put on this
             // request, the first time it is there.
             late.fill(ctx);
+            let admin = admin.for_request(ctx)?;
             // HEAD reaches the GET handler, and the admin knows two verbs.
             let method = match ctx.verb {
                 Verb::Post => "POST",
@@ -3098,6 +3194,39 @@ mod tests {
         let mut ctx = Ctx::new(Verb::Get, at, matched.params());
         let answer = handler(&mut ctx).await.expect("the admin answers");
         assert_eq!(answer.status, 403);
+    }
+
+    /// The application's admin is built from the settings its plugin put on
+    /// the request, and not from a process-wide global.
+    #[tokio::test]
+    async fn the_admin_shows_this_applications_title() {
+        let app = crate::app::build().expect("the application builds");
+        let at = crate::modules::admin::MODULE.mount_at;
+        let response = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, at)).await;
+        assert_eq!(response.status, 403);
+        let body = response.body.bytes().expect("a whole body");
+        let body = std::str::from_utf8(body).expect("utf-8");
+        let title = super::Settings::default().title;
+        assert!(body.contains(&title), "{body}");
+    }
+
+    /// A configuration the admin refuses stops the start, with its `help:`
+    /// line: `AdminSettings::configure` runs this check.
+    #[test]
+    fn a_configuration_the_admin_refuses_fails_at_start() {
+        let (config, _late) = super::configured(crate::modules::admin::MODULE.mount_at);
+        let config = config.model("post", |m| {
+            m.action(brocanth_admin::actions::BulkAction::set(
+                "nope",
+                "Nope",
+                [("no_such_column", true)],
+            ))
+        });
+        let data = std::sync::Arc::new(brocanth_admin::Fixture::blog());
+        let error = super::check(data, config, &super::Settings::default())
+            .expect_err("the admin refuses an action on a missing column");
+        assert!(error.0.contains("no_such_column"), "{}", error.0);
+        assert!(error.0.contains("help:"), "{}", error.0);
     }
 }
 ===== src/plugins/db/mod.rs =====
