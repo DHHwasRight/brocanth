@@ -2814,6 +2814,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "rsx", "meta"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2838,4 +2840,4 @@ config = ["meta"]
 crates = ["brocanth-meta"]
 adapted_to = ["config", "rsx"]
 
-# brocanth-digest: 13fc818824e64642
+# brocanth-digest: 6ded1f9d4b249bdc

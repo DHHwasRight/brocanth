@@ -3331,6 +3331,7 @@ enabled = ["config", "db", "cache", "cache-redis", "admin"]
 
 [bindings]
 PgPool = { provider = "db", why = "chosen" }
+CacheStore = { provider = "cache", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -3372,4 +3373,4 @@ config = ["admin"]
 crates = ["brocanth-admin"]
 adapted_to = ["config"]
 
-# brocanth-digest: 803e3d66e921a515
+# brocanth-digest: d1dcff3348ffb0bc

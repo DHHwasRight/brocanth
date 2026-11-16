@@ -2340,6 +2340,8 @@ title = "My Blog"
 [modules]
 enabled = ["logging"]
 
+[bindings]
+
 [modules.logging]
 version = "0.1.0"
 kind = ["middleware"]
@@ -2348,4 +2350,4 @@ config = ["logging"]
 crates = []
 adapted_to = []
 
-# brocanth-digest: eb6eccbff47ec3d4
+# brocanth-digest: 022edc6bceb3f5da

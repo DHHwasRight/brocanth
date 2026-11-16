@@ -2563,6 +2563,8 @@ title = "My Shop"
 [modules]
 enabled = ["config", "webhooks", "webhooks-in"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2587,4 +2589,4 @@ config = ["webhooks_in"]
 crates = ["brocanth-webhooks", "serde"]
 adapted_to = ["config"]
 
-# brocanth-digest: cb63aa99231f1688
+# brocanth-digest: 41a21281428ee0b2

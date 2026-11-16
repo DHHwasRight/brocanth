@@ -21,7 +21,8 @@
 
 use brocanth_scaffold::snippet::{configurable_hooking, integration, Hooking};
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, Hook, Manifest, Module, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 /// The change history, as a choice on the `brocanth create` menu.
@@ -46,6 +47,8 @@ impl Module for Audit {
             "Change history: who changed which row, and when",
         )
         .requires::<PgPool>("the history is rows in the database the `db` module opens; in memory a restart would lose it")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[audit]`")
+        .contributes::<AgentsSection>("how a change is recorded, and what never to record")
         .needs(
             "model",
             "it records the changes the model layer publishes, and without `model` there are none",
@@ -91,6 +94,8 @@ impl Module for Audit {
         if project.has("admin") {
             integration(s, "audit", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        s.at(Slot::ConfigChecks)
+            .line(r#"Entry::migrates("audit", "`brocanth_audit::PgStore::SCHEMA`"),"#);
         s.at(Slot::AgentsSections).block(AGENTS.to_string());
     }
 }

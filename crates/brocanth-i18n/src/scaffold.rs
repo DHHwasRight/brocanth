@@ -18,7 +18,9 @@
 //! export sends no `Accept-Language` and a file cannot vary by request.
 
 use brocanth_scaffold::snippet::{configurable_hooking, module_ref, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// Translations checked at build time, and a locale per request.
 pub struct I18n;
@@ -29,6 +31,7 @@ impl Module for I18n {
             "i18n",
             "translations checked at build time; a locale per request from the query, a cookie or Accept-Language",
         )
+        .contributes::<AgentsSection>("how a text is translated")
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -192,6 +195,7 @@ impl Module for I18nRouting {
             "i18n-routing",
             "a locale segment in the path (/fr/about), a redirect from a path without one",
         )
+        .contributes::<AgentsSection>("how a link keeps the locale in its path")
         .category(Category::Middleware)
         .category(Category::Renderer)
         .part_of_but_off("i18n")

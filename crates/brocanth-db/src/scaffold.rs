@@ -20,7 +20,7 @@
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 pub use crate::scaffold_embedded::DbEmbedded;
@@ -38,6 +38,7 @@ impl Module for Database {
             "db",
             "one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver",
         )
+        .contributes::<AgentsSection>("how a page reads the pool, and how a migration is written")
         .category(Category::Enhancer)
         // The pool goes on the request context.
         .category(Category::Middleware)

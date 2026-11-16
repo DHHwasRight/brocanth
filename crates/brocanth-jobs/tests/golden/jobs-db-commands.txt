@@ -1451,6 +1451,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
+        // JobQueue <- jobs (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
@@ -2026,7 +2027,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 076bddd80ce44fca
+// brocanth-digest: 5dad9315e3574c38
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2471,7 +2472,18 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: a0c603171d98aeb8
+/// The checks this project's modules add to `check --deploy`, one per
+/// module that contributes `ConfigCheck`. `brocanth add` and `brocanth
+/// remove` rewrite this list with the modules.
+pub fn config_checks() -> Vec<brocanth_config::check::Entry> {
+    use brocanth_config::check::Entry;
+    vec![
+        // jobs
+        Entry::migrates("jobs", "`Queue::schema_sql`"),
+    ]
+}
+
+// brocanth-digest: 1e1285f0bd50d700
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
@@ -2535,7 +2547,10 @@ impl Command for Check {
             env: self.env,
             allow: self.allow,
         };
-        let report = check::run(crate::app::APP, ctx.root(), &options)?;
+        // The checks this project's modules contribute, written by
+        // `brocanth` into src/commands/mod.rs.
+        let checks = super::config_checks();
+        let report = check::run_with(crate::app::APP, ctx.root(), &options, &checks)?;
         eprint!("{report}");
         if report.failed(self.strict) {
             std::process::exit(1);
@@ -3573,6 +3588,7 @@ enabled = ["config", "db", "jobs", "commands"]
 
 [bindings]
 PgPool = { provider = "db", why = "jobs requires PgPool" }
+JobQueue = { provider = "jobs", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -3606,4 +3622,4 @@ config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: f3d3e394d18a13d5
+# brocanth-digest: 346145feab62300f

@@ -2633,6 +2633,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "rsx-htmx"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2649,4 +2651,4 @@ config = []
 crates = ["brocanth-assets"]
 adapted_to = []
 
-# brocanth-digest: 6328d992f6a516f3
+# brocanth-digest: 87bf67d24144e659

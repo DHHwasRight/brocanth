@@ -4396,6 +4396,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "rsx", "admin", "middleware", "middleware-csrf", "storage", "storage-routes", "i18n", "i18n-routing"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -4468,4 +4470,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: d837032036c3c9cb
+# brocanth-digest: 70487e6971f81ab1

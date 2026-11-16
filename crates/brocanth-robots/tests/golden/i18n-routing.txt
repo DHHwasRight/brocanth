@@ -3396,6 +3396,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "i18n", "i18n-routing", "robots", "sitemap"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3436,4 +3438,4 @@ config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["config", "i18n-routing"]
 
-# brocanth-digest: fe9959bd54dde35e
+# brocanth-digest: 075d9a7663980880

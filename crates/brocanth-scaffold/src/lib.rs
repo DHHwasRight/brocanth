@@ -68,7 +68,9 @@ pub mod kind;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use kind::{KindRef, PgPool, Requirement};
+pub use kind::{
+    AgentsSection, CacheStore, ConfigCheck, JobQueue, KindRef, PgPool, Requirement, SessionCookie,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -291,6 +293,32 @@ pub struct Manifest {
     ///
     /// [`adapts_to`]: Manifest::adapts_to
     pub uses: Vec<(KindRef, &'static str)>,
+    /// The contribution points this module adds to, each with what it adds.
+    /// Set with [`Manifest::contributes`].
+    ///
+    /// A Kind of cardinality many: many modules contribute, one reader
+    /// collects. The module writes its entry into the Kind's slot
+    /// ([`Slot::contribution`]); a test holds the slot and the declaration
+    /// to each other.
+    pub contributes: Vec<(KindRef, &'static str)>,
+    /// The facts other modules may read, by name. Set with
+    /// [`Manifest::exports`] and read with [`Project::export`].
+    ///
+    /// The contract between two modules: a reader names the export, not a
+    /// copy of the value, so the owner can move it and no reader changes.
+    pub exports: Vec<Export>,
+}
+
+/// A fact a module gives other modules to read: a name, the values and what
+/// they are. See [`Manifest::exports`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Export {
+    /// The name a reader asks for: `sign_in_posts`.
+    pub name: &'static str,
+    /// The values, as generated text writes them: `/account/signin`.
+    pub values: &'static [&'static str],
+    /// What they are, in one line.
+    pub what: &'static str,
 }
 
 impl Manifest {
@@ -323,6 +351,8 @@ impl Manifest {
             provides: Vec::new(),
             requires: Vec::new(),
             uses: Vec::new(),
+            contributes: Vec::new(),
+            exports: Vec::new(),
         }
     }
 
@@ -363,6 +393,36 @@ impl Manifest {
     /// [`Project::provider`] about that is not required.
     pub fn uses<K: kind::Kind>(mut self, what_changes: &'static str) -> Self {
         self.uses.push((KindRef::of::<K>(), what_changes));
+        self
+    }
+
+    /// Add to the contribution point `K`, and say what is added.
+    ///
+    /// `K` takes many contributors ([`Cardinality::Many`]); write the entry
+    /// into its slot ([`Slot::contribution`]) in `contribute`. A Kind that
+    /// takes one provider is [`provides`](Manifest::provides).
+    ///
+    /// [`Cardinality::Many`]: kind::Cardinality::Many
+    pub fn contributes<K: kind::Kind>(mut self, what: &'static str) -> Self {
+        self.contributes.push((KindRef::of::<K>(), what));
+        self
+    }
+
+    /// Whether this module contributes to the Kind named `kind`.
+    pub fn adds_to(&self, kind: &str) -> bool {
+        self.contributes.iter().any(|(k, _)| k.name == kind)
+    }
+
+    /// Give other modules a fact to read: `values` under `name`, and what
+    /// they are. A reader asks [`Project::export`] and adapts to this
+    /// module, so the value has one home.
+    pub fn exports(
+        mut self,
+        name: &'static str,
+        values: &'static [&'static str],
+        what: &'static str,
+    ) -> Self {
+        self.exports.push(Export { name, values, what });
         self
     }
 
@@ -1055,6 +1115,11 @@ pub struct Project<'a> {
     mounts: &'a [(&'a str, &'a str)],
     /// The provider bound to each Kind, as `(Kind name, module key)`.
     bindings: &'a [(&'a str, &'a str)],
+    /// What each module exports, as `(module key, export)`.
+    exports: &'a [(&'a str, Export)],
+    /// Every export asked for through [`Project::export`], as `(module
+    /// key, name)`, in order.
+    asked_exports: std::cell::RefCell<Vec<(String, &'static str)>>,
     /// Every Kind asked about through [`Project::provider`], in order.
     asked_kinds: std::cell::RefCell<Vec<&'static str>>,
     /// Keys asked about that no module declares. Collected rather than
@@ -1077,6 +1142,8 @@ impl<'a> Project<'a> {
             known,
             mounts: &[],
             bindings: &[],
+            exports: &[],
+            asked_exports: std::cell::RefCell::new(Vec::new()),
             asked_kinds: std::cell::RefCell::new(Vec::new()),
             unknown: std::cell::RefCell::new(Vec::new()),
             asked: std::cell::RefCell::new(Vec::new()),
@@ -1096,6 +1163,39 @@ impl<'a> Project<'a> {
     pub fn with_bindings(mut self, bindings: &'a [(&'a str, &'a str)]) -> Self {
         self.bindings = bindings;
         self
+    }
+
+    /// Give the view what each module exports, as `(module key, export)`.
+    /// The CLI passes every module's [`Manifest::exports`]; a view without
+    /// them answers every [`Project::export`] with `None`.
+    pub fn with_exports(mut self, exports: &'a [(&'a str, Export)]) -> Self {
+        self.exports = exports;
+        self
+    }
+
+    /// The values `key` exports under `name`, when `key` is chosen.
+    ///
+    /// The question a module asks instead of copying another module's
+    /// facts: rate-limit reads the sign-in paths `auth-screens` exports.
+    /// It counts as asking about `key`, so declare `adapts_to(key, ..)`.
+    /// The CLI refuses a name `key` does not export.
+    pub fn export(&self, key: &str, name: &'static str) -> Option<&'static [&'static str]> {
+        if !self.has(key) {
+            return None;
+        }
+        self.asked_exports
+            .borrow_mut()
+            .push((key.to_string(), name));
+        self.exports
+            .iter()
+            .find(|(owner, export)| *owner == key && export.name == name)
+            .map(|(_, export)| export.values)
+    }
+
+    /// Every export asked for through [`Project::export`], as `(module key,
+    /// name)`, in order.
+    pub fn asked_exports(&self) -> Vec<(String, &'static str)> {
+        self.asked_exports.borrow().clone()
     }
 
     /// The module that provides the Kind `K` in this project, or `None`.
@@ -1377,12 +1477,29 @@ pub enum Slot {
     /// `AGENTS.md`, one `##` section per module that has a rule a coding
     /// agent must follow. The sections land after "Adding a route", before
     /// the generic sections, in the order the modules contribute.
+    ///
+    /// The contribution point of [`AgentsSection`](kind::AgentsSection): a
+    /// module that writes here declares
+    /// `.contributes::<AgentsSection>(..)`, and writes only its own
+    /// section, never one about another module.
     AgentsSections,
+    /// One entry per line for `check --deploy`: an expression of
+    /// `brocanth_config::check::Entry`, which is in scope as `Entry`, with
+    /// a trailing comma: ``Entry::migrates("jobs", "`Queue::schema_sql`"),``.
+    ///
+    /// The contribution point of [`ConfigCheck`](kind::ConfigCheck). The
+    /// lines land in `config_checks` in `src/commands/mod.rs`, which the
+    /// generated `check` command reads, so the check runs on the code the
+    /// binary is built from. Without `config` and `commands` there is no
+    /// `check` command, and the lines are not written. Write one only when
+    /// the module's default needs it: `jobs` with `jobs-memory` creates no
+    /// tables, so it writes none.
+    ConfigChecks,
 }
 
 impl Slot {
     /// Every slot, in declaration order.
-    pub const ALL: [Slot; 21] = [
+    pub const ALL: [Slot; 22] = [
         Slot::AppUses,
         Slot::AppPlugins,
         Slot::AppSetup,
@@ -1404,7 +1521,20 @@ impl Slot {
         Slot::MiseTasks,
         Slot::NodeDependencies,
         Slot::AgentsSections,
+        Slot::ConfigChecks,
     ];
+
+    /// The contribution Kind whose entries land in this slot, by name: a
+    /// module that writes here declares
+    /// [`Manifest::contributes`] with it.
+    pub fn contribution(self) -> Option<&'static str> {
+        use kind::Kind;
+        match self {
+            Slot::AgentsSections => Some(kind::AgentsSection::NAME),
+            Slot::ConfigChecks => Some(kind::ConfigCheck::NAME),
+            _ => None,
+        }
+    }
 
     /// The categories whose modules may write here. Empty means any
     /// module: settings, `.gitignore` lines and agent rules are not a
@@ -1435,7 +1565,11 @@ impl Slot {
             Slot::RouterMounts | Slot::PagesRoutes => &[Routes],
             Slot::CommandsMod => &[Enhancer],
             Slot::MiseTasks | Slot::NodeDependencies => &[External],
-            Slot::ConfigSections | Slot::GitIgnore | Slot::AgentsSections | Slot::MainMods => &[],
+            Slot::ConfigSections
+            | Slot::GitIgnore
+            | Slot::AgentsSections
+            | Slot::ConfigChecks
+            | Slot::MainMods => &[],
         }
     }
 }
@@ -1464,6 +1598,7 @@ impl fmt::Display for Slot {
             Slot::MiseTasks => "mise.toml",
             Slot::NodeDependencies => "package.json",
             Slot::AgentsSections => "AGENTS.md",
+            Slot::ConfigChecks => "src/commands/mod.rs (config_checks)",
         };
         f.write_str(name)
     }
@@ -2134,6 +2269,42 @@ pub fn order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_export_is_read_only_from_a_chosen_module_and_counts_as_asking() {
+        let exports = [(
+            "screens",
+            Export {
+                name: "paths",
+                values: &["/signin"],
+                what: "the paths",
+            },
+        )];
+        let known = ["screens", "limit"];
+        let on = ["screens", "limit"];
+        let project = Project::new("a", "A", &on, &known).with_exports(&exports);
+        assert_eq!(project.export("screens", "paths"), Some(&["/signin"][..]));
+        assert_eq!(project.export("screens", "other"), None);
+        assert_eq!(project.asked_keys(), ["screens", "screens"]);
+        assert_eq!(
+            project.asked_exports(),
+            [
+                ("screens".to_string(), "paths"),
+                ("screens".to_string(), "other")
+            ]
+        );
+        let alone = ["limit"];
+        let project = Project::new("a", "A", &alone, &known).with_exports(&exports);
+        assert_eq!(project.export("screens", "paths"), None);
+        assert!(project.asked_exports().is_empty());
+    }
+
+    #[test]
+    fn a_contribution_slot_names_its_kind() {
+        assert_eq!(Slot::AgentsSections.contribution(), Some("AgentsSection"));
+        assert_eq!(Slot::ConfigChecks.contribution(), Some("ConfigCheck"));
+        assert_eq!(Slot::AppPlugins.contribution(), None);
+    }
 
     #[test]
     fn a_toml_value_uses_toml_escapes_and_not_rust_debug() {

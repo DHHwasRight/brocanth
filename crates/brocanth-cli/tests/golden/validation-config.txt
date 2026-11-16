@@ -2383,6 +2383,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "validation"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2399,4 +2401,4 @@ config = ["validation"]
 crates = ["brocanth-schema"]
 adapted_to = ["config"]
 
-# brocanth-digest: 91a23960296a3167
+# brocanth-digest: dac44a62d345abad

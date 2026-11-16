@@ -21,7 +21,7 @@
 //!   sign-in handler.
 
 use brocanth_scaffold::snippet::module_ref;
-use brocanth_scaffold::{Category, Manifest, Module, Opt, Project, Scaffold, Slot};
+use brocanth_scaffold::{AgentsSection, Category, Manifest, Module, Opt, Project, Scaffold, Slot};
 
 /// Account lockout, as a choice inside `auth`.
 pub struct AuthLockout;
@@ -31,6 +31,9 @@ impl Module for AuthLockout {
         Manifest::new(
             "auth-lockout",
             "locks an account for minutes after too many wrong passwords",
+        )
+        .contributes::<AgentsSection>(
+            "how wrong passwords lock an account, and what lifts the lock",
         )
         .category(Category::Enhancer)
         .part_of_but_off("auth")

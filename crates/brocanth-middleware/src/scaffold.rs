@@ -56,7 +56,9 @@
 //! [`snippet::configurable_hooking`]: brocanth_scaffold::snippet::configurable_hooking
 
 use brocanth_scaffold::snippet::{configurable_hooking, Hooking};
-use brocanth_scaffold::{Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Hook, Manifest, Module, Project, Scaffold, Setting, Slot,
+};
 
 /// The edge hooks, as a choice on the `brocanth create` menu.
 pub struct Middleware;
@@ -71,6 +73,7 @@ impl Module for Middleware {
             "middleware",
             "proxy headers, method override, canonical host, content types, CORS",
         )
+        .contributes::<AgentsSection>("which edge middleware is registered, and where")
         .category(Category::Middleware)
         .asked_in("doors", "The edge hooks: proxies, CORS, a canonical host")
         .krate(Dep::brocanth("brocanth-middleware").feature_with("config", "config"))
@@ -184,6 +187,7 @@ impl Module for Csrf {
             "middleware-csrf",
             "a double-submit cookie, checked on every verb that is not a read",
         )
+        .contributes::<AgentsSection>("every form carries the CSRF token")
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -311,6 +315,7 @@ impl Module for SecurityHeaders {
             "middleware-security-headers",
             "HSTS, nosniff, a referrer policy, no framing, a CSP that runs dp-swap by hash",
         )
+        .contributes::<AgentsSection>("how to inline a script under the Content-Security-Policy")
         .category(Category::Middleware)
         .adapts_to("admin", "the CSP allows the admin's inline script by hash")
         .adapts_to(
@@ -468,6 +473,7 @@ impl Module for RateLimit {
             "middleware-rate-limit",
             "a fixed window per address, session or user, per group of routes; 429 with Retry-After",
         )
+        .contributes::<AgentsSection>("the example rule, and that a limit is asked for, not invented")
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -475,7 +481,7 @@ impl Module for RateLimit {
         )
         .adapts_to(
             "auth-screens",
-            "the example rule covers the sign-in, second-factor and password-check posts; without it the rule is written commented out",
+            "the example rule covers the paths `auth-screens` exports as `sign_in_posts`; without it the rule is written commented out",
         )
         .asked_in("doors", "Limit how often one caller may hit a route")
         .part_of_but_off("middleware")
@@ -498,18 +504,25 @@ impl Module for RateLimit {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         // The example rule guards the sign-in form, and only `auth-screens`
-        // serves one. Without it the rule would count a path nothing
-        // answers, so it is written commented out, for the form the
-        // project adds.
-        let signin = project.has("auth-screens");
+        // serves one: it exports the paths, so none is copied here. Without
+        // it the rule would count a path nothing answers, so it is written
+        // commented out, for the form the project adds.
+        let posts = project.export("auth-screens", "sign_in_posts");
+        let screen_paths = posts.map(|paths| {
+            paths
+                .iter()
+                .map(|path| format!("{path:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
         // The rules are records, so they live in the file when there is
         // one. Without it they are code: a list of records has no flag.
         let (prelude, adjust) = if project.has("config") {
             (RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_FILE), None)
-        } else if signin {
+        } else if let Some(paths) = &screen_paths {
             (
                 RATE_LIMIT_PRELUDE.replace("@RULES@", RULES_IN_CODE)
-                    + &LOGIN_RULE.replace("@PATHS@", SCREEN_PATHS),
+                    + &LOGIN_RULE.replace("@PATHS@", paths),
                 Some(".rule(login)".to_string()),
             )
         } else {
@@ -555,8 +568,8 @@ impl Module for RateLimit {
             ],
         );
         if project.has("config") {
-            let rules = if signin {
-                RULES_TOML.replace("@PATHS@", SCREEN_PATHS)
+            let rules = if let Some(paths) = &screen_paths {
+                RULES_TOML.replace("@PATHS@", paths)
             } else {
                 let (head, rule) = RULES_TOML
                     .split_once("[[rate_limit.rules]]")
@@ -570,8 +583,9 @@ impl Module for RateLimit {
             };
             s.at(Slot::ConfigSections).block(rules);
         }
-        let example = if signin {
-            RATE_LIMIT_AGENTS_RULE.replace("@PATH@", SIGNIN_PATH)
+        // The sign-in form is the first path `auth-screens` exports.
+        let example = if let Some(form) = posts.and_then(|paths| paths.first()) {
+            RATE_LIMIT_AGENTS_RULE.replace("@PATH@", form)
         } else {
             RATE_LIMIT_AGENTS_NO_RULE.to_string()
         };
@@ -579,11 +593,6 @@ impl Module for RateLimit {
             .block(RATE_LIMIT_AGENTS.replace("@EXAMPLE@", &example));
     }
 }
-
-/// Where `auth-screens` serves its sign-in form, which is the route the
-/// example rule guards. A page file, `src/pages/account/signin.rs`, so a
-/// route and not a setting.
-const SIGNIN_PATH: &str = "/account/signin";
 
 /// Each line of `text` behind `prefix`. The prefix goes at the first
 /// line's indentation, as rustfmt puts a comment; a deeper line keeps the
@@ -645,10 +654,6 @@ const RULES_IN_CODE: &str = "The rule is below: `brocanth add config` moves rule
 /// The example rule's paths: a login form.
 const LOGIN_PATHS: &str = r#""/login""#;
 
-/// The example rule's paths with `auth-screens`: the posts that check a
-/// password or a code.
-const SCREEN_PATHS: &str = r#""/account/signin", "/account/code", "/account/elevate""#;
-
 /// The example rule, as code.
 const LOGIN_RULE: &str = r#"        let login = brocanth_middleware::Rule::new("login", 5, 60)
             .paths([@PATHS@])
@@ -707,6 +712,7 @@ impl Module for ConditionalGet {
             "middleware-conditional-get",
             "a weak ETag over every page, and 304 for If-None-Match or If-Modified-Since",
         )
+        .contributes::<AgentsSection>("how a page sets an ETag or Last-Modified")
         .category(Category::Middleware)
         .adapts_to(
             "config",
@@ -799,6 +805,7 @@ impl Module for Compression {
             "middleware-compression",
             "gzip and brotli per Accept-Encoding on text responses, with Vary; never a stream",
         )
+        .contributes::<AgentsSection>("what is compressed, and what is left alone")
         .category(Category::Middleware)
         .krate(
             Dep::brocanth("brocanth-middleware")
@@ -922,6 +929,7 @@ impl Module for Flash {
             "flash",
             "one-shot messages across a redirect, in a signed cookie, drawn into the layout",
         )
+        .contributes::<AgentsSection>("how a page sets a message for the next page")
         .category(Category::Middleware)
         .adapts_to(
             "config",

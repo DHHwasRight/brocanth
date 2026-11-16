@@ -3244,6 +3244,8 @@ title = "My Photos"
 [modules]
 enabled = ["config", "middleware", "middleware-csrf", "storage", "storage-routes", "storage-thumbnails"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3292,4 +3294,4 @@ config = []
 crates = ["brocanth-storage"]
 adapted_to = []
 
-# brocanth-digest: 9c07ae471eeed5d9
+# brocanth-digest: cb6e2a4e31b82b03

@@ -20,7 +20,9 @@
 //! Compiled only under the `scaffold` feature, which is off.
 
 use brocanth_scaffold::snippet::module_ref;
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Slot,
+};
 
 /// Site search, as a choice on the `brocanth create` menu.
 pub struct Search;
@@ -31,6 +33,7 @@ impl Module for Search {
             "search",
             "Postgres full-text and trigram search: a site index, its migration, a page at /search",
         )
+        .contributes::<AgentsSection>("how a model is searched")
         .category(Category::Routes)
         .requires::<PgPool>("the index is a table and the page queries it through the `db` pool")
         .needs(

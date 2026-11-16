@@ -714,8 +714,73 @@ What was built, and the choices made on the way:
 contribution point; exports for `auth-screens`. Exit: no caller names a
 provider type; each module's AGENTS.md section comes from its
 contribution; `MIGRATES`, the `sessions || auth`
-line and `SCREEN_PATHS` are gone; `has` on another crate's key 159 ->
-≤ 30.
+line and `SCREEN_PATHS` are gone. The rule in §13, decision 8, replaces
+the former numeric target for `has` on another crate's key: the count is
+reported for information and has no target.
+
+**Stage 5: done (2026-11-16).** Measured as in stage 1: a grep of
+non-test code under `crates/*/src`. "Another crate's key" is a key that
+no `Manifest::new` in the same crate declares.
+
+| Relation | Before (`91beb93e`) | After |
+|---|---|---|
+| `has("<key>")` on another crate's key | 145 | 140 |
+| `has("jobs")`, `has("sessions")` outside their crate | 2, 1 | 0, 0 |
+| `MIGRATES` | 2 | 0 (each module contributes a `ConfigCheck`) |
+| `sessions \|\| auth` in `check.rs` | 1 | 0 (`[bindings]` has `SessionCookie`) |
+| `SCREEN_PATHS` / `SIGNIN_PATH` | 3 | 0 (`auth-screens` exports `sign_in_posts`) |
+| modules that write `AGENTS.md` and declare it | 0 of 49 | 49 of 49 |
+
+145 was measured on `91beb93e` (159 on `8f546fc` counted
+differently). Of the 140 left, `config` (39) is stage 3's and `admin`
+(24) is stage 2's; `rsx` (13) and `jt` (3) stay (§9). The rest (61) are
+needs, own-family reads and one-to-one adaptations (`model` 8,
+`middleware-csrf` 6, `commands` 5, `i18n-routing` 5, `i18n` 4, ...) that
+no Kind in §3.1 covers.
+
+What was built:
+
+- Kinds: `JobQueue` (providers `jobs`, `jobs-memory`; user `mail`),
+  `CacheStore` (providers `cache`, `cache-memory`, `cache-redis`; no
+  scaffold reader yet, kept for its three providers), `SessionCookie`
+  (providers `sessions`, `auth`; reader `brocanth check` through
+  `[bindings]`), and two contribution points: `ConfigCheck` (8
+  contributors) and `AgentsSection` (49 contributors).
+- `Manifest::contributes::<K>` for a Kind of cardinality many, and
+  `Manifest::exports(name, values, what)` with `Project::export(key,
+  name)`. An export is a generation-time value, not a module-file field:
+  the rate-limit rules land in the TOML file too, which cannot read a Rust
+  constant. Reading an export counts as asking about the key, so
+  `adapts_to` still declares it; the CLI refuses a name the owner does not
+  export.
+- `Slot::ConfigChecks`. The generator writes its lines into
+  `config_checks()` in `src/commands/mod.rs`, and the generated `check`
+  command passes them to `brocanth_config::check::run_with`. A module
+  writes an entry only when its default creates tables, so the `needs` and
+  `unless` columns of `MIGRATES` went with it. `check::run` stays, with no
+  contributed checks, so a project generated before this compiles.
+- `check_module` and the generator hold a contribution slot to its
+  declaration both ways, and refuse `provides` on a many-Kind or
+  `contributes` on a one-Kind.
+
+Behaviour changes:
+
+- `sessions` and `auth` together are refused: each provides
+  `SessionCookie`. The `everything` golden drops `sessions`.
+- `deploy/csrf-off` and `deploy/storage-local` read `[bindings]`. The
+  generator now writes the table even when it is empty. A `brocanth.toml`
+  with no table (written before the bindings) falls back to the module
+  names (`BEFORE_BINDINGS` in `check.rs`), and `check/bindings-missing`
+  warns and says to run `brocanth add` or `brocanth remove` once. The
+  same fallback and warning cover a stage 1 table that records `PgPool`
+  and not `SessionCookie`.
+- `brocanth.toml` records `JobQueue`, `CacheStore` and `SessionCookie` in
+  `[bindings]`, with a comment over the provider's line in the chain.
+
+Left: `observe` keeps `Dep::feature_with("jobs", ..)` and `webhooks-out`
+keeps `.after("jobs")` (order only); a Kind-aware `feature_with` waits for
+a second `JobQueue` crate. `Project::contributions::<K>()` is not built:
+no module reads a contribution list yet (stage 2's `Mount` is the first).
 
 **Stage 6 — `brocanth explain` and docs tables (1-2 days).** `explain`
 prints why each module is in, each Kind's provider, each contribution,
@@ -759,3 +824,12 @@ No question is open.
    on its own tab only** (§5.2). **Reason:** this keeps the rule "only a
    superuser changes roles" and limits delegation to one tab, so no
    owner can raise itself or reach past its tab.
+8. **When two or more modules can fill the same role, the role is a Kind
+   and callers ask for the Kind. A module may name another module's key
+   only for a presentation choice (e.g. rsx or jt templates) or for a
+   real one-to-one link where no second provider exists. The count of
+   `has` on another crate's key is reported for information; it has no
+   target.** (Owner, 2026-11-16, replacing the stage 5 target "159 ->
+   ≤ 30".) **Reason:** the count mixes renderer branches, needs and
+   one-to-one adaptations with real couplings, so a number cannot say
+   which `has` is wrong; the rule can.

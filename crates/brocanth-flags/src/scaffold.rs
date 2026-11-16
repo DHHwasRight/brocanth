@@ -21,7 +21,8 @@
 
 use brocanth_scaffold::snippet::{configurable, integration, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, Manifest, Module, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 /// Feature flags, as a choice on the `brocanth create` menu.
@@ -47,6 +48,8 @@ impl Module for FeatureFlags {
             "Feature flags: turn code on for some users without a deploy",
         )
         .requires::<PgPool>("the rules are rows in the database the `db` module opens; in memory a restart would turn every flag off")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[flags]`")
+        .contributes::<AgentsSection>("how to declare a flag and read it in a page")
         .krate(
             Dep::brocanth("brocanth-flags")
                 .feature_with("config", "config")
@@ -79,6 +82,8 @@ impl Module for FeatureFlags {
         if project.has("admin") {
             integration(s, "flags", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        s.at(Slot::ConfigChecks)
+            .line(r#"Entry::migrates("flags", "`brocanth_flags::PgStore::SCHEMA`"),"#);
         s.at(Slot::AgentsSections)
             .block(AGENTS.replace("@AWAIT@", if auth { ".await" } else { "" }));
     }

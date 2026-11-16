@@ -40,7 +40,8 @@ use brocanth_scaffold::snippet::{
     PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Hook, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Dep, Hook, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting,
+    Slot,
 };
 
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
@@ -532,6 +533,7 @@ impl Module for StorageRoutes {
             "storage-routes",
             "POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token",
         )
+        .contributes::<AgentsSection>("which file routes exist, and how a file is served")
         .category(Category::Middleware)
         .part_of_but_off("storage")
         .because("it is the HTTP edge of `brocanth-storage`, which the parent brings")

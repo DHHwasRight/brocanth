@@ -74,8 +74,12 @@ use std::sync::{Mutex, PoisonError};
 /// `adapts_to` is asked. The same two-way rule holds for Kinds: each
 /// `project.provider::<K>()` asked is declared with `uses` or `requires`,
 /// and each `uses` is asked. In the first run every Kind the module names
-/// is bound; in the second only what it requires. Each returned line is one
-/// broken rule; empty means none.
+/// is bound; in the second only what it requires. A contribution point
+/// keeps the rule too: a module that writes a contribution slot
+/// ([`crate::Slot::contribution`], such as `AGENTS.md` sections) declares
+/// `contributes` for its Kind, and a declared contribution is written in
+/// one of the two runs. Each returned line is one broken rule; empty means
+/// none.
 ///
 /// ```ignore
 /// let known: Vec<&str> = brocanth_cli::testing::modules()
@@ -127,6 +131,7 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
 
     let mut asked: Vec<String> = Vec::new();
     let mut asked_kinds: Vec<&str> = Vec::new();
+    let mut contributed: Vec<&str> = Vec::new();
     for (on, bound) in [(&everything, &all_bound), (&alone, &required)] {
         let project =
             crate::Project::new("my-blog", "My Blog", on, &everything).with_bindings(bound);
@@ -137,6 +142,32 @@ pub fn check_module(module: &dyn crate::Module, known: &[&str]) -> Vec<String> {
         wrong.extend(s.problems().iter().cloned());
         asked.extend(project.asked_keys());
         asked_kinds.extend(project.asked_kinds());
+        for slot in crate::Slot::ALL {
+            if let Some(kind) = slot.contribution() {
+                if s.slot_owners(slot).any(|owner| owner == m.key) {
+                    contributed.push(kind);
+                }
+            }
+        }
+    }
+    contributed.sort_unstable();
+    contributed.dedup();
+    for kind in &contributed {
+        if !m.adds_to(kind) {
+            wrong.push(format!(
+                "`{}` writes the slot of {kind} and does not declare it: \
+                 add `.contributes::<{kind}>(\"<what it adds>\")` to its manifest",
+                m.key
+            ));
+        }
+    }
+    for (kind, _) in &m.contributes {
+        if !contributed.contains(&kind.name) {
+            wrong.push(format!(
+                "`{}` declares `contributes::<{kind}>()` and never writes its slot",
+                m.key
+            ));
+        }
     }
     asked_kinds.sort_unstable();
     asked_kinds.dedup();
@@ -191,10 +222,32 @@ fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
     let declared = m
         .provides
         .iter()
-        .map(|(k, why)| ("provides", k.name, *why))
-        .chain(m.requires.iter().map(|r| ("requires", r.kind.name, r.why)))
-        .chain(m.uses.iter().map(|(k, why)| ("uses", k.name, *why)));
-    for (how, kind, why) in declared {
+        .map(|(k, why)| ("provides", *k, *why))
+        .chain(m.requires.iter().map(|r| ("requires", r.kind, r.why)))
+        .chain(m.uses.iter().map(|(k, why)| ("uses", *k, *why)))
+        .chain(
+            m.contributes
+                .iter()
+                .map(|(k, why)| ("contributes", *k, *why)),
+        );
+    for (how, kind_ref, why) in declared {
+        let kind = kind_ref.name;
+        let many = kind_ref.cardinality == crate::kind::Cardinality::Many;
+        if many != (how == "contributes") {
+            wrong.push(if many {
+                format!(
+                    "`{}` declares `{how}::<{kind}>`, and {kind} takes many contributors: \
+                     use `contributes::<{kind}>`",
+                    m.key
+                )
+            } else {
+                format!(
+                    "`{}` declares `contributes::<{kind}>`, and {kind} takes one provider: \
+                     use `provides::<{kind}>`",
+                    m.key
+                )
+            });
+        }
         if why.is_empty() {
             wrong.push(format!(
                 "`{}` declares `{how}::<{kind}>` and does not say why",
@@ -208,6 +261,19 @@ fn kind_declarations(m: &crate::Manifest, known: &[&str]) -> Vec<String> {
             ));
         }
         named.push((how, kind));
+    }
+    let mut exported: Vec<&str> = Vec::new();
+    for export in &m.exports {
+        if export.what.is_empty() || export.values.is_empty() {
+            wrong.push(format!(
+                "`{}` exports `{}` with no values or no description",
+                m.key, export.name
+            ));
+        }
+        if exported.contains(&export.name) {
+            wrong.push(format!("`{}` exports `{}` twice", m.key, export.name));
+        }
+        exported.push(export.name);
     }
     for r in &m.requires {
         for key in r.unless {
@@ -574,6 +640,80 @@ mod tests {
         assert!(check_module(&Counts, &["thing"]).is_empty());
         assert_eq!(BOUND.load(Ordering::SeqCst), 1);
         assert_eq!(UNBOUND.load(Ordering::SeqCst), 1);
+    }
+
+    /// A module that writes an AGENTS.md section, declared or not.
+    struct Writes {
+        manifest: fn() -> Manifest,
+        writes: bool,
+    }
+
+    impl Module for Writes {
+        fn manifest(&self) -> Manifest {
+            (self.manifest)()
+        }
+        fn contribute(&self, _: &Project, s: &mut Scaffold) {
+            if self.writes {
+                s.at(crate::Slot::AgentsSections).block("## Thing\n");
+            }
+        }
+    }
+
+    #[test]
+    fn a_contribution_slot_written_must_be_declared_and_a_declared_one_written() {
+        use crate::AgentsSection;
+        let wrong = check_module(
+            &Writes {
+                manifest: base,
+                writes: true,
+            },
+            &["thing"],
+        );
+        assert!(
+            wrong[0].contains("writes the slot of AgentsSection and does not declare it"),
+            "{wrong:?}"
+        );
+        let declared = || base().contributes::<AgentsSection>("a rule");
+        let wrong = check_module(
+            &Writes {
+                manifest: declared,
+                writes: false,
+            },
+            &["thing"],
+        );
+        assert!(wrong[0].contains("never writes its slot"), "{wrong:?}");
+        assert!(check_module(
+            &Writes {
+                manifest: declared,
+                writes: true
+            },
+            &["thing"]
+        )
+        .is_empty());
+        // A Kind that takes one provider is not a contribution point.
+        let wrong = check(|| base().contributes::<PgPool>("a pool"), false);
+        assert!(
+            wrong.iter().any(|w| w.contains("takes one provider")),
+            "{wrong:?}"
+        );
+        let wrong = check(|| base().provides::<AgentsSection>("a rule"), false);
+        assert!(wrong.iter().any(|w| w.contains("takes many")), "{wrong:?}");
+    }
+
+    #[test]
+    fn an_export_has_values_a_description_and_one_name() {
+        let wrong = check(|| base().exports("paths", &[], "the paths"), false);
+        assert!(wrong.iter().any(|w| w.contains("no values")), "{wrong:?}");
+        let wrong = check(
+            || {
+                base()
+                    .exports("paths", &["/a"], "a")
+                    .exports("paths", &["/b"], "b")
+            },
+            false,
+        );
+        assert!(wrong.iter().any(|w| w.contains("twice")), "{wrong:?}");
+        assert!(check(|| base().exports("paths", &["/a"], "the paths"), false).is_empty());
     }
 
     fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {

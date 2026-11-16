@@ -2451,6 +2451,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "sanitize"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2467,4 +2469,4 @@ config = []
 crates = ["brocanth-sanitize"]
 adapted_to = ["rsx"]
 
-# brocanth-digest: 273c4400830a1fb6
+# brocanth-digest: 92b7884a98dbdeec

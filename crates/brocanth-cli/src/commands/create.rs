@@ -923,9 +923,16 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
         })
         .collect();
     let bindings = crate::resolve::bindings(&a.picks);
+    // What every module exports, so a reader names the export and not a
+    // copy of the value.
+    let exports: Vec<(&str, brocanth_scaffold::Export)> = known
+        .iter()
+        .flat_map(|&key| about(key).exports.into_iter().map(move |e| (key, e)))
+        .collect();
     let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
         .with_mounts(&mounts)
-        .with_bindings(&bindings);
+        .with_bindings(&bindings)
+        .with_exports(&exports);
     let order = brocanth_scaffold::order(&a.picks, |key| crate::resolve::after(key, &a.picks))
         .map_err(|stuck| {
             vec![Diagnostic::error(
@@ -1004,11 +1011,56 @@ fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnos
                 .help("check the spelling, or add the module that declares it"),
         );
     }
+    for (key, name) in project.asked_exports() {
+        if !about(&key).exports.iter().any(|e| e.name == name) {
+            wrong.push(
+                Diagnostic::error(
+                    "module",
+                    format!("a module reads the export `{name}` of `{key}`, which `{key}` does not export"),
+                )
+                .help(format!("read one that `{key}` declares with `.exports(..)`, or add it there")),
+            );
+        }
+    }
+    wrong.extend(undeclared_contributions(&built));
     if wrong.is_empty() {
         Ok(built)
     } else {
         Err(wrong)
     }
+}
+
+/// A module that wrote into a contribution slot (`AGENTS.md` sections,
+/// config checks) and did not declare the contribution. Each entry of a
+/// contribution point comes from a declared contribution, so the manifest
+/// says what a module adds where.
+fn undeclared_contributions(built: &Built) -> Vec<Diagnostic> {
+    let mut wrong: Vec<Diagnostic> = Vec::new();
+    for slot in Slot::ALL {
+        let Some(kind) = slot.contribution() else {
+            continue;
+        };
+        let mut owners: Vec<&str> = built.slot_owners(slot).collect();
+        owners.dedup();
+        for owner in owners {
+            // The framework's own lines have no manifest to declare in.
+            let Some(module) = crate::modules::find(owner) else {
+                continue;
+            };
+            if !module.manifest().adds_to(kind) {
+                wrong.push(
+                    Diagnostic::error(
+                        "module",
+                        format!("`{owner}` writes {slot} and does not declare the contribution"),
+                    )
+                    .help(format!(
+                        "add `.contributes::<{kind}>(\"<what it adds>\")` to the manifest of `{owner}`"
+                    )),
+                );
+            }
+        }
+    }
+    wrong
 }
 
 /// The owner the framework's own settings are recorded under. Not a module
@@ -1169,7 +1221,10 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         // `serve.rs` is the `commands` module's own file; `mod.rs` is
         // written here because it lists every module's command, and only
         // the finished build knows them all.
-        files.push(("src/commands/mod.rs".to_string(), commands_mod_rs(&built)));
+        files.push((
+            "src/commands/mod.rs".to_string(),
+            commands_mod_rs(a, &built),
+        ));
         if has_settings(&built) {
             files.push((
                 "src/commands/settings.rs".to_string(),
@@ -1330,15 +1385,16 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
     // The provider of each Kind, and why it is here: the resolver's
     // decision, so `add`, `remove` and a reader see it without resolving
     // again. Derived from the selection, never stored apart from it.
+    //
+    // Written even when empty: `brocanth check` reads a missing table as a
+    // project from before the bindings, and falls back to module keys.
     let bindings = crate::resolve::bindings(&a.picks);
-    if !bindings.is_empty() {
-        out.push_str("\n[bindings]\n");
-        for (kind, provider) in &bindings {
-            out.push_str(&format!(
-                "{kind} = {{ provider = {provider:?}, why = {why:?} }}\n",
-                why = crate::resolve::why(&a.picks, kind),
-            ));
-        }
+    out.push_str("\n[bindings]\n");
+    for &(kind, provider) in &bindings {
+        out.push_str(&format!(
+            "{kind} = {{ provider = {provider:?}, why = {why:?} }}\n",
+            why = crate::resolve::why(&a.picks, kind),
+        ));
     }
     for key in &a.picks {
         // `adapted_to` is the optional dependencies that were present, so
@@ -1645,7 +1701,7 @@ fn agents_md(a: &Answers, built: &Built) -> String {
 // produces code you would not write by hand, the framework below it is wrong"
 // -- and nobody writes an unindented struct body.
 /// `src/commands/mod.rs`: the `mod` lines, and nothing else.
-fn commands_mod_rs(built: &Built) -> String {
+fn commands_mod_rs(a: &Answers, built: &Built) -> String {
     let mut out = String::from(
         r#"//! Every command in this project.
 //!
@@ -1676,6 +1732,38 @@ fn commands_mod_rs(built: &Built) -> String {
         out.push_str(&line);
         out.push('\n');
     }
+    // The `check` command is the `config` module's, and it links
+    // `brocanth_config::check` only with that module.
+    if a.has("config") {
+        out.push_str(&config_checks_fn(built));
+    }
+    out
+}
+
+/// `config_checks`, from [`Slot::ConfigChecks`]: the entries of the
+/// `ConfigCheck` contribution point, each under a comment that names the
+/// module. The comment also keeps rustfmt from folding a short list onto
+/// one line.
+fn config_checks_fn(built: &Built) -> String {
+    let mut out = String::from(
+        "\n\
+         /// The checks this project's modules add to `check --deploy`, one per\n\
+         /// module that contributes `ConfigCheck`. `brocanth add` and `brocanth\n\
+         /// remove` rewrite this list with the modules.\n\
+         pub fn config_checks() -> Vec<brocanth_config::check::Entry> {\n",
+    );
+    if built.slot_is_empty(Slot::ConfigChecks) {
+        out.push_str("    Vec::new()\n}\n");
+        return out;
+    }
+    out.push_str("    use brocanth_config::check::Entry;\n    vec![\n");
+    for (owner, line) in built
+        .slot_owners(Slot::ConfigChecks)
+        .zip(built.slot(Slot::ConfigChecks))
+    {
+        out.push_str(&format!("        // {owner}\n        {}\n", line.trim()));
+    }
+    out.push_str("    ]\n}\n");
     out
 }
 
@@ -5627,12 +5715,15 @@ mod tests {
     /// `observability-logs` replaces, and `static` refuses every module that
     /// needs a server, so neither is in it, nor `beacon`, which counts what
     /// `analytics` counts, nor `cache-memory`, which `cache-redis` excludes:
-    /// a project has one cache backend. `available()` is not a project:
-    /// the generator refuses it.
+    /// a project has one cache backend, nor `sessions`, which provides a
+    /// `SessionCookie` beside `auth`: a project has one session cookie.
+    /// `available()` is not a project: the generator refuses it.
     fn everything() -> Vec<&'static str> {
         available()
             .into_iter()
-            .filter(|key| !["logging", "static", "beacon", "cache-memory"].contains(key))
+            .filter(|key| {
+                !["logging", "static", "beacon", "cache-memory", "sessions"].contains(key)
+            })
             .collect()
     }
 
@@ -6917,7 +7008,9 @@ mod tests {
             .expect("an agent brief")
             .1;
         assert!(
-            full.contains("**Absent:** `logging`, `beacon`, `cache-memory`, `static` —"),
+            full.contains(
+                "**Absent:** `logging`, `beacon`, `sessions`, `cache-memory`, `static` —"
+            ),
             "{full}"
         );
     }

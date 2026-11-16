@@ -29,7 +29,7 @@
 //! runtime is one builder call on each manifest, so the list can change
 //! without a change here.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The static site, as a choice on the `brocanth create` menu.
 pub struct StaticSite;
@@ -40,6 +40,7 @@ impl Module for StaticSite {
             "static",
             "`export` writes every GET page and every asset to dist/; no server, so no runtime modules",
         )
+        .contributes::<AgentsSection>("the project builds files, not a server")
         .category(Category::External)
         .category(Category::Enhancer)
         .adapts_to("rsx-tailwind", "the export writes the compiled stylesheet")

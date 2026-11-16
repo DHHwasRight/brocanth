@@ -21,7 +21,7 @@
 //! This module is the other half. Both may be chosen; neither needs the
 //! other.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, Project, Scaffold, Slot};
+use brocanth_scaffold::{AgentsSection, Category, Dep, Manifest, Module, Project, Scaffold, Slot};
 
 /// The entrance, as a choice on the `brocanth create` menu.
 pub struct Entry;
@@ -32,6 +32,7 @@ impl Module for Entry {
             "input",
             "a form or a JSON body, read into a struct, with every fault at once",
         )
+        .contributes::<AgentsSection>("how a page reads a request body")
         .category(Category::Enhancer)
         .category(Category::Renderer)
         .adapts_to("rsx", "a refused form answers HTML, not JSON")

@@ -3277,6 +3277,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "i18n", "i18n-routing", "meta"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -3309,4 +3311,4 @@ config = ["meta"]
 crates = ["brocanth-meta"]
 adapted_to = ["i18n", "i18n-routing", "rsx"]
 
-# brocanth-digest: 47c47b09be4c2cae
+# brocanth-digest: 57396607048b5098

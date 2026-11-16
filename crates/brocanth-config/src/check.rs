@@ -14,6 +14,7 @@
 //!
 //! | Id | Severity | When |
 //! |---|---|---|
+//! | `check/bindings-missing` | warning | `brocanth.toml` lists modules and has no `[bindings]` table, or a table older than a Kind a check reads; the checks read module names instead |
 //! | `check/db-url` | error | `[db] url` is not a `postgres://` or `postgresql://` URL |
 //! | `deploy/env` | warning | `--deploy` on `development` or `test` |
 //! | `deploy/no-config` | warning | no file and no variable configures this environment |
@@ -23,11 +24,11 @@
 //! | `deploy/default-secret` | error | `[storage] secret` is the scaffold's development string, or short |
 //! | `deploy/secret-in-file` | warning | a key named like a secret has its value in a file |
 //! | `deploy/debug-logging` | warning | `[logging] level` is `debug` or `trace` |
-//! | `deploy/migrate` | warning | a module's `migrate` is true, or unset where it defaults to true |
+//! | `deploy/migrate` | warning | a module's `migrate` is true, or unset where the module contributed the check (it defaults to true) |
 //! | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
 //! | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
 //! | `deploy/storage-local` | warning | the project has `storage` and no `db`, so its files are on one machine's disk |
-//! | `deploy/csrf-off` | error | the project has cookies and no `Csrf` hook is registered |
+//! | `deploy/csrf-off` | error | `[bindings]` binds `SessionCookie` and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
 //! | `deploy/admin-unscoped` | error | `unscoped_rows_unsafe_for_development()` is called |
@@ -47,82 +48,39 @@ use crate::{AppName, Config, ConfigError, Loader, Provenance, Redaction, Table, 
 /// The scaffold's own placeholder for `[storage] secret`.
 const SCAFFOLD_SECRET: &str = "development only";
 
-/// A module that creates its tables at startup when its `migrate` is true.
-struct Migrates {
-    /// The module, as `brocanth.toml` names it.
-    module: &'static str,
-    /// Its config section.
-    section: &'static str,
-    /// The setting exists only when every one of these is in the project.
-    needs: &'static [&'static str],
-    /// The setting does not exist when one of these is in the project: the
-    /// module keeps its data somewhere else.
-    unless: &'static [&'static str],
-    /// The statements to put in a migration instead.
-    schema: &'static str,
+/// A check a module contributes to `check --deploy` (the `ConfigCheck`
+/// Kind). The generator writes one per contributing module into
+/// `config_checks` in the project's `src/commands/mod.rs`, and the
+/// project's `check` command passes them to [`run_with`]. So the list is the
+/// code the binary is built from, and a module that adds one edits no list
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    what: Contributed,
 }
 
-/// Every module whose generated `[section] migrate` defaults to true. A
-/// module that adds one lists it here; a section that is not listed is
-/// still reported when its file sets `migrate = true`.
-const MIGRATES: &[Migrates] = &[
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Contributed {
+    /// `deploy/migrate`: `[section] migrate` defaults to true.
     Migrates {
-        module: "jobs",
-        section: "jobs",
-        needs: &[],
-        unless: &["jobs-memory"],
-        schema: "`Queue::schema_sql`",
+        section: &'static str,
+        schema: &'static str,
     },
-    Migrates {
-        module: "cache",
-        section: "cache",
-        needs: &[],
-        unless: &["cache-memory", "cache-redis"],
-        schema: "`brocanth_cache::PgCache::schema_sql`",
-    },
-    Migrates {
-        module: "flags",
-        section: "flags",
-        needs: &[],
-        unless: &[],
-        schema: "`brocanth_flags::PgStore::SCHEMA`",
-    },
-    Migrates {
-        module: "audit",
-        section: "audit",
-        needs: &[],
-        unless: &[],
-        schema: "`brocanth_audit::PgStore::SCHEMA`",
-    },
-    Migrates {
-        module: "analytics",
-        section: "analytics",
-        needs: &[],
-        unless: &[],
-        schema: "`brocanth_analytics::PgStore::SCHEMA`",
-    },
-    Migrates {
-        module: "oauth-client",
-        section: "oauth_client",
-        needs: &[],
-        unless: &["oauth-client-memory"],
-        schema: "`brocanth_oauth_client::PgTokenStore::SCHEMA`",
-    },
-    Migrates {
-        module: "webhooks-in",
-        section: "webhooks_in",
-        needs: &["db"],
-        unless: &[],
-        schema: "`brocanth_webhooks::PgSeen::SCHEMA`",
-    },
-    Migrates {
-        module: "webhooks-out",
-        section: "webhooks_out",
-        needs: &[],
-        unless: &[],
-        schema: "`brocanth_webhooks::Outgoing::SCHEMA`",
-    },
-];
+}
+
+impl Entry {
+    /// `deploy/migrate` for a module whose `[section] migrate` defaults to
+    /// true in this project. `schema` names the statements to put in a
+    /// migration instead: `` "`Queue::schema_sql`" ``.
+    ///
+    /// The module contributes it only when its default creates tables: the
+    /// queue in memory (`jobs-memory`) has none, so it contributes nothing.
+    pub fn migrates(section: &'static str, schema: &'static str) -> Self {
+        Self {
+            what: Contributed::Migrates { section, schema },
+        }
+    }
+}
 
 /// What a run is asked to do: the command line of `check`.
 #[derive(Debug, Clone, Default)]
@@ -282,6 +240,17 @@ fn plural(n: usize, word: &str) -> String {
 /// `root` holds `brocanth.toml`; the configuration is read from there as
 /// the application would read it at startup.
 pub fn run(app: impl Into<AppName>, root: &Path, options: &Options) -> Result<Report, ConfigError> {
+    run_with(app, root, options, &[])
+}
+
+/// [`run`], with the checks the project's modules contribute: the generated
+/// `config_checks()` in `src/commands/mod.rs`.
+pub fn run_with(
+    app: impl Into<AppName>,
+    root: &Path,
+    options: &Options,
+    checks: &[Entry],
+) -> Result<Report, ConfigError> {
     let project = Project::read(app.into(), root);
     let env = match (&options.env, options.deploy) {
         (Some(env), _) => Some(env.clone()),
@@ -298,7 +267,7 @@ pub fn run(app: impl Into<AppName>, root: &Path, options: &Options) -> Result<Re
 
     let mut findings = always(&project, &config);
     if options.deploy {
-        findings.extend(deploy(&project, &config, &sources, &lookup));
+        findings.extend(deploy(&project, &config, &sources, &lookup, checks));
     }
     findings.retain(|f| !options.allow.iter().any(|a| a == f.id));
     Ok(Report {
@@ -317,9 +286,26 @@ struct Project {
     /// `[modules] enabled` in `brocanth.toml`, empty when it says nothing.
     modules: Vec<String>,
     /// The Kinds `[bindings]` in `brocanth.toml` binds to a provider:
-    /// `PgPool` when the project has its one shared pool.
-    bound: Vec<String>,
+    /// `PgPool` when the project has its one shared pool, `SessionCookie`
+    /// when it has a session cookie. `None` when the file has no
+    /// `[bindings]` table: a project written before the generator recorded
+    /// them, read through [`BEFORE_BINDINGS`].
+    bound: Option<Vec<String>>,
 }
+
+/// The modules that provided each Kind a check reads, before the generator
+/// recorded the provider in `[bindings]`.
+///
+/// Read for a `brocanth.toml` with no `[bindings]` table, and for a table
+/// written before a Kind existed (stage 1 recorded `PgPool` only), so
+/// such a project does not lose `deploy/csrf-off` in silence.
+/// `check/bindings-missing` says how to record the bindings. A table the
+/// current generator wrote binds the Kind whenever one of these modules is
+/// chosen, so for it this list changes nothing.
+const BEFORE_BINDINGS: &[(&str, &[&str])] = &[
+    ("PgPool", &["db"]),
+    ("SessionCookie", &["sessions", "auth"]),
+];
 
 impl Project {
     fn read(app: AppName, root: &Path) -> Self {
@@ -338,13 +324,10 @@ impl Project {
                 )
             })
             .unwrap_or_default();
-        let bound = marker
-            .as_ref()
-            .and_then(|marker| {
-                let bindings = marker.root().at("bindings")?.as_table()?;
-                Some(bindings.keys().map(|k| k.to_owned()).collect())
-            })
-            .unwrap_or_default();
+        let bound = marker.as_ref().and_then(|marker| {
+            let bindings = marker.root().at("bindings")?.as_table()?;
+            Some(bindings.keys().map(|k| k.to_owned()).collect())
+        });
         Self {
             root: root.to_path_buf(),
             app,
@@ -360,8 +343,36 @@ impl Project {
     /// Whether `[bindings]` binds the Kind `kind`: the generator's record of
     /// which module provides it, so a check names the thing and not the
     /// module that gives it.
+    ///
+    /// When the table is missing or does not record `kind`, a module that
+    /// provided `kind` before the bindings were recorded answers too
+    /// ([`BEFORE_BINDINGS`]).
     fn binds(&self, kind: &str) -> bool {
-        self.bound.iter().any(|k| k == kind)
+        self.recorded(kind) || self.provided_before_bindings(kind)
+    }
+
+    fn recorded(&self, kind: &str) -> bool {
+        self.bound
+            .as_ref()
+            .is_some_and(|bound| bound.iter().any(|k| k == kind))
+    }
+
+    fn provided_before_bindings(&self, kind: &str) -> bool {
+        BEFORE_BINDINGS
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .flat_map(|(_, keys)| keys.iter())
+            .any(|key| self.has(key))
+    }
+
+    /// The Kinds a check reads that a chosen module provides and the table
+    /// does not record: the table is missing, or older than the Kind.
+    fn unrecorded(&self) -> Vec<&'static str> {
+        BEFORE_BINDINGS
+            .iter()
+            .map(|(kind, _)| *kind)
+            .filter(|kind| self.provided_before_bindings(kind) && !self.recorded(kind))
+            .collect()
     }
 
     /// Whether a file under `deploy/` names the variable `var`: the
@@ -498,6 +509,28 @@ fn always(project: &Project, config: &Config) -> Vec<Finding> {
             );
         }
     }
+    // A marker with no `[bindings]` table, or one older than a Kind a
+    // check reads: written before the generator recorded them. The checks
+    // fall back to module names, and this says how to stop that.
+    let unrecorded = project.unrecorded();
+    let missing = project.bound.is_none() && !project.modules.is_empty();
+    if missing || !unrecorded.is_empty() {
+        let what = if project.bound.is_none() {
+            "brocanth.toml has no `[bindings]` table, so the checks fall back to module names"
+                .to_owned()
+        } else {
+            format!(
+                "`[bindings]` in brocanth.toml does not record {}, so the checks fall back to module names",
+                unrecorded.join(", ")
+            )
+        };
+        out.push(
+            Finding::warning("check/bindings-missing", what)
+            .at("brocanth.toml")
+            .note("the generator records which module provides each Kind there, and the checks read it")
+            .help("run `brocanth add` or `brocanth remove` once with this CLI: it rewrites brocanth.toml with `[bindings]`"),
+        );
+    }
     out
 }
 
@@ -511,6 +544,7 @@ fn deploy(
     config: &Config,
     sources: &Sources,
     lookup: &dyn Fn(&str) -> Option<String>,
+    checks: &[Entry],
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     let env = config.env().to_owned();
@@ -654,7 +688,7 @@ fn deploy(
             );
         }
     }
-    out.extend(migrate(project, config, &file));
+    out.extend(migrate(project, &file, config, checks));
     out.extend(observability(project, config, &file));
     if project.has("storage") && !project.binds("PgPool") {
         let mut d = Finding::warning(
@@ -669,7 +703,8 @@ fn deploy(
         out.push(d);
     }
     // CSRF, and whether hooks run at all.
-    let has_cookies = project.modules.is_empty() || project.has("sessions") || project.has("auth");
+    // A marker with no module list says nothing, so assume cookies.
+    let has_cookies = project.modules.is_empty() || project.binds("SessionCookie");
     let csrf = sources.find("brocanth_middleware::Csrf");
     let csrf_registered = csrf.iter().any(|at| {
         sources
@@ -734,25 +769,23 @@ fn deploy(
 
 /// `deploy/migrate`: a module that creates its tables at startup.
 ///
-/// Set in a file, or unset where the module's setting defaults to true.
-fn migrate(project: &Project, config: &Config, file: &str) -> Vec<Finding> {
+/// Set in a file, or unset where the module contributed the check because
+/// its setting defaults to true.
+fn migrate(project: &Project, file: &str, config: &Config, checks: &[Entry]) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
-    for m in MIGRATES {
-        let on_by_default = project.has(m.module)
-            && m.needs.iter().all(|n| project.has(n))
-            && !m.unless.iter().any(|u| project.has(u));
-        let value = get(config, &format!("{}.migrate", m.section));
-        let on = match value {
-            Some(v) => v.as_bool() == Some(true),
-            None => on_by_default,
-        };
-        seen.push(m.section);
-        if on {
-            out.push(migrate_finding(project, m.section, m.schema, value, file));
+    for entry in checks {
+        let Contributed::Migrates { section, schema } = entry.what;
+        if seen.contains(&section) {
+            continue;
+        }
+        seen.push(section);
+        let value = get(config, &format!("{section}.migrate"));
+        if value.is_none_or(|v| v.as_bool() == Some(true)) {
+            out.push(migrate_finding(project, section, schema, value, file));
         }
     }
-    // A section nobody listed, whose file still says `migrate = true`.
+    // A section nobody contributed, whose file still says `migrate = true`.
     for (path, value) in config.root().leaves() {
         let Some(section) = path.strip_suffix(".migrate") else {
             continue;
@@ -920,12 +953,21 @@ mod tests {
             root: PathBuf::from("/p"),
             app: AppName::new("shop"),
             modules: modules.iter().map(|m| (*m).to_owned()).collect(),
-            // The generator binds the pool exactly when `db` is chosen.
-            bound: if modules.contains(&"db") {
-                vec!["PgPool".to_owned()]
-            } else {
-                Vec::new()
-            },
+            // The generator binds the pool exactly when `db` is chosen,
+            // and the session cookie when `sessions` or `auth` is.
+            bound: Some(
+                [
+                    ("PgPool", modules.contains(&"db")),
+                    (
+                        "SessionCookie",
+                        modules.contains(&"sessions") || modules.contains(&"auth"),
+                    ),
+                ]
+                .into_iter()
+                .filter(|(_, bound)| *bound)
+                .map(|(kind, _)| kind.to_owned())
+                .collect(),
+            ),
         }
     }
 
@@ -969,9 +1011,9 @@ secret = "development only: replace before anything is uploaded in anger"
     fn storage_on_a_local_disk_is_a_warning_and_storage_on_db_is_not() {
         let config = Config::from_toml("shop", "production", "").unwrap();
         let src = sources(&[]);
-        let local = deploy(&project(&["storage"]), &config, &src, &|_| None);
+        let local = deploy(&project(&["storage"]), &config, &src, &|_| None, &[]);
         assert!(ids(&local).contains(&"deploy/storage-local"));
-        let db = deploy(&project(&["storage", "db"]), &config, &src, &|_| None);
+        let db = deploy(&project(&["storage", "db"]), &config, &src, &|_| None, &[]);
         assert!(!ids(&db).contains(&"deploy/storage-local"));
     }
 
@@ -981,7 +1023,7 @@ secret = "development only: replace before anything is uploaded in anger"
         let p = project(&["sessions", "auth", "middleware-csrf"]);
         let src = sources(&[("src/plugins/mod.rs", "        // let builder = builder.plugin_hooking(\n        //     <brocanth_middleware::Csrf as Plugin>::new(\n")]);
         let mut found = always(&p, &config);
-        found.extend(deploy(&p, &config, &src, &|_| None));
+        found.extend(deploy(&p, &config, &src, &|_| None, &[]));
         let ids = ids(&found);
         for id in [
             "deploy/cookie-insecure",
@@ -1035,7 +1077,6 @@ drain_delay_secs = 5
 "#;
         let config = Config::from_toml("shop", "production", text).unwrap();
         let p = project(&[
-            "sessions",
             "auth",
             "flags",
             "observability-metrics",
@@ -1048,7 +1089,11 @@ drain_delay_secs = 5
         ]);
         let key = "k".repeat(43);
         let mut found = always(&p, &config);
-        found.extend(deploy(&p, &config, &src, &|_| Some(key.clone())));
+        let checks = [Entry::migrates(
+            "flags",
+            "`brocanth_flags::PgStore::SCHEMA`",
+        )];
+        found.extend(deploy(&p, &config, &src, &|_| Some(key.clone()), &checks));
         assert!(found.is_empty(), "{:#?}", ids(&found));
     }
 
@@ -1056,7 +1101,7 @@ drain_delay_secs = 5
     fn the_security_headers_hook_answers_hsts_only_when_it_can_see_tls() {
         let hsts = |config: &str, files: &[(&str, &str)]| {
             let config = Config::from_toml("shop", "production", config).unwrap();
-            let found = deploy(&project(&[]), &config, &sources(files), &|_| None);
+            let found = deploy(&project(&[]), &config, &sources(files), &|_| None, &[]);
             found
                 .into_iter()
                 .find(|d| d.id == "deploy/hsts")
@@ -1117,7 +1162,7 @@ drain_delay_secs = 5
                 "AdminConfig::new()\n  .unscoped_rows_unsafe_for_development()",
             ),
         ]);
-        let found = deploy(&project(&["auth"]), &config, &src, &|_| None);
+        let found = deploy(&project(&["auth"]), &config, &src, &|_| None, &[]);
         let hooks = found
             .iter()
             .find(|d| d.id == "deploy/hooks-not-run")
@@ -1139,7 +1184,7 @@ drain_delay_secs = 5
             "[mail]\nsmtp_password = \"hunter2\"\n",
         )
         .unwrap();
-        let found = deploy(&project(&[]), &config, &sources(&[]), &|_| None);
+        let found = deploy(&project(&[]), &config, &sources(&[]), &|_| None, &[]);
         let d = found
             .iter()
             .find(|d| d.id == "deploy/secret-in-file")
@@ -1172,16 +1217,21 @@ drain_delay_secs = 5
 
     #[test]
     fn a_module_that_migrates_by_default_is_a_warning_with_its_schema() {
-        let deploy_ids = |modules: &[&str], text: &str| {
+        let flags = [Entry::migrates(
+            "flags",
+            "`brocanth_flags::PgStore::SCHEMA`",
+        )];
+        let deploy_ids = |checks: &[Entry], text: &str| {
             let config = Config::from_toml("shop", "production", text).unwrap();
-            deploy(&project(modules), &config, &sources(&[]), &|_| None)
+            deploy(&project(&[]), &config, &sources(&[]), &|_| None, checks)
                 .into_iter()
                 .filter(|d| d.id == "deploy/migrate")
                 .map(|d| d.to_string())
                 .collect::<Vec<_>>()
         };
-        // No file: the flags plugin's default is true.
-        let found = deploy_ids(&["flags"], "");
+        // No file: the flags module contributed the check, because its
+        // default is true.
+        let found = deploy_ids(&flags, "");
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(
             found[0].contains("`[flags] migrate` defaults to true"),
@@ -1199,10 +1249,14 @@ drain_delay_secs = 5
             found[0]
         );
         // Turned off.
-        assert!(deploy_ids(&["flags"], "[flags]\nmigrate = false\n").is_empty());
-        // Jobs in memory has no tables.
-        assert!(deploy_ids(&["jobs", "jobs-memory"], "").is_empty());
-        // A section nobody listed, set in the file.
+        assert!(deploy_ids(&flags, "[flags]\nmigrate = false\n").is_empty());
+        // A module that contributed nothing (jobs in memory has no
+        // tables) is not reported.
+        assert!(deploy_ids(&[], "").is_empty());
+        // Set in the file, and contributed too: reported once, at the line.
+        let found = deploy_ids(&flags, "[flags]\nmigrate = true\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        // A section nobody contributed, set in the file.
         let found = deploy_ids(&[], "[ledger]\nmigrate = true\n");
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(
@@ -1217,7 +1271,7 @@ drain_delay_secs = 5
         let found = |text: &str| {
             let config = Config::from_toml("shop", "production", text).unwrap();
             let p = project(&["observability-metrics", "observability-health"]);
-            ids(&deploy(&p, &config, &sources(&[]), &|_| None))
+            ids(&deploy(&p, &config, &sources(&[]), &|_| None, &[]))
                 .into_iter()
                 .filter(|i| i.starts_with("deploy/metrics") || i.starts_with("deploy/drain"))
                 .map(str::to_owned)
@@ -1232,6 +1286,89 @@ drain_delay_secs = 5
     }
 
     #[test]
+    fn a_marker_with_no_bindings_falls_back_to_module_names_and_says_so() {
+        let config = Config::from_toml("shop", "production", "").unwrap();
+        let src = sources(&[]);
+        let mut old = project(&["config", "sessions"]);
+        old.bound = None;
+        let found = always(&old, &config);
+        assert_eq!(ids(&found), ["check/bindings-missing"]);
+        let said = found[0].to_string();
+        assert!(
+            said.contains("help: run `brocanth add` or `brocanth remove`"),
+            "{said}"
+        );
+        let found = deploy(&old, &config, &src, &|_| None, &[]);
+        assert!(
+            ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+        // Storage without `db`, read from the module names too.
+        let mut old = project(&["storage", "db"]);
+        old.bound = None;
+        let found = deploy(&old, &config, &src, &|_| None, &[]);
+        assert!(!ids(&found).contains(&"deploy/storage-local"));
+
+        // A table from stage 1, before `SessionCookie`: the same fallback.
+        let mut stage1 = project(&["config", "db", "sessions"]);
+        stage1.bound = Some(vec!["PgPool".to_owned()]);
+        let said = always(&stage1, &config)[0].to_string();
+        assert!(said.contains("does not record SessionCookie"), "{said}");
+        let found = deploy(&stage1, &config, &src, &|_| None, &[]);
+        assert!(
+            ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+
+        // A table that records the Kind: the binding answers, whichever
+        // module provides it, and nothing is said.
+        let mut new = project(&["config", "cookie-module"]);
+        new.bound = Some(vec!["SessionCookie".to_owned()]);
+        assert!(always(&new, &config).is_empty());
+        let found = deploy(&new, &config, &src, &|_| None, &[]);
+        assert!(ids(&found).contains(&"deploy/csrf-off"));
+        new.bound = Some(Vec::new());
+        assert!(always(&new, &config).is_empty());
+        let found = deploy(&new, &config, &src, &|_| None, &[]);
+        assert!(
+            !ids(&found).contains(&"deploy/csrf-off"),
+            "{:?}",
+            ids(&found)
+        );
+    }
+
+    #[test]
+    fn a_run_reads_the_marker_with_and_without_bindings() {
+        let root = std::env::temp_dir().join(format!("brocanth-check-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let options = Options {
+            deploy: true,
+            env: None,
+            allow: Vec::new(),
+        };
+        let run_ids = |marker: &str| {
+            std::fs::write(root.join("brocanth.toml"), marker).unwrap();
+            let report = run("shop", &root, &options).unwrap();
+            report.findings.iter().map(|f| f.id).collect::<Vec<_>>()
+        };
+        let modules = "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"config\", \"auth\"]\n";
+        // Old style: no table. The CSRF check still runs, from `auth`.
+        let old = run_ids(modules);
+        assert!(old.contains(&"deploy/csrf-off"), "{old:?}");
+        assert!(old.contains(&"check/bindings-missing"), "{old:?}");
+        // New style: the table records the session cookie.
+        let bound = run_ids(&format!(
+            "{modules}\n[bindings]\nSessionCookie = {{ provider = \"auth\", why = \"chosen\" }}\n"
+        ));
+        assert!(bound.contains(&"deploy/csrf-off"), "{bound:?}");
+        assert!(!bound.contains(&"check/bindings-missing"), "{bound:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_run_reads_the_marker_the_files_and_the_allow_list() {
         let root = std::env::temp_dir().join(format!("brocanth-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1239,7 +1376,8 @@ drain_delay_secs = 5
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("brocanth.toml"),
-            "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"config\", \"sessions\"]\n",
+            "[project]\nname = \"shop\"\n\n[modules]\nenabled = [\"config\", \"sessions\"]\n\n\
+             [bindings]\nSessionCookie = { provider = \"sessions\", why = \"chosen\" }\n",
         )
         .unwrap();
         std::fs::write(
@@ -1258,7 +1396,7 @@ drain_delay_secs = 5
         assert!(ids.contains(&"deploy/cookie-insecure"), "{ids:?}");
         assert!(
             ids.contains(&"deploy/csrf-off"),
-            "sessions means cookies: {ids:?}"
+            "a bound session cookie means cookies: {ids:?}"
         );
         assert!(!ids.contains(&"deploy/hsts"), "allowed: {ids:?}");
         let insecure = report

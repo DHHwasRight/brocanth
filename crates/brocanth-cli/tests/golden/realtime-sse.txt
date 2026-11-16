@@ -2985,6 +2985,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "realtime", "realtime-sse"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3009,4 +3011,4 @@ config = []
 crates = ["brocanth-events"]
 adapted_to = []
 
-# brocanth-digest: 1568d7e91603a73d
+# brocanth-digest: f3fc082f5f3c28db

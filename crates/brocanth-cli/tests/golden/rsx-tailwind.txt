@@ -2947,6 +2947,8 @@ title = "My Blog"
 [modules]
 enabled = ["rsx", "rsx-tailwind", "commands"]
 
+[bindings]
+
 [modules.rsx]
 version = "0.1.0"
 kind = ["renderer"]
@@ -2971,4 +2973,4 @@ config = []
 crates = ["brocanth-command"]
 adapted_to = []
 
-# brocanth-digest: 2846031ba24f6589
+# brocanth-digest: 9218af391538a557

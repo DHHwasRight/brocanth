@@ -1405,6 +1405,7 @@ macro_rules! register {
         // environment, then the flags.
         let given = crate::plugins::given()?;
         let builder = $builder;
+        // SessionCookie <- auth (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(crate::plugins::auth::Auth::new(
             crate::plugins::auth_settings(&given)?,
         ));
@@ -2040,7 +2041,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e4f2d5f5654777cf
+// brocanth-digest: 5a7d842f50bad7af
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2950,6 +2951,9 @@ title = "My Blog"
 [modules]
 enabled = ["auth", "superuser"]
 
+[bindings]
+SessionCookie = { provider = "auth", why = "chosen" }
+
 [modules.auth]
 version = "0.1.0"
 kind = ["middleware", "enhancer"]
@@ -2966,4 +2970,4 @@ config = ["superuser"]
 crates = ["brocanth-auth"]
 adapted_to = []
 
-# brocanth-digest: 69c5c76880d5b1ea
+# brocanth-digest: c07bd2b244141a04

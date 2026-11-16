@@ -2442,6 +2442,8 @@ title = "My Blog"
 [modules]
 enabled = ["realtime"]
 
+[bindings]
+
 [modules.realtime]
 version = "0.1.0"
 kind = ["enhancer", "middleware"]
@@ -2450,4 +2452,4 @@ config = ["realtime"]
 crates = ["brocanth-realtime"]
 adapted_to = []
 
-# brocanth-digest: ec0d06e8034f10cb
+# brocanth-digest: e7a3c9c87b738075

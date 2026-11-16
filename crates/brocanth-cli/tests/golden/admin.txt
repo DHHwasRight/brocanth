@@ -2644,6 +2644,8 @@ title = "My Blog"
 [modules]
 enabled = ["admin", "resource"]
 
+[bindings]
+
 [modules.admin]
 version = "0.1.0"
 kind = ["routes", "enhancer"]
@@ -2660,4 +2662,4 @@ config = []
 crates = ["brocanth-resource"]
 adapted_to = []
 
-# brocanth-digest: b5c099307e6abb78
+# brocanth-digest: 57eeabdb785a48a6

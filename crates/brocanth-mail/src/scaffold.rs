@@ -44,7 +44,8 @@
 
 use brocanth_scaffold::snippet::{configurable, redact_secrets, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Dep, JobQueue, Manifest, Module, PgPool, Project, Scaffold, Setting,
+    Slot,
 };
 
 /// Mail, as a choice on the `brocanth create` menu.
@@ -61,12 +62,12 @@ impl Module for Mail {
             "config",
             "its settings are read from the config file, not written as a literal",
         )
-        .adapts_to(
-            "jobs",
+        .uses::<JobQueue>(
             "`deliver_later` puts the message on the `mail` queue and a worker sends it",
         )
         .uses::<PgPool>("the application opens Postgres, so the test that starts it is left out")
         .asked_in("behaviour", "Send mail")
+        .contributes::<AgentsSection>("how a page sends mail, and never through `Smtp` itself")
         .krate(
             Dep::brocanth("brocanth-mail")
                 .feature("smtp")
@@ -74,7 +75,6 @@ impl Module for Mail {
                 .note("the `Outbox` in src/plugins/mail, and SMTP with rustls"),
         )
         .after("config")
-        .after("jobs")
         .absent(
             "brocanth-mail",
             "no mail; a password reset or a verification link cannot leave the server",
@@ -148,7 +148,7 @@ fn settings(project: &Project) -> Vec<Setting> {
             )
             .secret(),
     ];
-    if project.has("jobs") {
+    if queued(project) {
         out.push(Setting::bool(
             "worker",
             true,
@@ -176,7 +176,7 @@ const AGENTS: &str = "\n\
 
 fn plugin_rs(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "mail");
-    let jobs = project.has("jobs");
+    let jobs = queued(project);
     // `{:?}`: the title is free text, and a quote or a backslash in it
     // must not end the string literal.
     let mut text = PLUGIN
@@ -192,6 +192,11 @@ fn plugin_rs(project: &Project) -> String {
     // is the one question; a memory queue (`jobs-memory`) brings none.
     let postgres = project.provider::<PgPool>().is_some();
     text.replace("@APP_TEST@", if postgres { "" } else { APP_TEST })
+}
+
+/// Whether the project has a job queue, whichever module provides it.
+fn queued(project: &Project) -> bool {
+    project.provider::<JobQueue>().is_some()
 }
 
 /// The parts of the file that change with `jobs`: the marker, the text with

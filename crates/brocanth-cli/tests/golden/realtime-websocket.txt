@@ -3174,6 +3174,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "realtime", "realtime-websocket"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -3198,4 +3200,4 @@ config = []
 crates = ["brocanth-server", "brocanth-events"]
 adapted_to = []
 
-# brocanth-digest: cb41589129ae8db6
+# brocanth-digest: 16c469ee75f23b10

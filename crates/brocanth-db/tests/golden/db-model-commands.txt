@@ -2383,7 +2383,14 @@ pub mod routes;
 pub mod serve;
 pub mod settings;
 
-// brocanth-digest: a0c603171d98aeb8
+/// The checks this project's modules add to `check --deploy`, one per
+/// module that contributes `ConfigCheck`. `brocanth add` and `brocanth
+/// remove` rewrite this list with the modules.
+pub fn config_checks() -> Vec<brocanth_config::check::Entry> {
+    Vec::new()
+}
+
+// brocanth-digest: a5d25b0b466f581c
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
@@ -2486,7 +2493,10 @@ impl Command for Check {
             env: self.env,
             allow: self.allow,
         };
-        let report = check::run(crate::app::APP, ctx.root(), &options)?;
+        // The checks this project's modules contribute, written by
+        // `brocanth` into src/commands/mod.rs.
+        let checks = super::config_checks();
+        let report = check::run_with(crate::app::APP, ctx.root(), &options, &checks)?;
         eprint!("{report}");
         if report.failed(self.strict) {
             std::process::exit(1);

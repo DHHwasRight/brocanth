@@ -2784,6 +2784,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2832,4 +2834,4 @@ config = []
 crates = ["brocanth-observe"]
 adapted_to = []
 
-# brocanth-digest: 3ad9a2f9cd730720
+# brocanth-digest: 6328412bca049702

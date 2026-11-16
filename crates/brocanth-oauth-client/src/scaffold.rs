@@ -19,7 +19,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, module_ref, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, Manifest, Module, Opt, PgPool, Project, Scaffold,
+    Setting, Slot,
 };
 
 /// The built-in providers this module declares settings for.
@@ -34,6 +35,7 @@ impl Module for Oauth {
             "oauth",
             "an OAuth 2.0 client for third-party APIs (not sign-in); pick its parts below",
         )
+        .contributes::<AgentsSection>("how a third-party API is called")
         .category(Category::Enhancer)
         .asked_in(
             "doors",
@@ -82,6 +84,8 @@ impl Module for OauthClient {
             "a connection belongs to a signed-in account, and `auth` holds the sessions",
         )
         .requires::<PgPool>("the tokens are rows in the `db` module's database; a restart must not drop them")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[oauth_client]`, while the tokens are in Postgres")
+        .contributes::<AgentsSection>("how to connect an account and call its API without reading a token")
         .adapts_to(
             "config",
             "its settings are read from the config file, not written as a literal",
@@ -151,6 +155,11 @@ impl Module for OauthClient {
         if project.has("admin") {
             integration(s, "oauth-client", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        if !project.has("oauth-client-memory") {
+            s.at(Slot::ConfigChecks).line(
+                r#"Entry::migrates("oauth_client", "`brocanth_oauth_client::PgTokenStore::SCHEMA`"),"#,
+            );
+        }
         s.at(Slot::AgentsSections).block(CLIENT_AGENTS.to_string());
     }
 }
@@ -187,6 +196,7 @@ impl Module for OauthClientMemory {
             "oauth-client-memory",
             "the connected accounts in this process's memory; for tests and development, gone at restart",
         )
+        .contributes::<AgentsSection>("the tokens are lost at restart; remove it before production")
         .category(Category::Enhancer)
         .asked_in("doors", "")
         .part_of_but_off("oauth")

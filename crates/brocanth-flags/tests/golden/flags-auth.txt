@@ -1441,6 +1441,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
+        // SessionCookie <- auth (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::auth::Auth>("auth")
             .map_err(|e| e.to_string())?;
@@ -2094,7 +2095,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ab4c0b8d706f7ee4
+// brocanth-digest: 3f0dc7a04e82c404
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3478,6 +3479,7 @@ enabled = ["config", "db", "auth", "flags"]
 
 [bindings]
 PgPool = { provider = "db", why = "flags requires PgPool" }
+SessionCookie = { provider = "auth", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -3511,4 +3513,4 @@ config = ["flags"]
 crates = ["brocanth-flags"]
 adapted_to = ["config", "auth"]
 
-# brocanth-digest: d5ecc8726e9740f5
+# brocanth-digest: 34c4fb13d2e4212d

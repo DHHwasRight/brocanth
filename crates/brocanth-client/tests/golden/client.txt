@@ -2638,6 +2638,8 @@ title = "My Blog"
 [modules]
 enabled = ["commands", "input", "client"]
 
+[bindings]
+
 [modules.commands]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2662,4 +2664,4 @@ config = []
 crates = ["brocanth-client"]
 adapted_to = []
 
-# brocanth-digest: d3adc81087bdbca6
+# brocanth-digest: 1ee8514daea7702c

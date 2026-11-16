@@ -17,7 +17,9 @@
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
-use brocanth_scaffold::{Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Slot};
+use brocanth_scaffold::{
+    AgentsSection, Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Slot,
+};
 
 /// Row-level security, as a choice on the `brocanth create` menu.
 pub struct Rls;
@@ -28,6 +30,7 @@ impl Module for Rls {
             "rls",
             "Postgres row-level security declared in Rust; `rls make` writes the migration",
         )
+        .contributes::<AgentsSection>("how row-level security is declared in Rust and migrated")
         .category(Category::Enhancer)
         .asked_in(
             "data",

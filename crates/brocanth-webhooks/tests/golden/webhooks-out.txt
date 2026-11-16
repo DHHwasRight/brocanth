@@ -1470,6 +1470,7 @@ macro_rules! register {
         let builder = builder
             .plugin_from_config::<crate::plugins::db::Database>("db")
             .map_err(|e| e.to_string())?;
+        // JobQueue <- jobs (chosen). `brocanth.toml` [bindings] records it.
         let builder = builder
             .plugin_from_config::<crate::plugins::jobs::Jobs>("jobs")
             .map_err(|e| e.to_string())?;
@@ -2202,7 +2203,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 7625045b3634605b
+// brocanth-digest: 0cfb26ece86f0f41
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -3813,6 +3814,7 @@ enabled = ["config", "db", "jobs", "admin", "webhooks", "webhooks-out"]
 
 [bindings]
 PgPool = { provider = "db", why = "jobs requires PgPool" }
+JobQueue = { provider = "jobs", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -3862,4 +3864,4 @@ config = ["webhooks_out"]
 crates = ["brocanth-webhooks", "serde_json"]
 adapted_to = ["config", "admin"]
 
-# brocanth-digest: 24e7674499171b61
+# brocanth-digest: 480bce5993d04373

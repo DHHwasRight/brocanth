@@ -33,7 +33,7 @@
 
 use brocanth_scaffold::snippet::{configurable, module_ref, settings_derive, PLUGIN_TRAIT_USE};
 use brocanth_scaffold::{
-    Category, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Manifest, Module, Opt, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 use super::uses_postgres;
@@ -47,6 +47,7 @@ impl Module for AuthScreens {
             "auth-screens",
             "sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account",
         )
+        .contributes::<AgentsSection>("which pages the account screens own, and how they are changed")
         .category(Category::Routes)
         .category(Category::Enhancer)
         .part_of_but_off("auth")
@@ -69,6 +70,13 @@ impl Module for AuthScreens {
             "sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock",
         )
         .asked_in("doors", "Sign-up, sign-in and reset pages")
+        // Pages, so routes and not settings. A reader (the rate-limit
+        // example) reads them here and copies nothing.
+        .exports(
+            "sign_in_posts",
+            &["/account/signin", "/account/code", "/account/elevate"],
+            "the POST paths that check a password or a code: the sign-in form first, then the second factor and the password check before a sensitive change",
+        )
         .after("auth")
         .after("flash")
         .after("mail")

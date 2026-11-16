@@ -2614,6 +2614,8 @@ title = "My Blog"
 [modules]
 enabled = ["config", "jt", "i18n"]
 
+[bindings]
+
 [modules.config]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -2638,4 +2640,4 @@ config = ["i18n"]
 crates = ["brocanth-i18n"]
 adapted_to = ["config", "jt"]
 
-# brocanth-digest: d4658dae6721f141
+# brocanth-digest: c7d66b27a930640b

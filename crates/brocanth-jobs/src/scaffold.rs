@@ -44,7 +44,8 @@ use brocanth_scaffold::snippet::{
     configurable, integration, redact_secrets, settings_derive, PLUGIN_TRAIT_USE,
 };
 use brocanth_scaffold::{
-    Category, Dep, Manifest, Module, PgPool, Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, ConfigCheck, Dep, JobQueue, Manifest, Module, PgPool, Project,
+    Scaffold, Setting, Slot,
 };
 
 /// Where the generated queue keeps its jobs.
@@ -84,6 +85,8 @@ impl Module for Jobs {
             &["jobs-memory"],
             "the queue's tables live in the project's database, beside the pages' pool",
         )
+        .provides::<JobQueue>("the queue, on Postgres (SKIP LOCKED); in the process with `jobs-memory`")
+        .contributes::<ConfigCheck>("`deploy/migrate` for `[jobs]`, while the queue is on Postgres")
         .adapts_to(
             "jobs-memory",
             "the queue lives in the process, and [jobs] has no migrate",
@@ -141,6 +144,10 @@ impl Module for Jobs {
         if project.has("admin") {
             integration(s, "jobs", "admin", Slot::AdminPanels, ADMIN_TAB);
         }
+        if store == Store::Db {
+            s.at(Slot::ConfigChecks)
+                .line(r#"Entry::migrates("jobs", "`Queue::schema_sql`"),"#);
+        }
     }
 }
 
@@ -163,6 +170,8 @@ impl Module for JobsMemory {
         .asked_in("behaviour", "")
         .part_of_but_off("jobs")
         .because("it is where the jobs module keeps its jobs")
+        .provides::<JobQueue>("the queue, in this process")
+        .contributes::<AgentsSection>("the queue is lost at restart; remove it before production")
         .krate(
             Dep::brocanth("brocanth-jobs")
                 .feature("memory")
