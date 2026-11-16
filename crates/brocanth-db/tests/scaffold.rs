@@ -4,10 +4,10 @@
 //! `tests/golden/<name>.txt`. Bless with `BROCANTH_BLESS=1`; build and test
 //! each project too with `BROCANTH_BUILD=1`.
 
-use brocanth_db::scaffold::Database;
+use brocanth_db::scaffold::{Database, DbEmbedded};
 use brocanth_scaffold::{testing, Module};
 
-const MODULES: &[&dyn Module] = &[&Database];
+const MODULES: &[&dyn Module] = &[&Database, &DbEmbedded];
 
 fn shape(name: &str, picks: &[&'static str]) {
     let files = brocanth_cli::testing::generate("my-blog", picks, MODULES)
@@ -36,4 +36,21 @@ fn the_pool_without_a_config_file() {
 #[test]
 fn the_pool_under_the_models_with_a_command_line() {
     shape("db-model-commands", &["config", "db", "model", "commands"]);
+}
+
+/// The pool on a development server from the binary, with no config file:
+/// `[db_embedded]` comes from flags and the environment.
+#[test]
+fn the_pool_on_an_embedded_server_without_a_config_file() {
+    shape("db-embedded-flags", &["db", "db-embedded"]);
+}
+
+/// The same with a config file and a command line: `[db_embedded]` in the
+/// file, and `migrate` and `dbshell` still on `[db] url`.
+#[test]
+fn the_pool_on_an_embedded_server_with_a_config_file() {
+    shape(
+        "db-embedded-config",
+        &["config", "db", "db-embedded", "commands"],
+    );
 }

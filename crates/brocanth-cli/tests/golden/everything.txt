@@ -16,7 +16,7 @@ brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-observe = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "logs", "metrics", "otel", "jobs"], default-features = false }
 brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["check"] }
-brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
+brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "embedded"] }  # the pool, read as `ctx.db()`
 brocanth-model = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["db", "plugin"] }  # `Orm` over the `db` pool, and on the request context
 brocanth-migrate = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the `migrate` tool: `ids`, `make` and `sync`, in src/bin/migrate.rs
 brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "admin"], default-features = false }
@@ -65,6 +65,7 @@ serde = { version = "1", features = ["derive"] }  # the config plugin reads type
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 ===== .gitignore =====
 /target
+/tmp/postgres
 /node_modules
 /tmp/mail
 ===== rust-toolchain.toml =====
@@ -2036,6 +2037,7 @@ pub mod auth_oauth;
 pub mod auth_screens;
 pub mod cache;
 pub mod db;
+pub mod db_embedded;
 pub mod errors;
 pub mod flags;
 pub mod i18n;
@@ -2096,6 +2098,9 @@ macro_rules! register {
         let builder = $builder.with_config(config);
         let builder = builder
             .plugin_from_config::<crate::plugins::sessions::Sessions>("sessions")
+            .map_err(|e| e.to_string())?;
+        let builder = builder
+            .plugin_from_config::<crate::plugins::db_embedded::DbEmbedded>("db_embedded")
             .map_err(|e| e.to_string())?;
         let builder = builder.plugin(crate::plugins::policy::Policies::new(()));
 
@@ -2455,7 +2460,8 @@ pub(crate) use register;
 /// `NoContext::Install<E>` is `E`, so this is `Base` in a project whose
 /// plugins all provide nothing.
 type WithSessions = After<crate::plugins::sessions::Sessions, Base>;
-type WithPolicy = After<crate::plugins::policy::Policies, WithSessions>;
+type WithDbEmbedded = After<crate::plugins::db_embedded::DbEmbedded, WithSessions>;
+type WithPolicy = After<crate::plugins::policy::Policies, WithDbEmbedded>;
 type WithGtag = After<brocanth_gtag::Gtag, WithPolicy>;
 type WithAdmin = After<crate::plugins::admin::AdminSettings, WithGtag>;
 type WithI18n = After<crate::plugins::i18n::I18n, WithAdmin>;
@@ -2748,6 +2754,42 @@ pub const SETTINGS: &[Setting] = &[
         flag: true,
         file: "src/modules/sessions.rs",
         flags: crate::modules::sessions::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db_embedded.dir",
+        help: "The directory for the server's binaries, data and password, from the project root.",
+        flag: true,
+        file: "src/modules/db_embedded.rs",
+        flags: crate::modules::db_embedded::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "db_embedded.port",
+        help: "The port on localhost. 0 takes a free one at each start.",
+        flag: true,
+        file: "src/modules/db_embedded.rs",
+        flags: crate::modules::db_embedded::MODULE.flags,
+        none_as: None,
+        text: false,
+    },
+    Setting {
+        path: "db_embedded.database",
+        help: "The database the pool opens, created at the first start.",
+        flag: true,
+        file: "src/modules/db_embedded.rs",
+        flags: crate::modules::db_embedded::MODULE.flags,
+        none_as: None,
+        text: true,
+    },
+    Setting {
+        path: "db_embedded.timeout",
+        help: "Seconds initdb or pg_ctl may take, each.",
+        flag: true,
+        file: "src/modules/db_embedded.rs",
+        flags: crate::modules::db_embedded::MODULE.flags,
         none_as: None,
         text: false,
     },
@@ -4301,6 +4343,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::db::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::db_embedded::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::jobs::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -4544,6 +4589,7 @@ pub fn flag_args(
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let sessions = crate::plugins::sessions::Settings::default();
+    let db_embedded = crate::plugins::db_embedded::Settings::default();
     let gtag = brocanth_gtag::GtagConfig::default();
     let admin = crate::plugins::admin::Settings::default();
     let i18n = brocanth_i18n::NegotiatorConfig::default();
@@ -4581,6 +4627,13 @@ fn defaults() -> Vec<(&'static str, String)> {
     vec![
         ("sessions.cookie", format!("{:?}", sessions.cookie)),
         ("sessions.secure", format!("{:?}", sessions.secure)),
+        ("db_embedded.dir", format!("{:?}", db_embedded.dir)),
+        ("db_embedded.port", format!("{:?}", db_embedded.port)),
+        (
+            "db_embedded.database",
+            format!("{:?}", db_embedded.database),
+        ),
+        ("db_embedded.timeout", format!("{:?}", db_embedded.timeout)),
         ("gtag.enabled", format!("{:?}", gtag.enabled)),
         ("gtag.measurement_id", format!("{:?}", gtag.measurement_id)),
         ("gtag.consent_mode", format!("{:?}", gtag.consent_mode)),
@@ -5146,7 +5199,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 1bd2de00e0b8d19e
+// brocanth-digest: ce5d2a294e3941dd
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -5515,6 +5568,49 @@ pub mod db {
     }
 
     /// What src/modules/db.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/db_embedded.rs.
+pub mod db_embedded {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[db_embedded]` that has a flag. A secret or a list has no
+    /// flag, so it has no variant here and cannot be renamed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Dir,
+        Port,
+        Database,
+        Timeout,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Dir => "db_embedded.dir",
+                Key::Port => "db_embedded.port",
+                Key::Database => "db_embedded.database",
+                Key::Timeout => "db_embedded.timeout",
+            }
+        }
+    }
+
+    /// What src/modules/db_embedded.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
@@ -7512,7 +7608,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: e6055e4c10a189d5
+// brocanth-digest: 3e25ffa6e017cd68
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -7548,6 +7644,7 @@ pub mod client;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod db_embedded;
 pub mod docker;
 pub mod docker_kubernetes;
 pub mod errors;
@@ -7616,6 +7713,7 @@ pub const ALL: &[&str] = &[
     "config",
     "sessions",
     "db",
+    "db-embedded",
     "model",
     "cache",
     "cache-redis",
@@ -7681,7 +7779,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: aac373d67ee5b564
+// brocanth-digest: 0ecae2520bfd429a
 ===== src/modules/brocanth.rs =====
 //! The framework itself: the flag rule of the project, and `[server]`.
 //!
@@ -7911,6 +8009,36 @@ pub const MODULE: Module = Module {
     // keep the declared name. Examples:
     //   (Key::MaxConnections, Flag::As("max-connections")),
     //   (Key::MaxConnections, Flag::Hidden),
+    rename: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/db_embedded.rs =====
+//! `db-embedded`: a Postgres server started from the binary, for development
+//! with no Postgres installed; never in production.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [db_embedded] in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename`: unused until it names a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::db_embedded::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [db_embedded]. `Flags::Project` follows
+    // src/modules/brocanth.rs. `Flags::On` and `Flags::Off` decide here.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Dir, Flag::As("dir")),
+    //   (Key::Dir, Flag::Hidden),
     rename: &[],
 
     ..Module::DEFAULT
@@ -9479,6 +9607,18 @@ cookie = "_my_blog_session"
 # Send the cookie over HTTPS only.
 # Development only. Anywhere a browser reaches over HTTPS, this is true.
 secure = false
+
+[db_embedded]
+# The directory for the server's binaries, data and password, from the project root.
+# Delete it to start from an empty database.
+dir = "tmp/postgres"
+# The port on localhost. 0 takes a free one at each start.
+# Set one to reach the server with psql while the application runs.
+port = 0
+# The database the pool opens, created at the first start.
+database = "my_blog"
+# Seconds initdb or pg_ctl may take, each.
+timeout = 60
 
 [gtag]
 # Insert the consent banner and the Google tag into every HTML page.
@@ -14640,7 +14780,13 @@ impl Plugin for Database {
         }
     }
 
-    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // `db-embedded` started a Postgres server in its own `configure`,
+        // registered before this plugin: the pool opens on it, and `[db] url`
+        // is not read. `brocanth remove db-embedded` goes back to the URL.
+        if let Some(embedded) = lc.services().get::<brocanth_db::embedded::EmbeddedUrl>() {
+            self.config.url = embedded.0.clone();
+        }
         if self.config.url.is_empty() {
             return Err(PluginError::new(
                 "[db] url is required; there is no default database\n\
@@ -14756,6 +14902,133 @@ mod tests {
         let printed = format!("{settings:?}");
         assert!(!printed.contains("not-for-the-log"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
+    }
+}
+===== src/plugins/db_embedded/mod.rs =====
+//! A Postgres server inside this binary, for development.
+//!
+//! `configure` starts it from the archive the `embedded` feature of
+//! `brocanth-db` bundled, before the `db` plugin, and publishes its URL. The
+//! `db` plugin opens its pool on that URL and not on `[db] url`. `shutdown`
+//! stops the server after the pool closed.
+//!
+//! Never in production: it refuses to start outside `development` and
+//! `test`, and `brocanth check --deploy` reports the module. Delete the
+//! registration in `src/plugins/mod.rs` and this file (or run `brocanth
+//! remove db-embedded`), and the pool goes back to `[db] url`.
+
+use std::time::Duration;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_db::embedded::{EmbeddedConfig, EmbeddedPostgres, EmbeddedUrl};
+
+/// What this plugin is built from: `[db_embedded]`.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[db_embedded]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The directory for the server's binaries, data and password, from the
+    /// project root. Delete it to start from an empty database.
+    pub dir: String,
+    /// The port on localhost. 0 takes a free one at each start.
+    pub port: u16,
+    /// The database the pool opens, created at the first start.
+    pub database: String,
+    /// Seconds `initdb` or `pg_ctl` may take, each.
+    pub timeout: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            dir: "tmp/postgres".to_string(),
+            port: 0,
+            database: "my_blog".to_string(),
+            timeout: 60,
+        }
+    }
+}
+
+pub struct DbEmbedded {
+    config: EmbeddedConfig,
+    /// Running from `configure` until `shutdown`.
+    server: Option<EmbeddedPostgres>,
+}
+
+/// `$<APP>_ENV`, the variable the config plugin reads too.
+fn environment() -> String {
+    let var = format!("{}_ENV", crate::app::APP.to_uppercase().replace('-', "_"));
+    std::env::var(var).unwrap_or_else(|_| "development".to_string())
+}
+
+/// Refuses every environment but `development` and `test`.
+fn check_environment(environment: &str) -> Result<(), PluginError> {
+    if matches!(environment, "development" | "test") {
+        return Ok(());
+    }
+    Err(PluginError::new(format!(
+        "[db_embedded] starts a Postgres server inside this process, and this is \
+         `{environment}`: it is for development and tests only\n\
+         help: run `brocanth remove db-embedded` and set `[db] url` to a real server \
+         before you deploy"
+    )))
+}
+
+impl Plugin for DbEmbedded {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "db_embedded";
+
+    fn new(settings: Settings) -> Self {
+        let mut config = EmbeddedConfig::new(settings.dir, settings.database);
+        config.port = settings.port;
+        config.timeout = Duration::from_secs(settings.timeout);
+        Self {
+            config,
+            server: None,
+        }
+    }
+
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        check_environment(&environment())?;
+        // Blocks until the server answers: the first start extracts the
+        // binaries and runs initdb, a few seconds; a later one starts it.
+        let server = EmbeddedPostgres::start(&self.config)
+            .map_err(|e| PluginError::new(format!("[db_embedded] {e}")))?;
+        let version = server.version();
+        let url = server.redacted_url();
+        crate::plugins::say!(info, "db_embedded: Postgres {version} on {url}");
+        // For the `db` plugin, registered after this one.
+        lc.services_mut()
+            .insert(EmbeddedUrl(server.url().to_string()));
+        self.server = Some(server);
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        // `db` closed its pool already: shutdown runs in reverse order.
+        let Some(server) = self.server.take() else {
+            return Ok(());
+        };
+        server
+            .stop()
+            .map_err(|e| PluginError::new(format!("[db_embedded] {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_development_and_test_start_it() {
+        assert!(super::check_environment("development").is_ok());
+        assert!(super::check_environment("test").is_ok());
+        let refused = super::check_environment("production").expect_err("refused");
+        assert!(refused.to_string().contains("help:"), "{refused}");
     }
 }
 ===== src/plugins/errors/mod.rs =====
@@ -20174,6 +20447,7 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `sessions`  a cookie name on the context and an empty `session` layer to build on; no session store, for sign-in pick `auth`
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
+- `db-embedded`  a Postgres server started from the binary, for development with no Postgres installed; never in production
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
 - `cache-redis`  the cache on Redis or Valkey instead of Postgres; one more server to run
@@ -20281,6 +20555,21 @@ cookie, and `Session` holds only the cookie's name. For accounts,
 sign-in and a signed session cookie, use the `auth` module
 (`brocanth-auth`): `auth.sessions()` on the context. Do not build a
 second session beside it.
+
+## The development database
+
+`src/plugins/db_embedded/mod.rs` starts a Postgres server from the binary
+when the application starts, and the `db` pool opens on it: `cargo run`
+needs no Postgres on the machine. The data is in `tmp/postgres/data` and
+survives a restart; delete `tmp/postgres` for an empty database.
+
+It is for development only. It refuses to start when `$<APP>_ENV` is not
+`development` or `test`, and `brocanth check --deploy` reports it. Before a
+deploy, run `brocanth remove db-embedded` and set `[db] url`.
+
+`migrate` and `dbshell` read `[db] url` and do not start the server. Set
+`[db_embedded] port`, run the application, and point `[db] url` at that port
+to use them.
 ## Jobs in memory
 
 The queue lives in this process (`jobs-memory`). Jobs survive no restart,
@@ -21111,7 +21400,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: db3a9f90bb3fe119 -->
+<!-- brocanth-digest: 2fcc1de772f99d21 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -21123,7 +21412,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "sessions", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [modules.observability]
 version = "0.1.0"
@@ -21195,7 +21484,15 @@ kind = ["enhancer", "middleware", "renderer"]
 files = ["src/modules/db.rs", "src/commands/dbshell.rs", "src/plugins/db/"]
 config = ["db"]
 crates = ["brocanth-db"]
-adapted_to = ["config", "commands", "model"]
+adapted_to = ["config", "commands", "model", "db-embedded"]
+
+[modules.db-embedded]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/db_embedded.rs", "src/plugins/db_embedded/"]
+config = ["db_embedded"]
+crates = ["brocanth-db"]
+adapted_to = ["config"]
 
 [modules.model]
 version = "0.1.0"
@@ -21701,4 +21998,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db", "jobs", "cache"]
 
-# brocanth-digest: 1a2e65d5d6471894
+# brocanth-digest: 1e6168019a25c26d
