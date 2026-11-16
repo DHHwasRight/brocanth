@@ -11,13 +11,32 @@ The wizard calls it: *Count visits with Google Analytics, after consent*.
 | Default | off |
 | Presets | offered unticked in "A static site" |
 | Part of | none |
-| Needs | none |
-| After | none |
-| Adapts to | [`config`](config.md), [`i18n`](i18n.md) |
 | Conflicts | none |
 | Outside the runtime | yes: the hook runs in the static export too |
 | Crates | `brocanth-gtag` |
 | Without it | no Google tag; nothing on a page talks to Google |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/gtag.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `Mount` (a mounted path): a `Backoffice` mount, such as the admin, never gets the tag, at the path its module file mounts it |
+| Adapts to | [`i18n`](i18n.md): the banner's words come from the catalogs, in the request's locale |
+| Contributes | `AgentsSection` `gtag`: the consent banner, and that no tag loads without consent |
+| Collects | none |
+| Exports | none |
+| Hooks | `consent-log` (Guard, required): record each consent choice, while `consent_log` names a file; `insert` (Identify, required): put the banner and the tag into each HTML page |
+| Options (build time) | none |
+| Settings (run time) | `[gtag]`: `enabled`, `measurement_id`, `consent_mode`, `respect_gpc`, `consent_days`, `send_title`, `allow_params`, `exclude`, `cookie_domain`, `consent_log`, `banner.text`, `banner.accept`, `banner.refuse`, `banner.manage`, `banner.policy_url`, `banner.policy` |
+<!-- end generated: capabilities -->
 
 With [`i18n`](i18n.md), the banner's words come from the catalogs, in the
 request's locale. `integrate.i18n: false` in `src/modules/gtag.rs` keeps the

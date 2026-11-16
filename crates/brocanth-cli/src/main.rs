@@ -8,6 +8,7 @@
 
 mod choices;
 mod commands;
+mod explain;
 mod modules;
 mod owned;
 mod questions;
@@ -124,6 +125,13 @@ enum Command {
     /// diff` compares each copy with the shipped screen of the installed
     /// version. See docs/admin-customization.md.
     Admin(commands::admin::AdminArgs),
+    /// Say why the project is made the way it is
+    ///
+    /// Why each module is in, the provider of each Kind, each contribution
+    /// and who collects it, each hook with its phase and whether it is
+    /// required, and each setting with its layers. It reads brocanth.toml
+    /// and the modules of this brocanth; it builds and connects to nothing.
+    Explain(commands::explain::ExplainArgs),
     /// A command defined in this project, run by the project's own binary
     ///
     /// Everything this tool does not recognise is one. `brocanth` is
@@ -232,6 +240,11 @@ fn main() -> ExitCode {
             &ui,
             dir,
             commands::check::CheckArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
+        ),
+        Some(("explain", m)) => commands::explain::run(
+            &ui,
+            dir,
+            commands::explain::ExplainArgs::from_arg_matches(m).unwrap_or_else(|e| e.exit()),
         ),
         Some(("admin", m)) => commands::admin::run(
             &ui,

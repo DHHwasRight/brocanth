@@ -11,14 +11,32 @@ The wizard calls it: *Full-text search over a site index, with a page*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`pagination`](pagination.md): the page reads `page` with `ctx.page_params()` and draws its pager with the module's helpers |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | [`pagination`](pagination.md) |
-| Adapts to | [`model`](model.md), [`rsx`](rsx.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-search` |
 | Without it | no search; a visitor finds a page by its link or not at all |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/search.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`pagination`](pagination.md): the page reads `page` with `ctx.page_params()` and draws its pager with the module's helpers |
+| After | [`pagination`](pagination.md) |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the index is a table and the page queries it through the `db` pool; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | [`model`](model.md): the migration is a SeaORM file that `migrate sync` lists, not a SQL file; [`rsx`](rsx.md): the page is drawn by src/pages/search.rsx and the `PageNav` component |
+| Contributes | `AgentsSection` `search`: how a model is searched |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | `per_page` = `20`: Results per page on /search. |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

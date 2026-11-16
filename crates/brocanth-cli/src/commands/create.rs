@@ -918,7 +918,7 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 /// has; a module owns the files only it knows about, and adds lines to the
 /// slots in between. Anything it got wrong comes back as a diagnostic rather
 /// than as a project that compiles and is missing a piece.
-fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
+pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
     let known = all();
     let mounts: Vec<(&str, &str, brocanth_scaffold::MountRole)> = a
         .picks

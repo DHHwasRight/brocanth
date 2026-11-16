@@ -11,14 +11,32 @@ The wizard calls it: *Receive webhooks: signature, replay window, idempotency ke
 | Default | off |
 | Presets | none |
 | Part of | [`webhooks`](webhooks.md), ticked with its parent |
-| Needs | none |
-| Uses | `PgPool`: the idempotency keys are rows every instance shares; without it they are in memory |
-| After | [`config`](config.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-webhooks` (feature `postgres` with `db`), `serde` |
 | Without it | no incoming webhooks; a sender's POST meets the CSRF check and is refused |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/webhooks_in.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | `PgPool` (a Postgres pool): the idempotency keys are rows every instance shares; without it they are in memory; `ConfigSource` (settings read from a file): the development secret is in the development file, so the default is empty and production must set one |
+| Adapts to | none |
+| Contributes | `ConfigCheck` `webhooks-in`: `deploy/migrate` for `[webhooks_in]`, while the keys are in Postgres; `AgentsSection` `webhooks-in`: how a source is verified, and what a handler must not do |
+| Collects | none |
+| Exports | none |
+| Hooks | `receive` (Guard, required): answer POST {path}/{source} before the CSRF check |
+| Options (build time) | none |
+| Settings (run time) | `[webhooks_in]`: `path`, `tolerance`, `max_bytes`, `secret` (secret) |
+<!-- end generated: capabilities -->
 
 ## What it does
 

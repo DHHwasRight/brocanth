@@ -10,13 +10,32 @@ admin.
 | Default | off |
 | Presets | none |
 | Part of | none |
-| Needs | [`superuser`](superuser.md): only a superuser gives a role, and `superuser` reads the signed-in member of staff |
-| After | [`superuser`](superuser.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth`, feature `policy` |
 | Without it | no roles; a member of staff is a superuser, and nobody else is |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/roles.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`superuser`](superuser.md): only a superuser gives a role, and `superuser` reads the signed-in member of staff |
+| After | [`superuser`](superuser.md), [`superuser`](superuser.md) |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `roles`: how roles grant staff access, and who may change them; `AdminPanel` `roles`, on: a Roles tab where a superuser defines roles and gives them to accounts, and the owner of a tab gives read or edit on it |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

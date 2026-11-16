@@ -527,14 +527,18 @@ pub(crate) struct Record {
 
 pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
     let doc: DocumentMut = text.parse().map_err(|e| {
-        vec![Diagnostic::error("brocanth.toml", format!("{e}")).at("brocanth.toml")]
+        vec![Diagnostic::error("brocanth.toml", format!("{e}"))
+            .at("brocanth.toml")
+            .help("`brocanth add` writes this file; restore it from version control")]
     })?;
     let name = doc
         .get("project")
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .ok_or_else(|| {
-            vec![Diagnostic::error("brocanth.toml", "no `[project] name`").at("brocanth.toml")]
+            vec![Diagnostic::error("brocanth.toml", "no `[project] name`")
+                .at("brocanth.toml")
+                .help("add `[project]` then `name = \"<package name>\"`, the name in Cargo.toml")]
         })?
         .to_string();
 

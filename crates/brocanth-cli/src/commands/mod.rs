@@ -10,6 +10,7 @@ pub mod admin;
 pub mod check;
 pub mod create;
 pub mod delegate;
+pub mod explain;
 pub mod project;
 pub mod remove;
 

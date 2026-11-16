@@ -11,14 +11,32 @@ The wizard calls it: *Row-level security: Postgres hides the rows of other tenan
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | [`commands`](commands.md): the migration is written by `rls make`, a command of the project's binary that runs `schema()` |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | [`commands`](commands.md), [`model`](model.md) |
-| Adapts to | [`model`](model.md), [`admin-model`](admin-model.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-rls` |
 | Without it | no row-level security; a query that forgets its WHERE shows every tenant's rows |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/rls.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`commands`](commands.md): the migration is written by `rls make`, a command of the project's binary that runs `schema()` |
+| After | [`commands`](commands.md), [`model`](model.md) |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | [`model`](model.md): `rls make` writes a SeaORM migration file, not a SQL file; [`admin-model`](admin-model.md): AGENTS.md says the admin queries as the login role, so a FORCE table shows it no row |
+| Contributes | `AgentsSection` `rls`: how row-level security is declared in Rust and migrated |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 The design, the dependency order, the diff rules and the rejected
 alternatives are in [`docs/rls.md`](../rls.md).

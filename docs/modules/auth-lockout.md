@@ -11,13 +11,32 @@ The wizard calls it: *Lock an account for a while after wrong passwords*.
 | Default | off |
 | Presets | none |
 | Part of | [`auth`](auth.md), off until you tick it |
-| Needs | none |
-| After | [`auth`](auth.md) |
-| Adapts to | none |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` (through `auth`) |
 | Without it | no lockout; only a rate limit slows a guessing run |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/auth_lockout.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`auth`](auth.md) |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `auth-lockout`: how wrong passwords lock an account, and what lifts the lock |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | `max_failures` = `10`: Wrong passwords that lock an account, 3 or more.; `window_secs` = `900`: The seconds in which those wrong passwords count, 60 to 86400.; `lock_for_secs` = `900`: How long a lock lasts, in seconds, 60 to 86400. |
+| Settings (run time) | none |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

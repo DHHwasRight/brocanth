@@ -11,14 +11,32 @@ The wizard calls it: *Feature flags: turn code on for some users without a deplo
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | none |
-| Adapts to | [`config`](config.md), [`auth`](auth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-flags` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no feature flags; new code is on for everybody the moment it ships |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/flags.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the rules are rows in the database the `db` module opens; in memory a restart would turn every flag off; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | [`auth`](auth.md): a flag sees the signed-in account, so percentage and user rules match it |
+| Contributes | `ConfigCheck` `flags`: `deploy/migrate` for `[flags]`; `AgentsSection` `flags`: how to declare a flag and read it in a page; `AdminPanel` `flags`, on: a `flags` tab in the admin that turns each declared flag on or off |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[flags]`: `refresh_secs`, `migrate` |
+<!-- end generated: capabilities -->
 
 With [`admin`](admin.md), a tab at `/admin/flags` that lists every declared
 flag and every stored rule, and turns each one. It is in the generated

@@ -11,14 +11,32 @@ The wizard calls it: *Accounts and passwords. No OAuth provider*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| Uses | `PgPool`: accounts and sessions are rows on the project's pool, not in memory |
-| After | [`config`](config.md) |
-| Adapts to | [`auth-oauth`](auth-oauth.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-auth` |
 | Without it | no accounts; nothing hashes a password and nothing signs a session cookie |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/auth.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | `SessionCookie` (a session cookie): a signed session cookie, with sign-in and sign-out |
+| Requires | none |
+| Uses | `PgPool` (a Postgres pool): accounts and sessions are rows on the project's pool, not in memory |
+| Adapts to | [`auth-oauth`](auth-oauth.md): the session cookie is SameSite=Lax, so the provider callback sees who is signed in |
+| Contributes | none |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[auth]`: `signing_key_env`, `totp_key_env`, `cookie_name`, `secure`, `idle_timeout`, `absolute_timeout` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

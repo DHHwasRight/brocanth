@@ -11,14 +11,32 @@ The wizard calls it: *Connect accounts and call their APIs*.
 | Default | off |
 | Presets | none |
 | Part of | [`oauth`](oauth.md), ticked with its parent |
-| Needs | [`auth`](auth.md): a connection belongs to a signed-in account, and `auth` holds the sessions |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | [`auth`](auth.md), [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`middleware-csrf`](middleware-csrf.md), [`oauth-client-memory`](oauth-client-memory.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-oauth-client` (feature `postgres` unless `oauth-client-memory`; `admin` with that module) |
 | Without it | no connected accounts; nothing calls a provider's API for a person |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/oauth_client.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | [`auth`](auth.md): a connection belongs to a signed-in account, and `auth` holds the sessions |
+| After | [`auth`](auth.md), [`auth`](auth.md) |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the tokens are rows in the `db` module's database; a restart must not drop them; providers: [`db`](db.md) |
+| Uses | none |
+| Adapts to | [`middleware-csrf`](middleware-csrf.md): the Connect and Disconnect forms carry the CSRF token; [`oauth-client-memory`](oauth-client-memory.md): the tokens are kept in memory, and [oauth_client] has no migrate |
+| Contributes | `ConfigCheck` `oauth-client`: `deploy/migrate` for `[oauth_client]`, while the tokens are in Postgres; `AgentsSection` `oauth-client`: how to connect an account and call its API without reading a token; `AdminPanel` `connections`, on: a tab at /admin/connections: every connection without its tokens, and a Revoke button |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | `mount_at` = `"/connections"`, mount, Machine: Where the connect pages answer. The redirect URI at each provider is <base_url><mount_at>/<provider>/callback. |
+| Settings (run time) | `[oauth_client]`: `providers`, `base_url`, `key` (secret), `allow_http`, `migrate`, `github_client_id`, `github_client_secret` (secret), `google_client_id`, `google_client_secret` (secret), `microsoft_client_id`, `microsoft_client_secret` (secret), `gitlab_client_id`, `gitlab_client_secret` (secret) |
+<!-- end generated: capabilities -->
 
 ## What it does
 

@@ -11,14 +11,32 @@ The wizard calls it: *Count page views on the server: no cookie, no script, no t
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so |
-| After | none |
-| Adapts to | [`config`](config.md) |
 | Conflicts | [`beacon`](beacon.md): both would count one page: the hook on the server, and the beacon in the browser; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-analytics` (feature `config` with `config`, `admin` with `admin`) |
 | Without it | no page-view counts; nothing is measured, so nothing needs consent |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/analytics.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | `PgPool` (a Postgres pool): the views are rows in the database the `db` module opens; in memory they would vanish at every restart; providers: [`db`](db.md) |
+| Uses | `Mount` (a mounted path): every `Backoffice` mount, such as the admin, is never counted |
+| Adapts to | none |
+| Contributes | `ConfigCheck` `analytics`: `deploy/migrate` for `[analytics]`; `AgentsSection` `analytics`: what is counted, and that nothing needs consent; `AdminPanel` `analytics`, on: an `analytics` tab in the admin, with the page-view numbers |
+| Collects | none |
+| Exports | none |
+| Hooks | `count` (Identify, on by default): count each page this server answers; `collect` (Guard, on by default): accept beacons at `collector_path` from `collector_origins` |
+| Options (build time) | none |
+| Settings (run time) | `[analytics]`: `enabled`, `site`, `exclude`, `query_allow`, `retention_days`, `flush_interval`, `respect_gpc`, `ip_header`, `country_header`, `migrate`, `collector_path`, `collector_origins` |
+<!-- end generated: capabilities -->
 
 With [`admin`](admin.md), the admin is never counted: the registration
 calls `.exclude_path(crate::modules::admin::MODULE.mount_at)`, so a moved

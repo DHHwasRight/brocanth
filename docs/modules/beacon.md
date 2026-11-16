@@ -11,12 +11,31 @@ The wizard calls it: *Report page views of these pages to a brocanth server with
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | nothing |
-| Adapts to | none |
 | Conflicts | [`analytics`](analytics.md): both would count one page: the hook on the server, and the beacon in the browser |
 | Outside the runtime | yes |
 | Crates | `brocanth-analytics` (no default features; feature `config` with `config`) |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/beacon.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | none |
+| Contributes | `AgentsSection` `beacon`: how the beacon is sent, and that it sets no cookie |
+| Collects | none |
+| Exports | none |
+| Hooks | `insert` (Identify, required): put the snippet into each HTML page, while `collector` is set |
+| Options (build time) | none |
+| Settings (run time) | `[beacon]`: `collector`, `respect_gpc` |
+<!-- end generated: capabilities -->
 
 **Why its own module and not a child of `analytics`:** the static site and
 the server that counts are two projects. A static site cannot hold

@@ -11,13 +11,32 @@ The wizard calls it: *HTML pages for a missing page and a failure*.
 | Default | off |
 | Presets | none |
 | Part of | nothing |
-| Needs | none |
-| After | [`rsx`](rsx.md) |
-| Adapts to | [`rsx`](rsx.md), [`i18n-routing`](i18n-routing.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-errors` (feature `config` with [`config`](config.md)) |
 | Without it | a missing page answers a plain `Not Found`, a failure a plain `Internal Server Error` |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/errors.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | [`rsx`](rsx.md) |
+| Provides | none |
+| Requires | none |
+| Uses | none |
+| Adapts to | [`rsx`](rsx.md): writes `not-found.rsx` and `error.rsx`, rendered inside the layouts; [`i18n-routing`](i18n-routing.md): its tests ask for paths under the `/en` segment, which the redirect leaves alone |
+| Contributes | `AgentsSection` `errors`: how an error page is shown and reported |
+| Collects | none |
+| Exports | none |
+| Hooks | `report` (no phase, on by default): tell the reporters about a hook's failure |
+| Options (build time) | none |
+| Settings (run time) | `[errors]`: `details` |
+<!-- end generated: capabilities -->
 
 ## What it writes
 

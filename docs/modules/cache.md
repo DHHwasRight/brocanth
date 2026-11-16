@@ -11,14 +11,32 @@ The wizard calls it: *A cache, in the database you already have*.
 | Default | off |
 | Presets | Something that does work |
 | Part of | nothing |
-| Needs | none |
-| Requires | `PgPool` (a Postgres pool). Without a provider chosen, `brocanth create` and `brocanth add` add [`db`](db.md) and say so; not with [`cache-memory`](cache-memory.md) or [`cache-redis`](cache-redis.md) |
-| After | [`config`](config.md) |
-| Adapts to | [`config`](config.md), [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md) |
 | Conflicts | [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Crates | `brocanth-cache` (no default features; `postgres` without a backend child, `admin` with `admin`) |
 | Without it | no cache; every read does the work a hit would have skipped |
+
+<!-- generated: capabilities -->
+## Capabilities
+
+Generated from the manifest; do not edit. `docs_check` compares it. After a manifest change, run `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- docs_check`.
+An option is set at build time in `src/modules/cache.rs`. A setting is read at run time from these layers, lowest first: the default, the module file, the config file (with a `ConfigSource`), the environment, the flags.
+
+| | |
+|---|---|
+| Needs | none |
+| After | none |
+| Provides | `CacheStore` (a cache): the cache, on an unlogged Postgres table; a child backend replaces the table |
+| Requires | `PgPool` (a Postgres pool): the cache is an unlogged table on the project's pool; without a child backend there is nowhere else to keep it; providers: [`db`](db.md); not with [`cache-memory`](cache-memory.md), [`cache-redis`](cache-redis.md) |
+| Uses | none |
+| Adapts to | [`cache-memory`](cache-memory.md): `cache-memory` writes the plugin file, over this process's memory; [`cache-redis`](cache-redis.md): `cache-redis` writes the plugin file, over a Redis or Valkey server |
+| Contributes | `ConfigCheck` `cache`: `deploy/migrate` for `[cache]`, while the cache is on Postgres; `AdminPanel` `cache`, on: a `cache` tab in the admin: purge expired entries, clear a namespace you name |
+| Collects | none |
+| Exports | none |
+| Hooks | none |
+| Options (build time) | none |
+| Settings (run time) | `[cache]`: `migrate`, `sweep_every` |
+<!-- end generated: capabilities -->
 
 ## Backends
 
