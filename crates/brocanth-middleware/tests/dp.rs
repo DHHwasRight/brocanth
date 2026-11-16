@@ -293,3 +293,18 @@ fn a_redirect_is_a_header_the_client_follows_not_a_status() {
     response.assert_ok().assert_header("dp-redirect", "/items");
     assert!(response.header("dp-retarget").is_none());
 }
+
+/// Without the meta tag, the script reads the token from the cookie. It must
+/// know both names the default config sets: `__Host-csrf_token` over HTTPS,
+/// `csrf_token` with `secure = false`.
+#[test]
+fn the_script_falls_back_to_both_default_cookie_names() {
+    let script = brocanth_middleware::dp::SCRIPT;
+    for config in [CsrfConfig::default(), CsrfConfig::default().insecure()] {
+        let name = config.cookie_name();
+        assert!(
+            script.contains(&format!("\"{name}\"")),
+            "dpmutate.js does not try the cookie {name}"
+        );
+    }
+}

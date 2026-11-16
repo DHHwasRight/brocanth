@@ -15,8 +15,10 @@
 // - `dp-target`, `dp-swap` and `dp-select` mean what they mean to dp-swap,
 //   and are inherited the same way. `dp-confirm` asks first.
 // - The CSRF token goes in a header. It comes from
-//   `<meta name="csrf-token" content=".." data-header="x-csrf-token">`, or
-//   from the `csrf_token` cookie when the page has no meta tag.
+//   `<meta name="csrf-token" content=".." data-header="x-csrf-token">`.
+//   A page without the meta tag falls back to the cookie: `config.csrfCookie`
+//   when it is set, else `__Host-csrf_token` (the default name, over HTTPS)
+//   and then `csrf_token` (the name with `secure = false`).
 // - A 2xx swaps. A 422 swaps too: it is the form again, with its errors.
 //   Any other status swaps nothing and fires `dp:responseError`.
 // - The response may steer the swap with `DP-Redirect`, `DP-Refresh`,
@@ -47,12 +49,15 @@
   ];
   const config = {
     csrfMeta: "csrf-token",
-    csrfCookie: "csrf_token",
+    // null tries CSRF_COOKIES in order. Set it when `[csrf] cookie` is not
+    // a default name.
+    csrfCookie: null,
     csrfHeader: "x-csrf-token",
     requestClass: "dp-request",
     timeout: 10000,
     fetch: (...args) => g.fetch(...args),
   };
+  const CSRF_COOKIES = ["__Host-csrf_token", "csrf_token"];
   const inflight = new WeakSet();
 
   const verbOf = (el) => VERBS.find((v) => el.hasAttribute(`dp-${v}`)) ?? null;
@@ -119,8 +124,14 @@
       else if (field && !data.has(field)) data.append(field, meta.content);
       return;
     }
-    const held = cookie(config.csrfCookie);
-    if (held) headers[config.csrfHeader] = held;
+    const names = config.csrfCookie ? [config.csrfCookie] : CSRF_COOKIES;
+    for (const name of names) {
+      const held = cookie(name);
+      if (held) {
+        headers[config.csrfHeader] = held;
+        return;
+      }
+    }
   }
 
   function encode(form, data) {
