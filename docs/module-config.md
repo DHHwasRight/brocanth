@@ -435,17 +435,22 @@ exist, and a `const` guards it.**
 
 ```rust
 // src/plugins/mod.rs, generated with `admin` and `analytics`
-pub fn admin_panels(mut config: brocanth_admin::AdminConfig) -> brocanth_admin::AdminConfig {
+pub fn admin_panels(
+    mut config: brocanth_admin::AdminConfig,
+    late: &mut brocanth_admin::LateCells<crate::pages::Ctx>,
+) -> brocanth_admin::AdminConfig {
     if crate::modules::analytics::MODULE.integrate.admin {
-        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::installed());
+        let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));
     }
     config
 }
 ```
 
 ```rust
-// src/plugins/admin/mod.rs, the project's file: one line, written once
-config = crate::plugins::admin_panels(config);
+// src/plugins/admin/mod.rs, the project's file: written once
+let mut late = LateCells::new();
+config = crate::plugins::admin_panels(config, &mut late);
 ```
 
 Three shapes were compared:
