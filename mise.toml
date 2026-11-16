@@ -35,11 +35,21 @@ done
 run = """
 # Absolute: cargo runs in each project's own directory.
 export BROCANTH_BUILD=1 BROCANTH_BUILD_TARGET="$PWD/target/generated"
+# Every test runs; a failure is collected, not fatal, so one broken crate
+# does not hide the next. The task fails at the end if any test failed.
+failed=""
 for test in $(grep -l 'testing::build' crates/*/tests/*.rs); do
   c=$(echo "$test" | cut -d/ -f2)
-  cargo test -p "$c" --test "$(basename "$test" .rs)" || exit 1
+  t=$(basename "$test" .rs)
+  cargo test -p "$c" --test "$t" || failed="$failed $c:$t"
 done
-cargo test -p brocanth-cli --bin brocanth -- --ignored the_golden_shapes_build_and_pass_their_own_tests
+cargo test -p brocanth-cli --bin brocanth -- --ignored the_golden_shapes_build_and_pass_their_own_tests \
+  || failed="$failed brocanth-cli:the_golden_shapes_build_and_pass_their_own_tests"
+if [ -n "$failed" ]; then
+  echo "generated: these tests failed:" >&2
+  for f in $failed; do echo "  $f" >&2; done
+  exit 1
+fi
 """
 [tasks.ci]
 depends = ["build", "lint", "test", "scaffold", "generated"]

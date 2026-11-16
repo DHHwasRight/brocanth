@@ -8452,6 +8452,8 @@ mod tests {
         let filed = build("hooks-file", picks);
         let path = filed.join("config/development.toml");
         let toml = std::fs::read_to_string(&path).unwrap();
+        // Without sign-in screens the generated rule is a commented-out
+        // example, so the test writes its own rule: one GET to `/`.
         let edited = toml
             .replace("cookie = \"__Host-csrf_token\"", "cookie = \"xsrf_token\"")
             .replace(
@@ -8459,15 +8461,9 @@ mod tests {
                 "referrer_policy = \"no-referrer\"",
             )
             .replace("report_only = false", "report_only = true")
-            .replace("paths = [\"/login\"]", "paths = [\"/\"]")
-            .replace("methods = [\"POST\"]", "methods = [\"GET\"]")
-            .replace("limit = 5", "limit = 1");
-        for changed in [
-            "xsrf_token",
-            "no-referrer",
-            "report_only = true",
-            "limit = 1",
-        ] {
+            + "\n[[rate_limit.rules]]\nname = \"home\"\npaths = [\"/\"]\n\
+               methods = [\"GET\"]\nlimit = 1\nwindow_secs = 60\n";
+        for changed in ["xsrf_token", "no-referrer", "report_only = true"] {
             assert!(
                 edited.contains(changed),
                 "the file has no {changed}:\n{toml}"
@@ -8485,7 +8481,7 @@ mod tests {
         )
         .unwrap();
         compile(&filed);
-        let answers = serve_and_get(&filed.join("target/debug/hooks-file"), &[], &[], 2);
+        let answers = serve_and_get(&filed, "hooks-file", &[], &[], 2);
         let first = answers[0].to_ascii_lowercase();
         assert!(first.starts_with("http/1.1 200"), "{first}");
         assert!(first.contains("set-cookie: xsrf_token="), "{first}");
@@ -8509,7 +8505,8 @@ mod tests {
         let flagged = build("hooks-flags", hooks);
         compile(&flagged);
         let answers = serve_and_get(
-            &flagged.join("target/debug/hooks-flags"),
+            &flagged,
+            "hooks-flags",
             &[
                 "--csrf.cookie=xsrf_token",
                 "--security_headers.csp.report_only=true",
@@ -8536,23 +8533,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&flagged);
     }
 
-    /// Starts `binary serve` on a free port with `args` and `env`, sends
-    /// `count` GETs to `/`, stops the server and returns each response.
+    /// Where `cargo build` in `root` put the binary `name`: under
+    /// `CARGO_TARGET_DIR` when it is set, as the build inherits it, else
+    /// under `<root>/target`.
+    #[cfg(unix)]
+    fn built_binary(root: &Path, name: &str) -> std::path::PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .filter(|t| !t.is_empty())
+            .map_or_else(|| root.join("target"), std::path::PathBuf::from)
+            .join("debug")
+            .join(name)
+    }
+
+    /// Starts the project's binary `name` with `serve` on a free port, in
+    /// `root` (where `config/` is), with `args` and `env`. Sends `count`
+    /// GETs to `/`, stops the server and returns each response.
     #[cfg(unix)]
     fn serve_and_get(
-        binary: &Path,
+        root: &Path,
+        name: &str,
         args: &[&str],
         env: &[(&str, &str)],
         count: usize,
     ) -> Vec<String> {
         use std::io::{BufRead, BufReader, Read, Write};
 
-        // The project root, where `config/` is: `<root>/target/debug/<name>`.
-        let root = binary
-            .ancestors()
-            .nth(3)
-            .expect("a binary under target/debug");
-        let mut child = Command::new(binary)
+        let mut child = Command::new(built_binary(root, name))
             .current_dir(root)
             .args(["serve", "--addr", "127.0.0.1:0"])
             .args(args)
@@ -8646,7 +8652,7 @@ mod tests {
             "the scaffold did not build:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let binary = root.join("target/debug/drain-test");
+        let binary = built_binary(&root, "drain-test");
 
         let (status, response, log) = slow_request_then_sigterm(&binary, None);
         assert!(
