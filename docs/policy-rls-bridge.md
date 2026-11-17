@@ -1,6 +1,8 @@
 # One rule, two enforcers: the policy-RLS bridge
 
-Written 12 November 2026. Status: **accepted 17 November 2026, not built**.
+Written 12 November 2026. Status: **accepted 17 November 2026; phase 1
+built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
+`uuid` and `timestamptz` kinds).
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`

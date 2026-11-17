@@ -190,6 +190,7 @@ impl ResourceData<Post> for Db {
 #             Value::Float(f) => query.bind(f),
 #             Value::Text(t) => query.bind(t),
 #             Value::Bytes(b) => query.bind(b),
+#             Value::Uuid(_) | Value::Timestamptz(_) => unreachable!("no such column here"),
 #         };
 #     }
 #     query

@@ -4,9 +4,9 @@ error[E0277]: `i64` does not compare with this column
 14 |         list: status == who.id,
    |                         ^^^ wrong type for the column
    |
-   = help: the trait `Operand<brocanth_policy::typed::Text>` is not implemented for `i64`
+   = help: the trait `brocanth_policy::typed::Operand<brocanth_policy::typed::Text>` is not implemented for `i64`
    = note: Give a value of the column's own type. This column holds `brocanth_policy::typed::Text` values.
-help: the following other types implement trait `Operand<K>`
+help: the following other types implement trait `brocanth_policy::typed::Operand<K>`
   --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
    |
    |         impl Operand<$kind> for $ty {
@@ -33,9 +33,9 @@ error[E0277]: `String` does not compare with this column
 15 |         update: author_id == who.name,
    |                              ^^^ wrong type for the column
    |
-   = help: the trait `Operand<brocanth_policy::typed::Int>` is not implemented for `String`
+   = help: the trait `brocanth_policy::typed::Operand<brocanth_policy::typed::Int>` is not implemented for `String`
    = note: Give a value of the column's own type. This column holds `brocanth_policy::typed::Int` values.
-help: the following other types implement trait `Operand<K>`
+help: the following other types implement trait `brocanth_policy::typed::Operand<K>`
   --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
    |
    |         impl Operand<$kind> for $ty {

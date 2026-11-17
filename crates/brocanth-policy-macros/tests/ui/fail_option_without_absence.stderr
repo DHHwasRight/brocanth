@@ -6,14 +6,14 @@ error[E0277]: this value can be absent. The rule does not say what absence means
    |
    = help: the trait `AbsenceIsExplicit` is not implemented for `i64`
    = note: Write `<value> else deny`, `<value> else allow` or `<value> else null`.
-help: the trait `Operand<K>` is conditionally implemented for `Option<T>`
+help: the trait `brocanth_policy::typed::Operand<K>` is conditionally implemented for `Option<T>`
   --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
    |
    | impl<K, T: AbsenceIsExplicit> Operand<K> for Option<T> {
    | ^^^^^^^^^^^-----------------^^^^^^^^^^^^^^^^^^^^^^^^^^
    |            |
    |            unsatisfied requirement introduced here: `i64: AbsenceIsExplicit`
-   = note: required for `Option<i64>` to implement `Operand<brocanth_policy::typed::Int>`
+   = note: required for `Option<i64>` to implement `brocanth_policy::typed::Operand<brocanth_policy::typed::Int>`
 note: required by a bound in `bind`
   --> $WORKSPACE/crates/brocanth-policy/src/typed.rs
    |

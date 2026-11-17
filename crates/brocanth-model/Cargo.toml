@@ -42,10 +42,13 @@ brocanth-policy = { workspace = true, optional = true }
 #
 # The driver is not listed here. It arrives through the `postgres` feature
 # below.
+#
+# `with-uuid`: `brocanth_model::policy` binds a policy's `Value::Uuid`.
 sea-orm = { version = "=2.0.4", default-features = false, optional = true, features = [
     "runtime-tokio-rustls",
     "macros",
     "with-chrono",
+    "with-uuid",
     "entity-registry",
 ] }
 sea-orm-migration = { version = "=2.0.4", default-features = false, optional = true, features = [

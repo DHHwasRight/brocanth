@@ -228,6 +228,9 @@ fn bind_all(mut query: PgQuery, binds: &[Value]) -> PgQuery {
             Value::Float(f) => query.bind(*f),
             Value::Text(t) => query.bind(t.clone()),
             Value::Bytes(b) => query.bind(b.clone()),
+            Value::Uuid(_) | Value::Timestamptz(_) => {
+                unreachable!("the test tables have no uuid or timestamptz column")
+            }
         };
     }
     query

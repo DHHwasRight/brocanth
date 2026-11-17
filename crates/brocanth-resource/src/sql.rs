@@ -176,6 +176,8 @@ fn pg_cast(dialect: Dialect, value: &Value) -> Option<&'static str> {
         Value::Float(_) => "::double precision",
         Value::Text(_) => "::text",
         Value::Bytes(_) => "::bytea",
+        Value::Uuid(_) => "::uuid",
+        Value::Timestamptz(_) => "::timestamptz",
     })
 }
 

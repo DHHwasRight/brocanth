@@ -95,6 +95,12 @@ macro_rules! bind_value {
             Value::Float(f) => $query.bind(*f),
             Value::Text(t) => $query.bind(t.clone()),
             Value::Bytes(b) => $query.bind(b.clone()),
+            Value::Uuid(b) => $query.bind(sqlx::types::Uuid::from_bytes(*b)),
+            // Outside chrono's range (only a hand-built `Value` is), the
+            // timestamp binds as NULL.
+            Value::Timestamptz(micros) => $query.bind(sqlx::types::chrono::DateTime::<
+                sqlx::types::chrono::Utc,
+            >::from_timestamp_micros(*micros)),
         }
     };
 }

@@ -1,0 +1,44 @@
+error[E0277]: `f64` is not a type a subject attribute can have
+ --> tests/ui/fail_subject_attr_type.rs:6:16
+  |
+6 |     pub score: f64,
+  |                ^^^ unsupported attribute type
+  |
+  = help: the trait `AttrType` is not implemented for `f64`
+  = note: Use bool, i32, i64, String, uuid::Uuid (feature `uuid`) or chrono::DateTime<Utc> (feature `chrono`), or an `Option` of one of them. Or remove `#[attr]`: a field without it never reaches the database.
+help: the following other types implement trait `AttrType`
+ --> $WORKSPACE/crates/brocanth-policy/src/subject.rs
+  |
+  |           impl AttrType for $ty {
+  |           ^^^^^^^^^^^^^^^^^^^^^
+  |           |
+  |           `i32`
+  |           `i64`
+...
+  | / attr_types! {
+  | |     bool => Boolean;
+  | |     i32 => Integer;
+  | |     i64 => BigInt;
+  | |     String => Text;
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `attr_types` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Vec<String>` is not a type a subject attribute can have
+ --> tests/ui/fail_subject_attr_type.rs:8:16
+  |
+8 |     pub roles: Vec<String>,
+  |                ^^^^^^^^^^^ unsupported attribute type
+  |
+  = help: the trait `AttrType` is not implemented for `Vec<String>`
+  = note: Use bool, i32, i64, String, uuid::Uuid (feature `uuid`) or chrono::DateTime<Utc> (feature `chrono`), or an `Option` of one of them. Or remove `#[attr]`: a field without it never reaches the database.
+  = help: the following other types implement trait `AttrType`:
+            Option<String>
+            Option<bool>
+            Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+            Option<i32>
+            Option<i64>
+            Option<uuid::Uuid>
+            String
+            bool
+          and $N others

@@ -27,12 +27,23 @@ heck = "0.5"
 [dev-dependencies]
 # The tests use the macro the way an application does: through
 # `brocanth_policy::policy!`, with the agreement harness on.
-brocanth-policy = { workspace = true, features = ["macro", "agreement-proptest"] }
+brocanth-policy = { workspace = true, features = [
+    "macro",
+    "agreement-proptest",
+    "uuid",
+    "chrono",
+] }
 trybuild = "1"
 # The agreement test needs a real SQL engine: PostgreSQL, as for
 # `brocanth-policy`'s own dev-dependency. It skips when no database is set.
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
+    "uuid",
+    "chrono",
 ] }
+# The oracle binds `Value::Uuid` and `Value::Timestamptz` as the driver's
+# own types. Both crates are already in the workspace lock.
+uuid = { version = "1", default-features = false }
+chrono = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt"] }

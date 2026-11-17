@@ -91,8 +91,9 @@ NameColumn` (one variant per column, `author_id` becomes `AuthorId`), and the
 
 * `#[key]` marks the primary key. Exactly one column has it.
 * A column type is `i8`–`i64`, `u8`–`u32`, `f32`, `f64`, `bool`, `String`,
-  `Vec<u8>`, or an `Option` of one of them. `Option` means the column is
-  nullable.
+  `Vec<u8>`, `uuid::Uuid` (feature `uuid`), `chrono::DateTime<Utc>`
+  (feature `chrono`, a `timestamptz`), or an `Option` of one of them.
+  `Option` means the column is nullable.
 * `#[model(path::Model)]` checks that each column is a field of that struct,
   with the same type. Use it with the SeaORM `Model`. Then the names the admin
   matches at runtime come from the same struct, and a typo or a changed type

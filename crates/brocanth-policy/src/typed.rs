@@ -15,8 +15,10 @@
 //! # Three checks
 //!
 //! 1. **The column type is one this crate binds.** [`ColumnType`] is
-//!    implemented for the integers, the floats, `bool`, `String`, `Vec<u8>`
-//!    and `Option` of each. Another type is an error at the declaration.
+//!    implemented for the integers, the floats, `bool`, `String`, `Vec<u8>`,
+//!    `uuid::Uuid` (feature `uuid`), `chrono::DateTime<Utc>` (feature
+//!    `chrono`) and `Option` of each. Another type is an error at the
+//!    declaration.
 //! 2. **The value has the column's kind.** [`Operand`] connects a Rust type to
 //!    a [`Kind`]. An `i32` compares with an `i64` column (both are
 //!    [`Int`]); a `&str` does not.
@@ -28,8 +30,8 @@
 use crate::entity::{Column, SortKind};
 use crate::value::{Bound, Missing, Value};
 
-/// The kind of value a column holds: [`Int`], [`Float`], [`Text`], [`Bool`]
-/// or [`Bytes`].
+/// The kind of value a column holds: [`Int`], [`Float`], [`Text`], [`Bool`],
+/// [`Bytes`], [`Uuid`] or [`Timestamptz`].
 pub trait Kind {
     /// The name in an error message.
     const NAME: &'static str;
@@ -49,6 +51,11 @@ pub enum Text {}
 pub enum Bool {}
 /// Blob columns.
 pub enum Bytes {}
+/// `uuid` columns. The Rust type is `uuid::Uuid`, behind the `uuid` feature.
+pub enum Uuid {}
+/// `timestamptz` columns. The Rust type is `chrono::DateTime<chrono::Utc>`,
+/// behind the `chrono` feature.
+pub enum Timestamptz {}
 
 impl Kind for Int {
     const NAME: &'static str = "integer";
@@ -67,12 +74,20 @@ impl Kind for Bool {
 impl Kind for Bytes {
     const NAME: &'static str = "bytes";
 }
+// No `SORT` for the two below: a keyset cursor carries an integer or text,
+// and `brocanth-pagination` has no parser for either kind yet.
+impl Kind for Uuid {
+    const NAME: &'static str = "uuid";
+}
+impl Kind for Timestamptz {
+    const NAME: &'static str = "timestamptz";
+}
 
 /// A Rust type a column can have.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a column type that `policy!` can bind",
     label = "unsupported column type",
-    note = "Use i8, i16, i32, i64, u8, u16, u32, f32, f64, bool, String or Vec<u8>, or an `Option` of one of them."
+    note = "Use i8, i16, i32, i64, u8, u16, u32, f32, f64, bool, String, Vec<u8>, uuid::Uuid (feature `uuid`) or chrono::DateTime<Utc> (feature `chrono`), or an `Option` of one of them."
 )]
 pub trait ColumnType {
     /// What kind of value the column holds.
@@ -119,6 +134,22 @@ column_types! {
     Vec<u8> => Bytes, [Vec::<u8>::new(), vec![1u8]], |n| Value::Bytes(n.to_be_bytes().to_vec());
 }
 
+#[cfg(feature = "uuid")]
+column_types! {
+    uuid::Uuid => Uuid,
+        [uuid::Uuid::nil(), uuid::Uuid::from_u128(1), uuid::Uuid::max()],
+        |n| Value::Uuid((n as u128).to_be_bytes());
+}
+
+// The samples sit at the epoch, one microsecond after it, and before it, so
+// a near-miss on either side of a comparison is common.
+#[cfg(feature = "chrono")]
+column_types! {
+    chrono::DateTime<chrono::Utc> => Timestamptz,
+        [Value::Timestamptz(0), Value::Timestamptz(1), Value::Timestamptz(-1_000_000)],
+        |n| Value::Timestamptz(n);
+}
+
 impl<T: ColumnType> ColumnType for Option<T> {
     type Kind = T::Kind;
     const NULLABLE: bool = true;
@@ -160,6 +191,10 @@ operands!(Float => f32, f64);
 operands!(Bool => bool);
 operands!(Text => String, &str);
 operands!(Bytes => Vec<u8>);
+#[cfg(feature = "uuid")]
+operands!(Uuid => uuid::Uuid);
+#[cfg(feature = "chrono")]
+operands!(Timestamptz => chrono::DateTime<chrono::Utc>);
 
 macro_rules! copied_operands {
     ($kind:ty => $($ty:ty),*) => {$(
@@ -174,6 +209,10 @@ macro_rules! copied_operands {
 copied_operands!(Int => i8, i16, i32, i64, u8, u16, u32);
 copied_operands!(Float => f32, f64);
 copied_operands!(Bool => bool);
+#[cfg(feature = "uuid")]
+copied_operands!(Uuid => uuid::Uuid);
+#[cfg(feature = "chrono")]
+copied_operands!(Timestamptz => chrono::DateTime<chrono::Utc>);
 
 impl Operand<Text> for &String {
     fn into_value(self) -> Value {

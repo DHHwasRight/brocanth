@@ -1,0 +1,20 @@
+error: `Subject` needs a struct with named fields
+       help: name each field of `Tuple`; the field name is the attribute's key
+ --> tests/ui/fail_subject_shape.rs:2:12
+  |
+2 | pub struct Tuple(#[attr] i64);
+  |            ^^^^^
+
+error: `Subject` needs a struct
+       help: derive it on the struct that describes who is asking
+ --> tests/ui/fail_subject_shape.rs:5:10
+  |
+5 | pub enum Who {
+  |          ^^^
+
+error: `#[attr]` takes no arguments
+       help: write `#[attr]`; the key is the field name
+  --> tests/ui/fail_subject_shape.rs:11:7
+   |
+11 |     #[attr(key = "uid")]
+   |       ^^^^

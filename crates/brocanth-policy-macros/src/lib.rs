@@ -41,6 +41,8 @@ use syn::{
     Visibility,
 };
 
+mod subject;
+
 mod kw {
     syn::custom_keyword!(entity);
     syn::custom_keyword!(policy);
@@ -85,6 +87,33 @@ mod kw {
 #[proc_macro]
 pub fn policy(input: TokenStream) -> TokenStream {
     match syn::parse::<Input>(input).and_then(expand) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Implements `brocanth_policy::Subject` for a struct.
+///
+/// Each field marked `#[attr]` becomes a subject attribute that a rule may
+/// read: an entry of `Subject::ATTRS`, keyed by the field name, and a value
+/// in `Subject::attributes()`. An `Option` field is optional. A field
+/// without `#[attr]` is not an attribute and never reaches the database.
+///
+/// ```ignore
+/// #[derive(brocanth_policy::Subject)]
+/// pub struct Visitor {
+///     #[attr] pub user_id: Option<i64>,   // brocanth.user_id  bigint
+///     #[attr] pub admin: bool,            // brocanth.admin    boolean
+///     pub display_name: String,           // not an attribute
+/// }
+/// ```
+///
+/// An attribute is `bool`, `i32`, `i64`, `String`, `uuid::Uuid`,
+/// `chrono::DateTime<Utc>`, or an `Option` of one of them. See
+/// docs/policy-rls-bridge.md, decision 5.
+#[proc_macro_derive(Subject, attributes(attr))]
+pub fn derive_subject(input: TokenStream) -> TokenStream {
+    match syn::parse::<syn::DeriveInput>(input).and_then(subject::expand) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }

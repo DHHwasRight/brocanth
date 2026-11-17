@@ -25,3 +25,14 @@ fn the_macro_accepts_what_it_should_and_refuses_the_typo_class() {
     t.compile_fail("tests/ui/fail_no_key.rs");
     t.compile_fail("tests/ui/fail_negated_absence.rs");
 }
+
+/// `#[derive(Subject)]`: an `#[attr]` field of a type the database cannot
+/// hold as a setting, and a shape the derive cannot read, are compile errors
+/// that say what to write instead.
+#[test]
+fn the_subject_derive_refuses_what_a_setting_cannot_hold() {
+    let t = trybuild::TestCases::new();
+    t.pass("tests/ui/pass_subject.rs");
+    t.compile_fail("tests/ui/fail_subject_attr_type.rs");
+    t.compile_fail("tests/ui/fail_subject_shape.rs");
+}

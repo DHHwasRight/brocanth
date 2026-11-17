@@ -64,6 +64,10 @@ pub enum ValueKey {
     Text(String),
     /// A blob.
     Bytes(Vec<u8>),
+    /// A UUID, as its 16 bytes.
+    Uuid([u8; 16]),
+    /// A `timestamptz`, in microseconds since the Unix epoch.
+    Timestamptz(i64),
 }
 
 impl ValueKey {
@@ -75,6 +79,8 @@ impl ValueKey {
             Value::Int(n) => ValueKey::Int(*n),
             Value::Text(s) => ValueKey::Text(s.clone()),
             Value::Bytes(b) => ValueKey::Bytes(b.clone()),
+            Value::Uuid(b) => ValueKey::Uuid(*b),
+            Value::Timestamptz(micros) => ValueKey::Timestamptz(*micros),
             Value::Float(_) => return None,
         })
     }

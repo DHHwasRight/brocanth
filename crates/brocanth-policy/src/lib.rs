@@ -105,6 +105,15 @@
 //! expands to the hand-written [`Column`], [`Entity`] and [`Policy`] impls.
 //! [`typed`] is what it checks values against. `docs/policy.md` has the
 //! syntax, with each real call site before and after.
+//!
+//! # One rule, two enforcers
+//!
+//! docs/policy-rls-bridge.md. [`Rules`] holds a policy's rules as data,
+//! before a subject is known: guards over subject attributes, and
+//! comparisons whose value can be `who.<field>`. [`Rule::resolve`] gives the
+//! [`Pred`] for one subject's [`Attributes`]; `brocanth-rls` walks the same
+//! tree to write the database policy. [`Subject`] (and its derive, feature
+//! `macro`) says which fields of the subject a rule may read.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -117,6 +126,7 @@ pub mod eval;
 pub mod mask;
 pub mod policy;
 pub mod pred;
+pub mod rules;
 
 /// The `brocanth create` module that writes this crate into a new project.
 ///
@@ -126,6 +136,7 @@ pub mod pred;
 pub mod scaffold;
 
 pub mod sql;
+pub mod subject;
 pub mod typed;
 pub mod value;
 
@@ -136,11 +147,13 @@ pub use eval::{MapRow, RowView, Truth};
 pub use mask::{FieldMask, MaskViolation};
 pub use policy::Policy;
 pub use pred::{EntityPred, Membership, Op, Opaque, Pred, Shape};
+pub use rules::{Exists, Guard, Operand, Rule, Rules, Term};
 pub use sql::{Condition, Dialect, Query};
+pub use subject::{Attr, AttrKind, AttrType, Attributes, Subject};
 pub use value::{Bound, Missing, Value};
 pub use verified::{Admission, Refused, Verified, Write};
 
 #[cfg(feature = "macro")]
-pub use brocanth_policy_macros::policy;
+pub use brocanth_policy_macros::{policy, Subject};
 
 mod verified;

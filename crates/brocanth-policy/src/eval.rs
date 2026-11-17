@@ -287,7 +287,8 @@ fn in_set(lhs: &Value, values: &[Value]) -> Truth {
 }
 
 /// Ordering between two non-`NULL` values: integers and reals compare
-/// numerically with each other, then text, then blobs.
+/// numerically with each other, then text, blobs, uuids and timestamps,
+/// each with its own kind.
 ///
 /// NaN orders as PostgreSQL orders it: equal to NaN, greater than every
 /// number.
@@ -304,6 +305,9 @@ fn order(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
         (Value::Float(a), Value::Int(b)) => float_order(*a, *b as f64),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
+        // PostgreSQL orders `uuid` byte by byte, as `memcmp` does.
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
+        (Value::Timestamptz(a), Value::Timestamptz(b)) => a.cmp(b),
         // A boolean against a number compares as 0 or 1.
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Bool(a), other) => order(&Value::Int(i64::from(*a)), other),
@@ -324,12 +328,15 @@ fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
     }
 }
 
-/// The order across types: NULL < numeric < text < blob.
+/// The order across types: NULL < numeric < text < blob < uuid <
+/// timestamptz.
 fn class(value: &Value) -> u8 {
     match value {
         Value::Null => 0,
         Value::Bool(_) | Value::Int(_) | Value::Float(_) => 1,
         Value::Text(_) => 2,
         Value::Bytes(_) => 3,
+        Value::Uuid(_) => 4,
+        Value::Timestamptz(_) => 5,
     }
 }

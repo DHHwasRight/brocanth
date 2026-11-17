@@ -166,6 +166,11 @@ fn bind_all(mut query: PgQuery, binds: &[Value]) -> PgQuery {
             Value::Float(f) => query.bind(*f),
             Value::Text(t) => query.bind(t.clone()),
             Value::Bytes(b) => query.bind(b.clone()),
+            Value::Uuid(b) => query.bind(uuid::Uuid::from_bytes(*b)),
+            Value::Timestamptz(micros) => query.bind(
+                chrono::DateTime::<chrono::Utc>::from_timestamp_micros(*micros)
+                    .expect("a timestamp in chrono's range"),
+            ),
         };
     }
     query

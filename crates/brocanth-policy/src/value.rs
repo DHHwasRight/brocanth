@@ -41,11 +41,19 @@ use std::fmt;
 
 /// A value a predicate compares against, or writes.
 ///
-/// Deliberately small. This crate is an algebra over column names and bind
-/// values, so the set is null, boolean, integer, float, text and bytes, and anything
-/// richer — a UUID, a timestamp, a JSON document — is the caller's job to
-/// encode the way its schema already stores it. Widening this enum means
-/// taking an opinion about column types, which belongs to the model layer.
+/// Deliberately small: null, boolean, integer, float, text, bytes, UUID and
+/// timestamp with time zone. Anything richer (a JSON document, an array) is
+/// the caller's job to encode the way its schema already stores it.
+///
+/// `Uuid` and `Timestamptz` are here since the policy-RLS bridge
+/// (docs/policy-rls-bridge.md, decision 5). A subject attribute becomes a
+/// typed database setting, and a uuid key compared as `text` puts a cast on
+/// the column, so PostgreSQL cannot use the column's index. So the kind
+/// belongs to the predicate, not to the model layer.
+///
+/// The two variants hold plain data, not `uuid::Uuid` or `chrono` types, so
+/// this enum is the same with every feature set. The conversions from those
+/// types are behind the `uuid` and `chrono` features.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     /// SQL `NULL`. Absence, not a value: see [`crate::Truth`].
@@ -63,6 +71,14 @@ pub enum Value {
     Text(String),
     /// A blob.
     Bytes(Vec<u8>),
+    /// A UUID, as its 16 bytes in network order: the order of
+    /// `uuid::Uuid::as_bytes`, and the order PostgreSQL sorts `uuid` in.
+    Uuid([u8; 16]),
+    /// A `timestamptz`: microseconds since 1970-01-01 00:00:00 UTC.
+    ///
+    /// Microseconds, because that is PostgreSQL's resolution. A
+    /// `chrono::DateTime<Utc>` with nanoseconds converts by truncation.
+    Timestamptz(i64),
 }
 
 impl Value {
@@ -83,6 +99,8 @@ impl Value {
             Value::Float(_) => "float",
             Value::Text(_) => "text",
             Value::Bytes(_) => "bytes",
+            Value::Uuid(_) => "uuid",
+            Value::Timestamptz(_) => "timestamptz",
         }
     }
 }
@@ -101,8 +119,46 @@ impl fmt::Display for Value {
             Value::Float(x) => write!(f, "{x}"),
             Value::Text(s) => write!(f, "{s:?}"),
             Value::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Value::Uuid(b) => {
+                for (i, byte) in b.iter().enumerate() {
+                    if matches!(i, 4 | 6 | 8 | 10) {
+                        f.write_str("-")?;
+                    }
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+            Value::Timestamptz(micros) => write_timestamp(f, *micros),
         }
     }
+}
+
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`, in the proleptic Gregorian calendar.
+///
+/// Written here, and not through `chrono`, so `Display` is the same with
+/// every feature set. The date part is Howard Hinnant's `civil_from_days`.
+fn write_timestamp(f: &mut fmt::Formatter<'_>, micros: i64) -> fmt::Result {
+    const DAY: i64 = 86_400_000_000;
+    let days = micros.div_euclid(DAY);
+    let rest = micros.rem_euclid(DAY);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let secs = rest / 1_000_000;
+    write!(
+        f,
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:06}Z",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60,
+        rest % 1_000_000
+    )
 }
 
 macro_rules! from_into_value {
@@ -130,6 +186,16 @@ from_into_value! {
     String => |v| Value::Text(v),
     &str => |v| Value::Text(v.to_owned()),
     Vec<u8> => |v| Value::Bytes(v),
+}
+
+#[cfg(feature = "uuid")]
+from_into_value! {
+    uuid::Uuid => |v| Value::Uuid(v.into_bytes()),
+}
+
+#[cfg(feature = "chrono")]
+from_into_value! {
+    chrono::DateTime<chrono::Utc> => |v| Value::Timestamptz(v.timestamp_micros()),
 }
 
 /// What a predicate means when the value it was going to compare against is

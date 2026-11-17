@@ -45,6 +45,12 @@ pub fn bind(value: &Value) -> sea_orm::Value {
         Value::Float(f) => (*f).into(),
         Value::Text(s) => s.clone().into(),
         Value::Bytes(b) => b.clone().into(),
+        Value::Uuid(b) => sea_orm::prelude::Uuid::from_bytes(*b).into(),
+        // Outside chrono's range (only a hand-built `Value` is), the
+        // timestamp binds as a typed NULL.
+        Value::Timestamptz(micros) => {
+            sea_orm::prelude::ChronoDateTimeUtc::from_timestamp_micros(*micros).into()
+        }
     }
 }
 
@@ -61,5 +67,16 @@ mod tests {
             sea_orm::Value::String(Some("a".into()))
         );
         assert_eq!(bind(&Value::Null), sea_orm::Value::String(None));
+        let id = sea_orm::prelude::Uuid::from_u128(7);
+        assert_eq!(
+            bind(&Value::Uuid(id.into_bytes())),
+            sea_orm::Value::Uuid(Some(id))
+        );
+        let at = sea_orm::prelude::ChronoDateTimeUtc::from_timestamp_micros(1_500_000)
+            .expect("in range");
+        assert_eq!(
+            bind(&Value::Timestamptz(1_500_000)),
+            sea_orm::Value::ChronoDateTimeUtc(Some(at))
+        );
     }
 }

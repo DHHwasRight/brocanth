@@ -46,6 +46,15 @@ brocanth-scaffold = { workspace = true, optional = true }
 # macro, and it expands to paths in this crate.
 brocanth-policy-macros = { workspace = true, optional = true }
 
+# `uuid` and `timestamptz` columns and subject attributes
+# (docs/policy-rls-bridge.md, decision 5). Optional and off: `Value::Uuid`
+# and `Value::Timestamptz` hold plain data, so the enum is the same without
+# them. Each feature adds the conversions from its crate's type, and the
+# `ColumnType`, `Operand` and `AttrType` impls. Both crates are already in
+# the workspace lock.
+uuid = { version = "1", default-features = false, optional = true }
+chrono = { version = "0.4", default-features = false, optional = true }
+
 [dependencies.proptest]
 # Optional, and off. PLAN.md §9 obligation 1 says opting into `eval()`
 # generates a property test asserting `eval(row) == (row in query(condition))`.
@@ -69,9 +78,19 @@ optional = true
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
+    "uuid",
+    "chrono",
 ] }
+# The oracle binds `Value::Uuid` and `Value::Timestamptz` as the driver's
+# own types. Both crates are already in the workspace lock.
+uuid = { version = "1", default-features = false }
+chrono = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt", "macros"] }
 proptest = "1"
+
+# The tests of the `uuid` and `chrono` kinds (`tests/kinds.rs`) run in a
+# plain `cargo test`, so this crate turns them on for its own tests.
+brocanth-policy = { path = ".", features = ["uuid", "chrono"] }
 
 # `tests/scaffold.rs`: the module, generated into a project by the CLI's
 # own generator and checked with `brocanth_scaffold::testing`. A cycle
@@ -88,7 +107,15 @@ default = []
 agreement-proptest = ["dep:proptest"]
 
 # `policy!`: an entity with typed columns, and its rules, in one block.
+# Also `#[derive(Subject)]`.
 macro = ["dep:brocanth-policy-macros"]
+
+# `uuid::Uuid` as a column type, a value and a subject attribute.
+uuid = ["dep:uuid"]
+
+# `chrono::DateTime<Utc>` as a column type, a value and a subject attribute
+# (`timestamptz`).
+chrono = ["dep:chrono"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's
