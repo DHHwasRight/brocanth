@@ -68,6 +68,9 @@ sqlx = { version = "0.9", default-features = false, features = [
     "postgres",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
+# `tests/rls.rs`: the data source opens its session as a `DbIdentity`, in a
+# `Tx` that assumed it, on a table under row-level security.
+brocanth-db = { workspace = true }
 
 # `tests/scaffold.rs`: the module, generated into a project by the CLI's
 # own generator and checked with `brocanth_scaffold::testing`. A cycle

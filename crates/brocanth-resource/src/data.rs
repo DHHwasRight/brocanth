@@ -7,16 +7,34 @@
 //! Postgres database, because the claim under test is that the policy filters
 //! in the query.
 //!
-//! # Six operations
+//! # A session per operation, and six statements
+//!
+//! [`ResourceData::session`] opens a [`Session`] for one operation, as the
+//! request's identity. The session runs the statements, and
+//! [`Session::commit`] ends it:
 //!
 //! | | what it runs |
 //! |---|---|
-//! | [`ResourceData::count`] | `SELECT count(*) … WHERE <condition>` |
-//! | [`ResourceData::list`] | `SELECT … WHERE <condition> ORDER BY … LIMIT … OFFSET …` |
-//! | [`ResourceData::fetch`] | `SELECT … WHERE <pk> = ? AND <condition>` |
-//! | [`ResourceData::admit`] | a statement this crate wrote; report the row count |
-//! | [`ResourceData::write`] | a statement this crate wrote; report rows affected |
-//! | [`ResourceData::insert`] | the one operation whose SQL this crate cannot write |
+//! | [`Session::count`] | `SELECT count(*) … WHERE <condition>` |
+//! | [`Session::list`] | `SELECT … WHERE <condition> ORDER BY … LIMIT … OFFSET …` |
+//! | [`Session::fetch`] | `SELECT … WHERE <pk> = ? AND <condition>` |
+//! | [`Session::admit`] | a statement this crate wrote; report the row count |
+//! | [`Session::write`] | a statement this crate wrote; report rows affected |
+//! | [`Session::insert`] | the one operation whose SQL this crate cannot write |
+//!
+//! # Why a session
+//!
+//! docs/policy-rls-bridge.md, decision 13. On a table under Postgres
+//! row-level security, a statement outside the request's identity sees no
+//! row. So each operation runs in one transaction that assumed the
+//! identity: the admission read and the `Verified` write it admits are in
+//! the same transaction, and the database adds its policy to the
+//! application's `UPDATE … WHERE id = ? AND <condition>`.
+//!
+//! The identity is [`ResourceData::Identity`], a type the source names:
+//! this crate links no driver, so it cannot name `brocanth_db::DbIdentity`.
+//! A source with no identity takes `()` and returns itself as the session,
+//! so it runs as before.
 //!
 //! The first three take a query object rather than loose arguments, because
 //! the condition is the one thing an implementation must not forget and a
@@ -28,7 +46,7 @@
 //! Everything else is a statement this crate built and the implementation
 //! executes. An insert is not: the column list, the defaults, the returning
 //! clause and the generated key are the model layer's, and a framework that
-//! wrote the `INSERT` would be an ORM. So [`ResourceData::insert`] takes the
+//! wrote the `INSERT` would be an ORM. So [`Session::insert`] takes the
 //! values the policy has already admitted and hands back the key and the row.
 //! The authorisation happened before it, in [`crate::sql::create_admission`].
 //!
@@ -162,28 +180,73 @@ impl<'a, C: Column> FetchQuery<'a, C> {
 ///
 /// `E` is the entity, so one implementation serves one table and the column
 /// type is checked. See the module documentation for why it is synchronous.
+///
+/// The source itself runs no statement. It opens a [`Session`] for each
+/// operation, as the request's [`ResourceData::Identity`], and the session
+/// runs every statement of that operation. So the admission read and the
+/// write it admits run in one unit of work: for a SQL source, one
+/// transaction, as one database identity.
 pub trait ResourceData<E: brocanth_policy::Entity>: Send + Sync + 'static {
     /// The application's row. This crate never looks inside one; it counts
     /// them, pages them, and asks the resource to encode them.
     type Row;
 
+    /// Who a request's statements run as, in the database.
+    ///
+    /// This crate never looks inside one either. A source over a table
+    /// under Postgres row-level security takes a `brocanth_db::DbIdentity`
+    /// (docs/policy-rls-bridge.md, decision 13). A source with none takes
+    /// `()`. The default value is what a call with no identity gets, so
+    /// [`crate::flow::list`] and the other functions without `_as` run as
+    /// it.
+    type Identity: Default + Send + Sync + 'static;
+
+    /// The statements of one operation, as one identity.
+    type Session<'a>: Session<E, Row = Self::Row>
+    where
+        Self: 'a;
+
+    /// Opens the session of one operation, as `identity`.
+    ///
+    /// A SQL source under row-level security begins a transaction and
+    /// assumes the identity in it (`Db::transact_as`, `Tx::assume`). A
+    /// source with no identity can return itself, by reference, and run
+    /// each statement on its pool, as before.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the storage layer raised: no connection, or an identity it
+    /// refuses.
+    fn session(&self, identity: &Self::Identity) -> Result<Self::Session<'_>, DataError>;
+}
+
+/// The statements of one operation, in one unit of work.
+///
+/// [`ResourceData::session`] opens it, the flow runs its statements, and
+/// [`Session::commit`] ends it. A session dropped without `commit` keeps
+/// nothing: the flow drops it when a check refuses, and a write that was
+/// refused leaves no trace.
+pub trait Session<E: brocanth_policy::Entity> {
+    /// The row, as [`ResourceData::Row`].
+    type Row;
+
     /// How many rows satisfy the condition.
     ///
-    /// The same condition the matching [`ResourceData::list`] call carries. A
+    /// The same condition the matching [`Session::list`] call carries. A
     /// count over a different set is a total that does not match its own
     /// pages.
     ///
     /// # Errors
     ///
     /// Whatever the storage layer raised.
-    fn count(&self, query: &ListQuery<'_, E::Column>) -> Result<u64, DataError>;
+    fn count(&mut self, query: &ListQuery<'_, E::Column>) -> Result<u64, DataError>;
 
     /// One page of rows.
     ///
     /// # Errors
     ///
     /// Whatever the storage layer raised.
-    fn list(&self, query: &ListQuery<'_, E::Column>) -> Result<Vec<Self::Row>, DataError>;
+    fn list(&mut self, query: &ListQuery<'_, E::Column>) -> Result<Vec<Self::Row>, DataError>;
 
     /// One row, or `None` when the key matches nothing **or** the condition
     /// refuses it. The two are one case on purpose.
@@ -191,7 +254,7 @@ pub trait ResourceData<E: brocanth_policy::Entity>: Send + Sync + 'static {
     /// # Errors
     ///
     /// Whatever the storage layer raised.
-    fn fetch(&self, query: &FetchQuery<'_, E::Column>) -> Result<Option<Self::Row>, DataError>;
+    fn fetch(&mut self, query: &FetchQuery<'_, E::Column>) -> Result<Option<Self::Row>, DataError>;
 
     /// Run an admission statement and report how many rows it returned.
     ///
@@ -202,18 +265,19 @@ pub trait ResourceData<E: brocanth_policy::Entity>: Send + Sync + 'static {
     /// # Errors
     ///
     /// Whatever the storage layer raised.
-    fn admit(&self, statement: &Statement) -> Result<usize, DataError>;
+    fn admit(&mut self, statement: &Statement) -> Result<usize, DataError>;
 
     /// Run a write statement and report rows affected.
     ///
     /// **Do not treat zero as success.** The statement carries the policy's
     /// condition in its `WHERE` clause, and this crate turns zero into
-    /// `Denied::RaceLost`.
+    /// `Denied::RaceLost`. Under row-level security the database adds its
+    /// own policy to the same statement: two checks, one statement.
     ///
     /// # Errors
     ///
     /// Whatever the storage layer raised.
-    fn write(&self, statement: &Statement) -> Result<u64, DataError>;
+    fn write(&mut self, statement: &Statement) -> Result<u64, DataError>;
 
     /// Insert a row the policy has already admitted, and return its key and
     /// the row as stored.
@@ -227,5 +291,14 @@ pub trait ResourceData<E: brocanth_policy::Entity>: Send + Sync + 'static {
     /// [`DataError::Invalid`] when the model layer rejects the record, which
     /// reaches the client as a `400` with the message. Anything else is a
     /// `500`.
-    fn insert(&self, values: &[(E::Column, Value)]) -> Result<(Value, Self::Row), DataError>;
+    fn insert(&mut self, values: &[(E::Column, Value)]) -> Result<(Value, Self::Row), DataError>;
+
+    /// Keep what the session wrote: `COMMIT`. A session with no transaction
+    /// returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the storage layer raised. The flow reports it as a `500`,
+    /// and nothing was kept.
+    fn commit(self) -> Result<(), DataError>;
 }

@@ -55,6 +55,10 @@ use crate::error::Failure;
 /// The row type a resource's data source returns.
 pub type RowOf<R> = <<R as Resource>::Data as ResourceData<<R as Resource>::Entity>>::Row;
 
+/// Who a resource's statements run as: its data source's
+/// [`ResourceData::Identity`].
+pub type IdentityOf<R> = <<R as Resource>::Data as ResourceData<<R as Resource>::Entity>>::Identity;
+
 /// The column enum a resource's entity is written in.
 pub type ColumnOf<R> = <<R as Resource>::Entity as Entity>::Column;
 

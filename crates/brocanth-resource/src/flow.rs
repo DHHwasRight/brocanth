@@ -20,15 +20,28 @@
 //! Steps 1 and 3 come before step 4 so that their answers cannot be used to
 //! learn whether a row exists. Step 6 comes after step 5 because a change
 //! nobody made must not be announced; `tests/events.rs` asserts both halves.
+//!
+//! # One session per operation
+//!
+//! Each function opens one [`Session`] after the checks that read no row,
+//! runs every statement of the operation on it, and commits it before it
+//! announces anything. So steps 4 and 5 run in one unit of work, as one
+//! identity: on a SQL source under row-level security, one transaction
+//! that assumed the request's `DbIdentity` (docs/policy-rls-bridge.md,
+//! decision 13). A refusal drops the session, and nothing is kept.
+//!
+//! Each function has two forms. `list_as(resource, identity, …)` runs as
+//! `identity`. `list(resource, …)` runs as the source's default identity:
+//! `()` for a source that has none, so it behaves as it did before.
 
 use brocanth_events::{RowChange, RowId};
 use brocanth_policy::{Column, FieldMask, MapRow, Policy, UpdateError, Value};
 use std::borrow::Cow;
 
-use crate::data::{FetchQuery, ListQuery, ResourceData};
+use crate::data::{FetchQuery, ListQuery, ResourceData, Session};
 use crate::error::Failure;
 use crate::page::{Listing, PageRequest, Totals};
-use crate::resource::{ColumnOf, CreateCheck, Resource, RowOf, Sort};
+use crate::resource::{ColumnOf, CreateCheck, IdentityOf, Resource, RowOf, Sort};
 use crate::sql::{create_admission, Statement};
 
 /// What a create produced.
@@ -59,8 +72,8 @@ pub struct Updated<Row> {
 
 /// One page of rows, filtered by the policy **in the query**.
 ///
-/// The condition goes to [`ResourceData::list`] and the same condition goes to
-/// [`ResourceData::count`], so the page and the total describe one set. This
+/// The condition goes to [`Session::list`] and the same condition goes to
+/// [`Session::count`], so the page and the total describe one set. This
 /// function never looks at a row it was given.
 ///
 /// A list rule of [`Pred::Never`](brocanth_policy::Pred::Never) is [`Failure::NoRule`] and a `403`; a rule
@@ -76,6 +89,27 @@ pub fn list<R: Resource>(
     request: &PageRequest,
     sort: Option<Sort<ColumnOf<R>>>,
 ) -> Result<Listing<RowOf<R>>, Failure> {
+    list_as(
+        resource,
+        &IdentityOf::<R>::default(),
+        subject,
+        request,
+        sort,
+    )
+}
+
+/// [`list`], with every statement run as `identity`.
+///
+/// # Errors
+///
+/// As [`list`].
+pub fn list_as<R: Resource>(
+    resource: &R,
+    identity: &IdentityOf<R>,
+    subject: &R::Subject,
+    request: &PageRequest,
+    sort: Option<Sort<ColumnOf<R>>>,
+) -> Result<Listing<RowOf<R>>, Failure> {
     let pred = resource.policy().list(subject);
     if pred.is_never() {
         return Err(Failure::NoRule);
@@ -84,6 +118,7 @@ pub fn list<R: Resource>(
     let (offset, limit) = request.window::<R>();
     let sort = sort.unwrap_or_else(|| resource.default_sort());
     let query = ListQuery::new(&condition, offset, limit, sort);
+    let mut session = resource.data().session(identity)?;
 
     // The count first, so that a total and a page read in that order can only
     // disagree by rows written in between — never by this crate's own
@@ -91,9 +126,10 @@ pub fn list<R: Resource>(
     let total = if request.skip_total {
         Totals::Skipped
     } else {
-        Totals::Counted(resource.data().count(&query)?)
+        Totals::Counted(session.count(&query)?)
     };
-    let items = resource.data().list(&query)?;
+    let items = session.list(&query)?;
+    session.commit()?;
 
     Ok(Listing {
         items,
@@ -118,16 +154,32 @@ pub fn view<R: Resource>(
     subject: &R::Subject,
     raw_id: &str,
 ) -> Result<RowOf<R>, Failure> {
+    view_as(resource, &IdentityOf::<R>::default(), subject, raw_id)
+}
+
+/// [`view`], with the statement run as `identity`.
+///
+/// # Errors
+///
+/// As [`view`].
+pub fn view_as<R: Resource>(
+    resource: &R,
+    identity: &IdentityOf<R>,
+    subject: &R::Subject,
+    raw_id: &str,
+) -> Result<RowOf<R>, Failure> {
     let pred = resource.policy().view(subject);
     if pred.is_never() {
         return Err(Failure::NoRule);
     }
     let id = resource.parse_id(raw_id)?;
     let condition = pred.condition::<R::Entity>(R::DIALECT)?;
-    resource
-        .data()
+    let mut session = resource.data().session(identity)?;
+    let row = session
         .fetch(&FetchQuery::new(&condition, &id))?
-        .ok_or(Failure::NoMatch)
+        .ok_or(Failure::NoMatch)?;
+    session.commit()?;
+    Ok(row)
 }
 
 /// Create a row the policy admits.
@@ -155,6 +207,21 @@ pub fn create<R: Resource>(
     subject: &R::Subject,
     body: &[u8],
 ) -> Result<Created<RowOf<R>>, Failure> {
+    create_as(resource, &IdentityOf::<R>::default(), subject, body)
+}
+
+/// [`create`], with every statement run as `identity`: the admission of
+/// the proposed row and the insert, in one session.
+///
+/// # Errors
+///
+/// As [`create`].
+pub fn create_as<R: Resource>(
+    resource: &R,
+    identity: &IdentityOf<R>,
+    subject: &R::Subject,
+    body: &[u8],
+) -> Result<Created<RowOf<R>>, Failure> {
     let pred = resource.policy().create(subject);
     if pred.is_never() {
         return Err(Failure::NoRule);
@@ -167,13 +234,14 @@ pub fn create<R: Resource>(
     }
     check_mask(resource.policy().writable_on_create(subject), &values)?;
 
+    let mut session = resource.data().session(identity)?;
     // `Always` admits every row, so the query could only have one answer.
     if !pred.is_always() {
         match R::CREATE_CHECK {
             CreateCheck::Database => {
                 let condition = pred.condition::<R::Entity>(R::DIALECT)?;
                 let statement = create_admission::<R::Entity>(R::DIALECT, &condition, &values)?;
-                if resource.data().admit(&statement)? == 0 {
+                if session.admit(&statement)? == 0 {
                     return Err(Failure::NoMatch);
                 }
             }
@@ -189,7 +257,8 @@ pub fn create<R: Resource>(
         }
     }
 
-    let (id, row) = resource.data().insert(&values)?;
+    let (id, row) = session.insert(&values)?;
+    session.commit()?;
     announce(resource, &id, Change::Created);
     Ok(Created { id, row })
 }
@@ -219,6 +288,22 @@ pub fn update<R: Resource>(
     raw_id: &str,
     body: &[u8],
 ) -> Result<Updated<RowOf<R>>, Failure> {
+    update_as(resource, &IdentityOf::<R>::default(), subject, raw_id, body)
+}
+
+/// [`update`], with every statement run as `identity`: the admission, the
+/// write it admits and the re-read, in one session.
+///
+/// # Errors
+///
+/// As [`update`].
+pub fn update_as<R: Resource>(
+    resource: &R,
+    identity: &IdentityOf<R>,
+    subject: &R::Subject,
+    raw_id: &str,
+    body: &[u8],
+) -> Result<Updated<RowOf<R>>, Failure> {
     let pred = resource.policy().update(subject);
     if pred.is_never() {
         return Err(Failure::NoRule);
@@ -242,7 +327,8 @@ pub fn update<R: Resource>(
     let changed: Vec<&'static str> = values.iter().map(|(c, _)| c.name()).collect();
 
     let admission = pred.admission::<R::Entity>(R::DIALECT, id.clone())?;
-    let rows = resource.data().admit(&Statement::from(admission.query()))?;
+    let mut session = resource.data().session(identity)?;
+    let rows = session.admit(&Statement::from(admission.query()))?;
     // Zero here is `Denied::NotAuthorised`, which this crate reports as the
     // same answer as "no such row".
     let verified = admission.resolve(rows)?;
@@ -253,12 +339,10 @@ pub fn update<R: Resource>(
             UpdateError::Mask(violation) => Failure::NotWritable(violation),
             UpdateError::Compile(error) => Failure::Compile(error),
         })?;
-    let affected = resource.data().write(&Statement::from(write.query()))?;
+    let affected = session.write(&Statement::from(write.query()))?;
     // Zero here is `Denied::RaceLost`. The condition was re-applied inside the
     // write, so the row stopped matching between the check and the write.
     write.applied(affected)?;
-
-    announce(resource, &id, Change::Updated(&changed));
 
     // Re-read under the view predicate. A write may legally move a row out of
     // its author's own sight, and this is where that is noticed.
@@ -267,9 +351,11 @@ pub fn update<R: Resource>(
         None
     } else {
         let condition = view_pred.condition::<R::Entity>(R::DIALECT)?;
-        resource.data().fetch(&FetchQuery::new(&condition, &id))?
+        session.fetch(&FetchQuery::new(&condition, &id))?
     };
+    session.commit()?;
 
+    announce(resource, &id, Change::Updated(&changed));
     Ok(Updated { id, row, changed })
 }
 
@@ -283,6 +369,21 @@ pub fn delete<R: Resource>(
     subject: &R::Subject,
     raw_id: &str,
 ) -> Result<(), Failure> {
+    delete_as(resource, &IdentityOf::<R>::default(), subject, raw_id)
+}
+
+/// [`delete`], with every statement run as `identity`: the admission and
+/// the delete it admits, in one session.
+///
+/// # Errors
+///
+/// As [`delete`].
+pub fn delete_as<R: Resource>(
+    resource: &R,
+    identity: &IdentityOf<R>,
+    subject: &R::Subject,
+    raw_id: &str,
+) -> Result<(), Failure> {
     let pred = resource.policy().delete(subject);
     if pred.is_never() {
         return Err(Failure::NoRule);
@@ -290,12 +391,14 @@ pub fn delete<R: Resource>(
     let id = resource.parse_id(raw_id)?;
 
     let admission = pred.admission::<R::Entity>(R::DIALECT, id.clone())?;
-    let rows = resource.data().admit(&Statement::from(admission.query()))?;
+    let mut session = resource.data().session(identity)?;
+    let rows = session.admit(&Statement::from(admission.query()))?;
     let verified = admission.resolve(rows)?;
 
     let write = verified.delete(R::DIALECT)?;
-    let affected = resource.data().write(&Statement::from(write.query()))?;
+    let affected = session.write(&Statement::from(write.query()))?;
     write.applied(affected)?;
+    session.commit()?;
 
     announce(resource, &id, Change::Deleted);
     Ok(())

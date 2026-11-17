@@ -66,7 +66,7 @@ placeholders from `$1`, so the data source numbers its own after them.
 
 ```rust
 use brocanth_policy::{Column, Dialect, Value};
-use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData};
+use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData, Session};
 use brocanth_resource::sql::Statement;
 use brocanth_resource::status::{outcome, Action};
 use brocanth_resource::{flow, Failure, PageRequest, Resource};
@@ -114,16 +114,29 @@ pub struct Db {
     // ...
 }
 
+/// No database identity: each operation's session is the source itself,
+/// and each statement runs on the pool. See "Under row-level security"
+/// below for a source that runs each operation as the request's identity.
 impl ResourceData<Post> for Db {
     type Row = PostRow;
+    type Identity = ();
+    type Session<'a> = &'a Db;
 
-    fn count(&self, query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
+    fn session(&self, _identity: &()) -> Result<&Db, DataError> {
+        Ok(self)
+    }
+}
+
+impl Session<Post> for &Db {
+    type Row = PostRow;
+
+    fn count(&mut self, query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
         let sql = format!("SELECT count(*) FROM posts WHERE ({})", query.condition().sql());
         let rows = self.run(&sql, query.condition().binds().to_vec())?;
         Ok(rows[0].get::<i64, _>(0) as u64)
     }
 
-    fn list(&self, query: &ListQuery<'_, PostColumn>) -> Result<Vec<PostRow>, DataError> {
+    fn list(&mut self, query: &ListQuery<'_, PostColumn>) -> Result<Vec<PostRow>, DataError> {
         let sort = query.sort();
         let next = query.condition().binds().len() + 1;
         let sql = format!(
@@ -140,7 +153,7 @@ impl ResourceData<Post> for Db {
         Ok(self.run(&sql, binds)?.iter().map(post).collect())
     }
 
-    fn fetch(&self, query: &FetchQuery<'_, PostColumn>) -> Result<Option<PostRow>, DataError> {
+    fn fetch(&mut self, query: &FetchQuery<'_, PostColumn>) -> Result<Option<PostRow>, DataError> {
         let sql = format!(
             "SELECT id, title FROM posts WHERE id = ${} AND ({})",
             query.condition().binds().len() + 1,
@@ -152,16 +165,16 @@ impl ResourceData<Post> for Db {
     }
 
     /// The admission test before a write: how many rows the guard matches.
-    fn admit(&self, statement: &Statement) -> Result<usize, DataError> {
+    fn admit(&mut self, statement: &Statement) -> Result<usize, DataError> {
         Ok(self.run(statement.sql(), statement.binds().to_vec())?.len())
     }
 
     /// `UPDATE … WHERE id = $n AND <condition>`. Zero rows is a lost race, a 409.
-    fn write(&self, statement: &Statement) -> Result<u64, DataError> {
+    fn write(&mut self, statement: &Statement) -> Result<u64, DataError> {
         self.execute(statement.sql(), statement.binds().to_vec())
     }
 
-    fn insert(&self, values: &[(PostColumn, Value)]) -> Result<(Value, PostRow), DataError> {
+    fn insert(&mut self, values: &[(PostColumn, Value)]) -> Result<(Value, PostRow), DataError> {
         let names: Vec<&str> = values.iter().map(|(c, _)| c.name()).collect();
         let holes: Vec<String> = (1..=values.len()).map(|n| format!("${n}")).collect();
         let sql = format!(
@@ -172,6 +185,11 @@ impl ResourceData<Post> for Db {
         let binds = values.iter().map(|(_, v)| v.clone()).collect();
         let row = post(&self.run(&sql, binds)?[0]);
         Ok((Value::Int(row.id), row))
+    }
+
+    /// No transaction, so nothing to commit.
+    fn commit(self) -> Result<(), DataError> {
+        Ok(())
     }
 }
 #
@@ -344,6 +362,47 @@ because `create` checks it (`author_id` above) is therefore allowed on
 update too, unless you write both masks, as the example does. Write both
 whenever `create` and `update` read a column.
 
+### Under row-level security
+
+On a table under Postgres row-level security (`brocanth-rls`), a statement
+that does not run as the request's identity sees no row. So the data
+source names an identity type and opens one session per operation:
+
+```rust,ignore
+impl ResourceData<Post> for PgPosts {
+    type Row = PostRow;
+    // What a request runs as. `None` is the login role, as before.
+    type Identity = Option<brocanth_db::DbIdentity>;
+    type Session<'a> = PgSession<'a>;
+
+    fn session(&self, me: &Option<DbIdentity>) -> Result<PgSession<'_>, DataError> {
+        // `Db::begin`, then `Tx::assume(me)`: `SET LOCAL ROLE` and the
+        // settings. Every statement of the operation runs on this `Tx`, and
+        // `Session::commit` commits it.
+    }
+}
+```
+
+`flow::update_as(resource, &identity, subject, id, body)` then runs the
+admission read, the `Verified` write and the re-read in that one
+transaction. The database adds its policy to the application's
+`UPDATE … WHERE id = ? AND <condition>`: two checks, one statement. The
+functions without `_as` (`flow::update`) run as `Identity::default()`.
+
+On the routes, `PageSubject::identity` (and `SubjectSource::identity`)
+reads the identity off the request. In a generated project with the `rls`
+module, it is the one the `rls` plugin puts on the context:
+
+```rust,ignore
+fn identity(&self, ctx: &Ctx) -> Result<Option<DbIdentity>, Failure> {
+    Ok(crate::plugins::rls::identity(ctx).cloned())
+}
+```
+
+The default returns `Identity::default()`. A test of this is
+`tests/rls.rs`: a forced table, rows visible with the identity and
+invisible without it.
+
 ### The routes
 
 `flow` knows no HTTP. Two surfaces put it on a router and render through
@@ -353,7 +412,8 @@ whenever `create` and `update` read a column.
   a generated project's table: `GET` and `POST` on `/`, `GET`, `PATCH` and
   `DELETE` on `/{id}`, and `POST /{id}` and `POST /{id}/delete` for an HTML
   form. `pages::mount_api` adds the five REST routes only. The resource also
-  implements `PageSubject<Ctx>`, which reads who is asking off the request.
+  implements `PageSubject<Ctx>`, which reads who is asking off the request,
+  and who the statements run as.
 - `ResourceRoutes<R>` is a plugin and a `RouteSource` for an `App`. The
   resource implements `SubjectSource<E>`.
 

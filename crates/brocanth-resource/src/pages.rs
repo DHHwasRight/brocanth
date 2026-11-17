@@ -82,7 +82,7 @@ use brocanth::routing::{BuildError, RouterBuilder, Verb};
 use crate::error::Failure;
 use crate::flow;
 use crate::render::{self, Answer};
-use crate::resource::Resource;
+use crate::resource::{IdentityOf, Resource};
 use crate::status::Action;
 
 // ---------------------------------------------------------------------------
@@ -153,6 +153,24 @@ pub trait PageSubject<C>: Resource {
     /// [`Failure::NoSubject`] when the request carries nothing this resource
     /// can read, which is a `401`.
     fn subject(&self, ctx: &C) -> Result<Self::Subject, Failure>;
+
+    /// Who this request's statements run as, in the database: the value
+    /// the data source's session assumes.
+    ///
+    /// The default is the source's default identity, which is nothing for
+    /// a source that has none. A source over a table under row-level
+    /// security reads the request's `DbIdentity` here: in a generated
+    /// project, the one the `rls` plugin puts on the context. Without it,
+    /// a forced table shows this resource no row.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::NoSubject`] when the request carries no identity this
+    /// resource can run as.
+    fn identity(&self, ctx: &C) -> Result<IdentityOf<Self>, Failure> {
+        let _ = ctx;
+        Ok(IdentityOf::<Self>::default())
+    }
 }
 
 /// A handler, as a generated project's table stores it.
@@ -286,10 +304,11 @@ where
     ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
+            let identity = resource.identity(ctx)?;
             let query = query_of(ctx);
             let request = render::page_request(query)?;
             let sort = render::sort_from(&*resource, query)?;
-            flow::list(&*resource, &subject, &request, sort)
+            flow::list_as(&*resource, &identity, &subject, &request, sort)
         })();
         sent(match answer {
             Ok(listing) => render::envelope(&*resource, &listing),
@@ -308,8 +327,9 @@ where
     ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
+            let identity = resource.identity(ctx)?;
             let id = require_id(ctx)?;
-            flow::view(&*resource, &subject, id)
+            flow::view_as(&*resource, &identity, &subject, id)
         })();
         sent(match answer {
             Ok(row) => render::one_row(&*resource, &row, 200, None),
@@ -328,7 +348,8 @@ where
     ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
-            flow::create(&*resource, &subject, ctx.body())
+            let identity = resource.identity(ctx)?;
+            flow::create_as(&*resource, &identity, &subject, ctx.body())
         })();
         sent(match answer {
             // 201 and a `Location`, because a success code carries no
@@ -356,8 +377,9 @@ where
     ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
+            let identity = resource.identity(ctx)?;
             let id = require_id(ctx)?.to_owned();
-            flow::update(&*resource, &subject, &id, ctx.body())
+            flow::update_as(&*resource, &identity, &subject, &id, ctx.body())
         })();
         sent(match answer {
             Ok(updated) => match &updated.row {
@@ -380,8 +402,9 @@ where
     ready(move |ctx: &mut C| {
         let answer = (|| {
             let subject = resource.subject(ctx)?;
+            let identity = resource.identity(ctx)?;
             let id = require_id(ctx)?;
-            flow::delete(&*resource, &subject, id)
+            flow::delete_as(&*resource, &identity, &subject, id)
         })();
         sent(match answer {
             Ok(()) => render::empty(204),

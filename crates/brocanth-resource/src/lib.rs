@@ -39,7 +39,7 @@
 //! So this crate never filters rows it has read. [`ListQuery`] carries a
 //! [`Condition`](brocanth_policy::Condition) that the data source has to put
 //! in its `WHERE` clause, there is no constructor for a [`ListQuery`] without
-//! one, and the same condition goes to [`ResourceData::count`]. The page and
+//! one, and the same condition goes to [`Session::count`]. The page and
 //! the total are therefore windows over one set, so page two cannot overlap
 //! page one and the total cannot disagree with the pages.
 //!
@@ -50,7 +50,8 @@
 //!
 //! # Two layers, and the lower one has no HTTP in it
 //!
-//! * [`flow`] is five functions over [`ResourceData`]. They take a subject,
+//! * [`flow`] is five functions over [`ResourceData`]. They take a subject
+//!   (and, in their `_as` form, the request's database identity),
 //!   return an outcome or a [`Failure`], and know nothing about requests,
 //!   responses or status codes. Every authorisation test in `tests/` drives
 //!   these.
@@ -130,11 +131,11 @@ pub mod pages;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
 
-pub use data::{DataError, FetchQuery, ListQuery, ResourceData};
+pub use data::{DataError, FetchQuery, ListQuery, ResourceData, Session};
 pub use error::Failure;
 pub use page::{Listing, PageRequest, Totals};
 pub use render::Answer;
-pub use resource::{ColumnOf, CreateCheck, Direction, Resource, RowOf, Sort};
+pub use resource::{ColumnOf, CreateCheck, Direction, IdentityOf, Resource, RowOf, Sort};
 pub use sql::Statement;
 pub use status::{Action, Outcome};
 

@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData};
+use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData, Session};
 use brocanth_resource::policy::{
     Column, Entity, EntityPred, Ident, Policy, Pred, Value,
 };
@@ -75,28 +75,42 @@ pub struct Rows;
 
 impl ResourceData<Post> for Rows {
     type Row = Row;
+    type Identity = ();
+    type Session<'a> = &'a Rows;
 
-    fn count(&self, _query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
+    fn session(&self, _identity: &()) -> Result<&Rows, DataError> {
+        Ok(self)
+    }
+}
+
+impl Session<Post> for &Rows {
+    type Row = Row;
+
+    fn count(&mut self, _query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
         Ok(0)
     }
 
-    fn list(&self, _query: &ListQuery<'_, PostColumn>) -> Result<Vec<Row>, DataError> {
+    fn list(&mut self, _query: &ListQuery<'_, PostColumn>) -> Result<Vec<Row>, DataError> {
         Ok(Vec::new())
     }
 
-    fn fetch(&self, _query: &FetchQuery<'_, PostColumn>) -> Result<Option<Row>, DataError> {
+    fn fetch(&mut self, _query: &FetchQuery<'_, PostColumn>) -> Result<Option<Row>, DataError> {
         Ok(None)
     }
 
-    fn admit(&self, _statement: &Statement) -> Result<usize, DataError> {
+    fn admit(&mut self, _statement: &Statement) -> Result<usize, DataError> {
         Ok(0)
     }
 
-    fn write(&self, _statement: &Statement) -> Result<u64, DataError> {
+    fn write(&mut self, _statement: &Statement) -> Result<u64, DataError> {
         Ok(0)
     }
 
-    fn insert(&self, _values: &[(PostColumn, Value)]) -> Result<(Value, Row), DataError> {
+    fn insert(&mut self, _values: &[(PostColumn, Value)]) -> Result<(Value, Row), DataError> {
         Err(DataError::backend("no"))
+    }
+
+    fn commit(self) -> Result<(), DataError> {
+        Ok(())
     }
 }

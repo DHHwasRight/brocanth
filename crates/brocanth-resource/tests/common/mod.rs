@@ -14,12 +14,13 @@ use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
+use brocanth_db::DbIdentity;
 use brocanth_events::{ChangeSink, RowChange};
 use brocanth_policy::{Column, Dialect, Value};
-use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData};
+use brocanth_resource::data::{DataError, FetchQuery, ListQuery, ResourceData, Session};
 use brocanth_resource::sql::Statement;
 use brocanth_resource::{ColumnOf, Failure, Resource};
-use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Connection as _, Row as _};
 
 // ---------------------------------------------------------------------------
@@ -274,6 +275,14 @@ pub struct Db {
     /// A statement to run inside `admit`, after the count is taken: another
     /// transaction committing between the check and the write.
     pub race: Mutex<Option<(String, Vec<Value>)>>,
+    /// For [`Db::with_rls`]: a superuser pool, which seeds and cleans up,
+    /// and the roles to drop. The `pool` is then a login with no bypass.
+    admin: Option<(PgPool, Vec<String>)>,
+}
+
+/// The roles [`Db::with_rls`] made: `member` is what a request assumes.
+pub struct RlsRoles {
+    pub member: String,
 }
 
 impl Db {
@@ -320,7 +329,64 @@ impl Db {
             schema: Some(schema),
             seen: Mutex::new(Vec::new()),
             race: Mutex::new(None),
+            admin: None,
         })
+    }
+
+    /// [`Db::new`], with `posts` under forced row-level security, and the
+    /// pool connected as a login that is neither the owner nor a superuser.
+    ///
+    /// The policy admits a row to the member role when `author_id` is the
+    /// `brocanth.user_id` setting. The login has every privilege on the
+    /// table and no policy, so without an identity it sees no row. A
+    /// superuser bypasses every policy, `FORCE` included, so the login is
+    /// not one.
+    pub fn with_rls() -> Option<(Self, RlsRoles)> {
+        let mut db = Db::new()?;
+        let url = url()?;
+        let schema = db.schema.clone().expect("a schema");
+        let member = format!("{schema}_member");
+        let login = format!("{schema}_login");
+        let setup = [
+            format!("CREATE ROLE \"{member}\" NOLOGIN"),
+            format!("CREATE ROLE \"{login}\" LOGIN PASSWORD 'pw' IN ROLE \"{member}\""),
+            format!("GRANT USAGE ON SCHEMA \"{schema}\" TO \"{member}\", \"{login}\""),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON \"{schema}\".posts TO \"{member}\", \"{login}\""
+            ),
+            format!("ALTER TABLE \"{schema}\".posts ENABLE ROW LEVEL SECURITY"),
+            format!("ALTER TABLE \"{schema}\".posts FORCE ROW LEVEL SECURITY"),
+            format!(
+                "CREATE POLICY posts_mine ON \"{schema}\".posts TO \"{member}\" \
+                 USING (author_id = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint)) \
+                 WITH CHECK (author_id = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint))"
+            ),
+        ];
+        for statement in &setup {
+            db.execute(statement, &[]);
+        }
+        let as_login = db.runtime.block_on(async {
+            let options = PgConnectOptions::from_str(&url)
+                .expect("a database URL")
+                .username(&login)
+                .password("pw")
+                .options([("search_path", schema.as_str())]);
+            PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options)
+                .await
+                .expect("the login connects")
+        });
+        let admin = std::mem::replace(&mut db.pool, as_login);
+        db.admin = Some((admin, vec![login, member.clone()]));
+        Some((db, RlsRoles { member }))
+    }
+
+    /// The pool that seeds rows and reads them back: the superuser one
+    /// under [`Db::with_rls`], so the policy does not hide a row from the
+    /// test itself.
+    fn seeder(&self) -> &PgPool {
+        self.admin.as_ref().map_or(&self.pool, |(admin, _)| admin)
     }
 
     /// A source that never connects, for a test that mounts routes and sends
@@ -339,13 +405,14 @@ impl Db {
             schema: None,
             seen: Mutex::new(Vec::new()),
             race: Mutex::new(None),
+            admin: None,
         }
     }
 
     pub fn execute(&self, sql: &str, binds: &[Value]) -> u64 {
         self.runtime.block_on(async {
             bind_all(sqlx::query(AssertSqlSafe(sql.to_owned())), binds)
-                .execute(&self.pool)
+                .execute(self.seeder())
                 .await
                 .expect("the statement runs")
                 .rows_affected()
@@ -379,7 +446,7 @@ impl Db {
                 "SELECT status FROM posts WHERE id = $1".to_owned(),
             ))
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.seeder())
             .await
             .expect("the statement runs")
             .map(|row| row.get::<String, _>(0))
@@ -388,24 +455,6 @@ impl Db {
 
     fn note(&self, condition: &str) {
         self.seen.lock().unwrap().push(condition.to_owned());
-    }
-
-    fn rows(&self, sql: String, binds: Vec<Value>) -> Result<Vec<PostRow>, DataError> {
-        self.runtime.block_on(async {
-            let rows = bind_all(sqlx::query(AssertSqlSafe(sql.clone())), &binds)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DataError::backend(format!("{e} -- {sql}")))?;
-            Ok(rows
-                .iter()
-                .map(|row| PostRow {
-                    id: row.get(0),
-                    author_id: row.get(1),
-                    status: row.get(2),
-                    title: row.get(3),
-                })
-                .collect())
-        })
     }
 }
 
@@ -417,16 +466,27 @@ impl Drop for Db {
         // A thread of its own: the `Db` can drop inside another runtime, and
         // `block_on` panics there. Errors are ignored, because a panic here
         // during an unwind aborts the test binary.
-        let pool = self.pool.clone();
+        let login = self.pool.clone();
+        let (pool, roles) = self
+            .admin
+            .take()
+            .unwrap_or_else(|| (self.pool.clone(), Vec::new()));
         let runtime = &self.runtime;
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 runtime.block_on(async {
+                    login.close().await;
                     let _ = sqlx::query(AssertSqlSafe(format!(
                         "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
                     )))
                     .execute(&pool)
                     .await;
+                    for role in roles {
+                        let _ =
+                            sqlx::query(AssertSqlSafe(format!("DROP ROLE IF EXISTS \"{role}\"")))
+                                .execute(&pool)
+                                .await;
+                    }
                     pool.close().await;
                 });
             });
@@ -434,33 +494,112 @@ impl Drop for Db {
     }
 }
 
-const COLUMNS: &str = "id, author_id, status, title";
-
+/// No identity runs on the pool, as the login role, one statement at a
+/// time: what this source did before sessions. An identity opens one
+/// transaction that assumes it, and every statement of the operation runs
+/// in it.
 impl ResourceData<Post> for Db {
     type Row = PostRow;
+    type Identity = Option<DbIdentity>;
+    type Session<'a> = PgSession<'a>;
 
-    fn count(&self, query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
-        self.note(query.condition().sql());
+    fn session(&self, identity: &Option<DbIdentity>) -> Result<PgSession<'_>, DataError> {
+        let tx = match identity {
+            None => None,
+            Some(me) => Some(self.runtime.block_on(async {
+                let mut tx = brocanth_db::Db::from_pool(self.pool.clone())
+                    .begin()
+                    .await
+                    .map_err(|e| DataError::backend(e.to_string()))?;
+                tx.assume(me)
+                    .await
+                    .map_err(|e| DataError::backend(e.to_string()))?;
+                Ok::<_, DataError>(tx)
+            })?),
+        };
+        Ok(PgSession { db: self, tx })
+    }
+}
+
+/// One operation's statements: on the pool, or in a transaction as an
+/// identity.
+pub struct PgSession<'a> {
+    db: &'a Db,
+    tx: Option<brocanth_db::Tx<'static>>,
+}
+
+/// A session dropped without `commit` rolls back. The connection goes back
+/// to the pool through a task, which needs the runtime's context.
+impl Drop for PgSession<'_> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _context = self.db.runtime.enter();
+            drop(tx);
+        }
+    }
+}
+
+impl PgSession<'_> {
+    fn fetch_all(&mut self, sql: String, binds: &[Value]) -> Result<Vec<PgRow>, DataError> {
+        let db = self.db;
+        let tx = &mut self.tx;
+        db.runtime.block_on(async {
+            let query = bind_all(sqlx::query(AssertSqlSafe(sql.clone())), binds);
+            match tx {
+                Some(tx) => query.fetch_all(tx.connection()).await,
+                None => query.fetch_all(&db.pool).await,
+            }
+            .map_err(|e| DataError::backend(format!("{e} -- {sql}")))
+        })
+    }
+
+    fn execute(&mut self, sql: String, binds: &[Value]) -> Result<u64, DataError> {
+        let db = self.db;
+        let tx = &mut self.tx;
+        db.runtime.block_on(async {
+            let query = bind_all(sqlx::query(AssertSqlSafe(sql.clone())), binds);
+            match tx {
+                Some(tx) => query.execute(tx.connection()).await,
+                None => query.execute(&db.pool).await,
+            }
+            .map(|done| done.rows_affected())
+            .map_err(|e| DataError::backend(format!("{e} -- {sql}")))
+        })
+    }
+
+    fn rows(&mut self, sql: String, binds: &[Value]) -> Result<Vec<PostRow>, DataError> {
+        Ok(self
+            .fetch_all(sql, binds)?
+            .iter()
+            .map(|row| PostRow {
+                id: row.get(0),
+                author_id: row.get(1),
+                status: row.get(2),
+                title: row.get(3),
+            })
+            .collect())
+    }
+}
+
+const COLUMNS: &str = "id, author_id, status, title";
+
+impl Session<Post> for PgSession<'_> {
+    type Row = PostRow;
+
+    fn count(&mut self, query: &ListQuery<'_, PostColumn>) -> Result<u64, DataError> {
+        self.db.note(query.condition().sql());
         let sql = format!(
             "SELECT count(*) FROM posts WHERE ({})",
             query.condition().sql()
         );
-        self.runtime.block_on(async {
-            let row = bind_all(
-                sqlx::query(AssertSqlSafe(sql.clone())),
-                query.condition().binds(),
-            )
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DataError::backend(format!("{e} -- {sql}")))?;
-            Ok(row.get::<i64, _>(0) as u64)
-        })
+        let rows = self.fetch_all(sql, query.condition().binds())?;
+        Ok(rows[0].get::<i64, _>(0) as u64)
     }
 
     /// The condition numbers its placeholders from `$1`, so the page window
     /// continues after them.
-    fn list(&self, query: &ListQuery<'_, PostColumn>) -> Result<Vec<PostRow>, DataError> {
-        self.note(query.condition().sql());
+    fn list(&mut self, query: &ListQuery<'_, PostColumn>) -> Result<Vec<PostRow>, DataError> {
+        self.db.note(query.condition().sql());
         let sort = query.sort();
         let next = query.condition().binds().len() + 1;
         let sql = format!(
@@ -474,12 +613,12 @@ impl ResourceData<Post> for Db {
         let mut binds = query.condition().binds().to_vec();
         binds.push(Value::Int(query.limit() as i64));
         binds.push(Value::Int(query.offset() as i64));
-        self.rows(sql, binds)
+        self.rows(sql, &binds)
     }
 
     /// The key binds after the condition's own placeholders.
-    fn fetch(&self, query: &FetchQuery<'_, PostColumn>) -> Result<Option<PostRow>, DataError> {
-        self.note(query.condition().sql());
+    fn fetch(&mut self, query: &FetchQuery<'_, PostColumn>) -> Result<Option<PostRow>, DataError> {
+        self.db.note(query.condition().sql());
         let sql = format!(
             "SELECT {COLUMNS} FROM posts WHERE id = ${} AND ({})",
             query.condition().binds().len() + 1,
@@ -487,38 +626,26 @@ impl ResourceData<Post> for Db {
         );
         let mut binds = query.condition().binds().to_vec();
         binds.push(query.id().clone());
-        Ok(self.rows(sql, binds)?.into_iter().next())
+        Ok(self.rows(sql, &binds)?.into_iter().next())
     }
 
-    fn admit(&self, statement: &Statement) -> Result<usize, DataError> {
-        let sql = statement.sql().to_owned();
-        let count = self.runtime.block_on(async {
-            bind_all(sqlx::query(AssertSqlSafe(sql.clone())), statement.binds())
-                .fetch_all(&self.pool)
-                .await
-                .map(|rows| rows.len())
-                .map_err(|e| DataError::backend(format!("{e} -- {sql}")))
-        })?;
+    fn admit(&mut self, statement: &Statement) -> Result<usize, DataError> {
+        let count = self
+            .fetch_all(statement.sql().to_owned(), statement.binds())?
+            .len();
         // The other transaction, committing between the check and the write.
-        let race = self.race.lock().unwrap().take();
+        let race = self.db.race.lock().unwrap().take();
         if let Some((sql, binds)) = race {
-            self.execute(&sql, &binds);
+            self.db.execute(&sql, &binds);
         }
         Ok(count)
     }
 
-    fn write(&self, statement: &Statement) -> Result<u64, DataError> {
-        let sql = statement.sql().to_owned();
-        self.runtime.block_on(async {
-            bind_all(sqlx::query(AssertSqlSafe(sql.clone())), statement.binds())
-                .execute(&self.pool)
-                .await
-                .map(|done| done.rows_affected())
-                .map_err(|e| DataError::backend(format!("{e} -- {sql}")))
-        })
+    fn write(&mut self, statement: &Statement) -> Result<u64, DataError> {
+        self.execute(statement.sql().to_owned(), statement.binds())
     }
 
-    fn insert(&self, values: &[(PostColumn, Value)]) -> Result<(Value, PostRow), DataError> {
+    fn insert(&mut self, values: &[(PostColumn, Value)]) -> Result<(Value, PostRow), DataError> {
         let names: Vec<String> = values
             .iter()
             .map(|(c, _)| format!("\"{}\"", c.name()))
@@ -531,11 +658,21 @@ impl ResourceData<Post> for Db {
         );
         let binds: Vec<Value> = values.iter().map(|(_, v)| v.clone()).collect();
         let row = self
-            .rows(sql, binds)?
+            .rows(sql, &binds)?
             .into_iter()
             .next()
             .ok_or_else(|| DataError::backend("the insert returned no row"))?;
         Ok((Value::Int(row.id), row))
+    }
+
+    fn commit(mut self) -> Result<(), DataError> {
+        let Some(tx) = self.tx.take() else {
+            return Ok(());
+        };
+        self.db
+            .runtime
+            .block_on(tx.commit())
+            .map_err(|e| DataError::backend(e.to_string()))
     }
 }
 

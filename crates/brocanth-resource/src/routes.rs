@@ -54,7 +54,7 @@ use brocanth::plugin_routes::{Handler, RouteBundle, RouteCx, RouteSource};
 use crate::error::Failure;
 use crate::flow;
 use crate::render::{self, Answer};
-use crate::resource::Resource;
+use crate::resource::{IdentityOf, Resource};
 use crate::status::Action;
 
 // One place writes the envelope and reads the status table, for both of this
@@ -84,6 +84,24 @@ pub trait SubjectSource<E>: Resource {
     /// it is a subject with a `None` inside, and the policy decides what that
     /// means.
     fn subject(&self, cx: &RouteCx<'_, E>) -> Result<Self::Subject, Failure>;
+
+    /// Who this request's statements run as, in the database: the value
+    /// the data source's session assumes.
+    ///
+    /// The default is the source's default identity, which is nothing for
+    /// a source that has none. A source over a table under row-level
+    /// security reads the request's `DbIdentity` here: in a generated
+    /// project, the one the `rls` plugin puts on the context. Without it,
+    /// a forced table shows this resource no row.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::NoSubject`] when the request carries no identity this
+    /// resource can run as.
+    fn identity(&self, cx: &RouteCx<'_, E>) -> Result<IdentityOf<Self>, Failure> {
+        let _ = cx;
+        Ok(IdentityOf::<Self>::default())
+    }
 }
 
 /// The plugin that offers one resource's five routes.
@@ -171,10 +189,11 @@ fn list_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<E>
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
+            let identity = resource.identity(cx)?;
             let query = cx.request().uri().query();
             let request = render::page_request(query)?;
             let sort = render::sort_from(&*resource, query)?;
-            flow::list(&*resource, &subject, &request, sort)
+            flow::list_as(&*resource, &identity, &subject, &request, sort)
         })();
         sent(match answer {
             Ok(listing) => render::envelope(&*resource, &listing),
@@ -187,11 +206,12 @@ fn view_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<E>
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
+            let identity = resource.identity(cx)?;
             let id = cx
                 .params()
                 .require("id")
                 .map_err(|error| Failure::bad_request(error.to_string()))?;
-            flow::view(&*resource, &subject, id)
+            flow::view_as(&*resource, &identity, &subject, id)
         })();
         sent(match answer {
             Ok(row) => render::one_row(&*resource, &row, 200, None),
@@ -204,7 +224,8 @@ fn create_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>, prefix: Str
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
-            flow::create(&*resource, &subject, cx.request().body())
+            let identity = resource.identity(cx)?;
+            flow::create_as(&*resource, &identity, &subject, cx.request().body())
         })();
         sent(match answer {
             // 201 and a `Location`, because a success code carries no
@@ -226,12 +247,13 @@ fn update_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
+            let identity = resource.identity(cx)?;
             let id = cx
                 .params()
                 .require("id")
                 .map_err(|error| Failure::bad_request(error.to_string()))?
                 .to_owned();
-            flow::update(&*resource, &subject, &id, cx.request().body())
+            flow::update_as(&*resource, &identity, &subject, &id, cx.request().body())
         })();
         sent(match answer {
             Ok(updated) => match &updated.row {
@@ -248,11 +270,12 @@ fn delete_handler<E: 'static, R: SubjectSource<E>>(resource: Arc<R>) -> Handler<
     Box::new(move |cx| {
         let answer = (|| {
             let subject = resource.subject(cx)?;
+            let identity = resource.identity(cx)?;
             let id = cx
                 .params()
                 .require("id")
                 .map_err(|error| Failure::bad_request(error.to_string()))?;
-            flow::delete(&*resource, &subject, id)
+            flow::delete_as(&*resource, &identity, &subject, id)
         })();
         sent(match answer {
             Ok(()) => render::empty(204),

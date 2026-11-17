@@ -8,8 +8,8 @@
 //!    `WHERE` clause, so the page is a window over the admitted set rather
 //!    than over the whole table. PLAN.md §9 is the argument; [`ListQuery`]
 //!    is the mechanism.
-//! 2. **The total counts the same set.** [`ResourceData::count`] gets the same
-//!    condition as [`ResourceData::list`], from the same compiled predicate,
+//! 2. **The total counts the same set.** [`Session::count`] gets the same
+//!    condition as [`Session::list`], from the same compiled predicate,
 //!    in the same call.
 //! 3. **The order is total and declared.** `LIMIT`/`OFFSET` over an unordered
 //!    query is a different lie: two pages of an unordered result may overlap
@@ -17,8 +17,8 @@
 //!    defaults to the primary key ascending, which is unique by definition.
 //!
 //! [`ListQuery`]: crate::ListQuery
-//! [`ResourceData::count`]: crate::ResourceData::count
-//! [`ResourceData::list`]: crate::ResourceData::list
+//! [`Session::count`]: crate::data::Session::count
+//! [`Session::list`]: crate::data::Session::list
 //! [`Sort`]: crate::Sort
 //!
 //! # `skipTotal`
