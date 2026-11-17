@@ -151,7 +151,7 @@ pub fn order_of<E: EntityTrait>(
 
 /// One page, as the admin's rows.
 pub async fn rows_of<E: EntityTrait>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     request: &brocanth_admin::data::ListRequest<'_>,
 ) -> Result<Vec<Row>, DataError> {
     let select = E::find()
@@ -172,7 +172,7 @@ pub async fn rows_of<E: EntityTrait>(
 /// One row by its single-column key, guarded by the scope:
 /// `WHERE pk = ? AND <condition>`.
 pub async fn row_of<E: EntityTrait>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     key: &brocanth_admin::model::PrimaryKey,
     table: &str,
     scope: Scope<'_>,
@@ -191,7 +191,7 @@ pub async fn row_of<E: EntityTrait>(
 /// `WHERE column IN (…) AND <condition>`. One query for a batch of foreign
 /// key labels. A key the column type cannot hold matches nothing.
 pub async fn rows_by<E: EntityTrait>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     column: &str,
     keys: &[String],
     scope: Scope<'_>,
@@ -217,7 +217,7 @@ pub async fn rows_by<E: EntityTrait>(
 /// How many rows match the search and the scope. The scope is the one the
 /// page gets, so the total and the pages describe one set.
 pub async fn count_of<E: EntityTrait>(
-    db: &brocanth_model::sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     search: Search<'_>,
     scope: Scope<'_>,
 ) -> Result<usize, DataError>

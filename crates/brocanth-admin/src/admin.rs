@@ -315,6 +315,12 @@ impl Admin {
     /// [`AdminError::Config`], with a `help:` line.
     pub fn try_new(data: SharedData, mut config: AdminConfig) -> Result<Admin, AdminError> {
         let invalid = |message: String| Err(AdminError::Config(message));
+        // The source's own configuration, such as the database identity
+        // it runs each request as: refused here, at start, and not by the
+        // first request.
+        if let Err(error) = data.check() {
+            return invalid(error.to_string());
+        }
         let descriptors = discover(data.registry(), &config.discovery);
         let mut configured = config.take_models();
         let resources = config.take_resources();

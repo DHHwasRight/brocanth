@@ -74,6 +74,60 @@ pub use serde_json;
 mod source;
 
 pub use async_trait::async_trait;
+pub use brocanth_db::DbIdentity;
+
+/// How a request's principal becomes the database identity its statements
+/// run as. `admin_source!`'s `as_identity` takes one.
+pub type Identify =
+    std::sync::Arc<dyn for<'p> Fn(brocanth_admin::Principal<'p>) -> DbIdentity + Send + Sync>;
+
+/// A transaction on `db` that runs as `me`: `BEGIN`, then `SET LOCAL ROLE`
+/// and the settings. For `admin_source!`.
+pub async fn begin_as(
+    db: &brocanth_model::sea_orm::DatabaseConnection,
+    me: &DbIdentity,
+) -> Result<brocanth_model::sea_orm::DatabaseTransaction, DataError> {
+    use brocanth_model::sea_orm::TransactionTrait as _;
+    let txn = db.begin().await.map_err(db_error)?;
+    brocanth_model::orm::assume(&txn, me)
+        .await
+        .map_err(db_error)?;
+    Ok(txn)
+}
+
+/// Ends a transaction [`begin_as`] opened: commits it when `out` is `Ok`,
+/// rolls it back when not. For `admin_source!`.
+pub async fn end<T>(
+    txn: brocanth_model::sea_orm::DatabaseTransaction,
+    out: Result<T, DataError>,
+) -> Result<T, DataError> {
+    match out {
+        Ok(value) => {
+            txn.commit().await.map_err(db_error)?;
+            Ok(value)
+        }
+        Err(error) => {
+            // The error says why; a failed rollback closes the connection,
+            // and its transaction does not commit.
+            let _ = txn.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// The identity `who` builds for an anonymous principal, checked as
+/// `Tx::assume` would check it: a role, a key or a value it refuses fails
+/// here, when the admin is built. For `admin_source!`'s `AdminData::check`.
+///
+/// # Errors
+///
+/// [`DataError::Backend`] with the refusal and its `help:` line.
+pub fn check_identity(who: &Identify) -> Result<(), DataError> {
+    who(brocanth_admin::Principal::anonymous())
+        .statements()
+        .map(drop)
+        .map_err(|e| DataError::backend(format!("the admin's database identity is refused: {e}")))
+}
 pub use source::{
     columns_of, count_of, delete_locked_of, delete_of, entry_of, equals_of, insert_of, json_of,
     like_escaped, order_of, row_of, rows_by, rows_of, scope_of, search_of, single_key,
@@ -251,6 +305,27 @@ pub fn one_key(key: &PrimaryKey, table: &str) -> Result<(String, String), DataEr
 /// transaction for the row lock; on a transaction that is a savepoint, so
 /// the row lock lasts until the outer commit.
 ///
+/// # As the staff member's database identity
+///
+/// On a table under Postgres row-level security, a statement that does not
+/// run as an identity sees no row. `as_identity` gives the source a
+/// function from the request's principal to a `DbIdentity`
+/// (docs/policy-rls-bridge.md, decision 13):
+///
+/// ```ignore
+/// let data = Models::new(db).as_identity(|principal| {
+///     DbIdentity::new().role("app_user").set("admin", !principal.is_anonymous())
+/// });
+/// ```
+///
+/// Each request then reads through a copy of the source bound to that
+/// identity (`AdminData::for_request`). Each read and each write runs in a
+/// transaction that assumed it first, and a save with inline rows runs in
+/// one. The admin's own row policy still goes into every `WHERE`, so the
+/// database checks the same rows twice. `AdminData::check` builds the
+/// anonymous principal's identity when the admin is built, so a role or a
+/// key the identity refuses fails at start.
+///
 /// [`AdminData`]: brocanth_admin::data::AdminData
 #[macro_export]
 macro_rules! admin_source {
@@ -262,7 +337,11 @@ macro_rules! admin_source {
         $(#[$meta])*
         $vis struct $name {
             db: $crate::brocanth_model::sea_orm::DatabaseConnection,
-            entries: ::std::vec::Vec<$crate::brocanth_admin::discovery::RegistryEntry>,
+            entries: ::std::sync::Arc<::std::vec::Vec<$crate::brocanth_admin::discovery::RegistryEntry>>,
+            /// How a request's principal becomes its database identity.
+            identity: ::std::option::Option<$crate::Identify>,
+            /// The identity of the request this copy serves.
+            me: ::std::option::Option<$crate::DbIdentity>,
         }
 
         impl $name {
@@ -276,7 +355,12 @@ macro_rules! admin_source {
                 let entries = ::std::vec![
                     $($crate::entry_of::<$entity>($module, backend),)*
                 ];
-                Self { db, entries }
+                Self {
+                    db,
+                    entries: ::std::sync::Arc::new(entries),
+                    identity: ::std::option::Option::None,
+                    me: ::std::option::Option::None,
+                }
             }
 
             /// The source with no connection, for `backend`: the models and
@@ -290,8 +374,26 @@ macro_rules! admin_source {
                 ];
                 Self {
                     db: ::std::default::Default::default(),
-                    entries,
+                    entries: ::std::sync::Arc::new(entries),
+                    identity: ::std::option::Option::None,
+                    me: ::std::option::Option::None,
                 }
+            }
+
+            /// Runs each request as the database identity `who` builds from
+            /// the request's principal: each read and each write in a
+            /// transaction that assumed it. For tables under Postgres
+            /// row-level security.
+            #[allow(dead_code)]
+            $vis fn as_identity(
+                mut self,
+                who: impl for<'p> Fn($crate::brocanth_admin::Principal<'p>) -> $crate::DbIdentity
+                    + ::std::marker::Send
+                    + ::std::marker::Sync
+                    + 'static,
+            ) -> Self {
+                self.identity = ::std::option::Option::Some(::std::sync::Arc::new(who));
+                self
             }
 
             /// The connection, for a caller that wants to share it.
@@ -308,6 +410,140 @@ macro_rules! admin_source {
             txn: $crate::brocanth_model::sea_orm::DatabaseTransaction,
         }
 
+        /// Each operation once, over any connection: the source's own, or
+        /// a transaction that assumed the request's identity.
+        impl $name {
+            async fn count_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                search: $crate::brocanth_admin::data::Search<'_>,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<usize, $crate::brocanth_admin::data::DataError>
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => $crate::count_of::<$entity>(db, search, scope).await,)*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn list_on<C>(
+                db: &C,
+                request: &$crate::brocanth_admin::data::ListRequest<'_>,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::brocanth_admin::model::Row>,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait,
+            {
+                match request.model.module_path.as_str() {
+                    $($module => $crate::rows_of::<$entity>(db, request).await,)*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn fetch_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                ::std::option::Option<$crate::brocanth_admin::model::Row>,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => $crate::row_of::<$entity>(db, key, &model.table, scope).await,)*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn fetch_many_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                column: &str,
+                keys: &[::std::string::String],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::brocanth_admin::model::Row>,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => $crate::rows_by::<$entity>(db, column, keys, scope).await,)*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn insert_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::model::PrimaryKey,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait
+                    + $crate::brocanth_model::sea_orm::TransactionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => $crate::insert_of::<$entity, _>(db, model, values).await,)*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn update_locked_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait
+                    + $crate::brocanth_model::sea_orm::TransactionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::update_locked_of::<$entity, _>(db, model, key, values, scope)
+                            .await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+
+            async fn delete_locked_on<C>(
+                db: &C,
+                model: &$crate::brocanth_admin::model::ModelDescriptor,
+                key: &$crate::brocanth_admin::model::PrimaryKey,
+                scope: $crate::brocanth_admin::data::Scope<'_>,
+            ) -> ::std::result::Result<
+                $crate::brocanth_admin::data::Locked,
+                $crate::brocanth_admin::data::DataError,
+            >
+            where
+                C: $crate::brocanth_model::sea_orm::ConnectionTrait
+                    + $crate::brocanth_model::sea_orm::TransactionTrait,
+            {
+                match model.module_path.as_str() {
+                    $($module => {
+                        $crate::delete_locked_of::<$entity, _>(db, model, key, scope).await
+                    })*
+                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                }
+            }
+        }
+
         #[$crate::async_trait]
         impl $crate::brocanth_admin::data::AdminTransaction for Transaction {
             async fn insert(
@@ -318,12 +554,7 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::model::PrimaryKey,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::insert_of::<$entity, _>(&self.txn, model, values).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
-                }
+                $name::insert_on(&self.txn, model, values).await
             }
 
             async fn update(
@@ -333,13 +564,9 @@ macro_rules! admin_source {
                 values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
                 scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::update_of::<$entity, _>(&self.txn, model, key, values, scope)
-                            .await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
-                }
+                $name::update_locked_on(&self.txn, model, key, values, scope)
+                    .await
+                    .map(|locked| locked.rows)
             }
 
             async fn delete(
@@ -348,12 +575,9 @@ macro_rules! admin_source {
                 key: &$crate::brocanth_admin::model::PrimaryKey,
                 scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::delete_of::<$entity, _>(&self.txn, model, key, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
-                }
+                $name::delete_locked_on(&self.txn, model, key, scope)
+                    .await
+                    .map(|locked| locked.rows)
             }
 
             async fn update_locked(
@@ -366,15 +590,7 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::Locked,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::update_locked_of::<$entity, _>(
-                            &self.txn, model, key, values, scope,
-                        )
-                        .await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
-                }
+                $name::update_locked_on(&self.txn, model, key, values, scope).await
             }
 
             async fn delete_locked(
@@ -386,13 +602,7 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::Locked,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::delete_locked_of::<$entity, _>(&self.txn, model, key, scope)
-                            .await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
-                }
+                $name::delete_locked_on(&self.txn, model, key, scope).await
             }
 
             async fn commit(
@@ -410,6 +620,26 @@ macro_rules! admin_source {
 
         #[$crate::async_trait]
         impl $crate::brocanth_admin::data::AdminData for $name {
+            fn check(&self) -> ::std::result::Result<(), $crate::brocanth_admin::data::DataError> {
+                match &self.identity {
+                    ::std::option::Option::Some(who) => $crate::check_identity(who),
+                    ::std::option::Option::None => ::std::result::Result::Ok(()),
+                }
+            }
+
+            fn for_request(
+                &self,
+                cx: &$crate::brocanth_admin::data::RequestCx<'_>,
+            ) -> ::std::option::Option<$crate::brocanth_admin::SharedData> {
+                let who = self.identity.as_ref()?;
+                ::std::option::Option::Some(::std::sync::Arc::new(Self {
+                    db: self.db.clone(),
+                    entries: ::std::sync::Arc::clone(&self.entries),
+                    identity: ::std::option::Option::None,
+                    me: ::std::option::Option::Some(who(cx.principal)),
+                }))
+            }
+
             async fn begin(
                 &self,
             ) -> ::std::result::Result<
@@ -417,14 +647,19 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::DataError,
             > {
                 use $crate::brocanth_model::sea_orm::TransactionTrait as _;
-                let txn = self.db.begin().await.map_err($crate::db_error)?;
+                let txn = match &self.me {
+                    ::std::option::Option::Some(me) => $crate::begin_as(&self.db, me).await?,
+                    ::std::option::Option::None => {
+                        self.db.begin().await.map_err($crate::db_error)?
+                    }
+                };
                 ::std::result::Result::Ok(::std::boxed::Box::new(Transaction { txn }))
             }
 
             fn registry(
                 &self,
             ) -> ::std::vec::Vec<$crate::brocanth_admin::discovery::RegistryEntry> {
-                self.entries.clone()
+                (*self.entries).clone()
             }
 
             async fn count(
@@ -433,9 +668,13 @@ macro_rules! admin_source {
                 search: $crate::brocanth_admin::data::Search<'_>,
                 scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<usize, $crate::brocanth_admin::data::DataError> {
-                match model.module_path.as_str() {
-                    $($module => $crate::count_of::<$entity>(&self.db, search, scope).await,)*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::count_on(&self.db, model, search, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::count_on(&txn, model, search, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -446,9 +685,13 @@ macro_rules! admin_source {
                 ::std::vec::Vec<$crate::brocanth_admin::model::Row>,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match request.model.module_path.as_str() {
-                    $($module => $crate::rows_of::<$entity>(&self.db, &request).await,)*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::list_on(&self.db, &request).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::list_on(&txn, &request).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -461,11 +704,13 @@ macro_rules! admin_source {
                 ::std::option::Option<$crate::brocanth_admin::model::Row>,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::row_of::<$entity>(&self.db, key, &model.table, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::fetch_on(&self.db, model, key, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::fetch_on(&txn, model, key, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -479,11 +724,13 @@ macro_rules! admin_source {
                 ::std::vec::Vec<$crate::brocanth_admin::model::Row>,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::rows_by::<$entity>(&self.db, column, keys, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::fetch_many_on(&self.db, model, column, keys, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::fetch_many_on(&txn, model, column, keys, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -495,11 +742,13 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::model::PrimaryKey,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::insert_of::<$entity, _>(&self.db, model, values).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::insert_on(&self.db, model, values).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::insert_on(&txn, model, values).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -510,12 +759,15 @@ macro_rules! admin_source {
                 values: &[(::std::string::String, $crate::brocanth_admin::model::Value)],
                 scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::update_of::<$entity, _>(&self.db, model, key, values, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::update_locked_on(&self.db, model, key, values, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::update_locked_on(&txn, model, key, values, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
+                    .map(|locked| locked.rows)
             }
 
             async fn delete(
@@ -524,12 +776,15 @@ macro_rules! admin_source {
                 key: &$crate::brocanth_admin::model::PrimaryKey,
                 scope: $crate::brocanth_admin::data::Scope<'_>,
             ) -> ::std::result::Result<u64, $crate::brocanth_admin::data::DataError> {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::delete_of::<$entity, _>(&self.db, model, key, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::delete_locked_on(&self.db, model, key, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::delete_locked_on(&txn, model, key, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
+                    .map(|locked| locked.rows)
             }
 
             async fn update_locked(
@@ -542,12 +797,13 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::Locked,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::update_locked_of::<$entity, _>(&self.db, model, key, values, scope)
-                            .await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::update_locked_on(&self.db, model, key, values, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::update_locked_on(&txn, model, key, values, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
 
@@ -560,11 +816,13 @@ macro_rules! admin_source {
                 $crate::brocanth_admin::data::Locked,
                 $crate::brocanth_admin::data::DataError,
             > {
-                match model.module_path.as_str() {
-                    $($module => {
-                        $crate::delete_locked_of::<$entity, _>(&self.db, model, key, scope).await
-                    })*
-                    other => ::std::result::Result::Err($crate::unknown_model(other)),
+                match &self.me {
+                    ::std::option::Option::None => Self::delete_locked_on(&self.db, model, key, scope).await,
+                    ::std::option::Option::Some(me) => {
+                        let txn = $crate::begin_as(&self.db, me).await?;
+                        let out = Self::delete_locked_on(&txn, model, key, scope).await;
+                        $crate::end(txn, out).await
+                    }
                 }
             }
         }

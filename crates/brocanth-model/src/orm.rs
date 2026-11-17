@@ -119,22 +119,12 @@ impl Orm {
     where
         F: AsyncFnOnce(&DatabaseTransaction) -> Result<T, DbErr>,
     {
-        let statements = identity
+        // Checked before `BEGIN`, so a bad identity takes no connection.
+        identity
             .statements()
             .map_err(|e| DbErr::Custom(e.to_string()))?;
         let txn = self.0.begin().await?;
-        if let Some(role) = statements.role {
-            txn.execute_unprepared(&role).await?;
-        }
-        if let Some((sql, binds)) = statements.settings {
-            let values = binds.into_iter().map(sea_orm::Value::from);
-            txn.execute_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                sql,
-                values,
-            ))
-            .await?;
-        }
+        assume(&txn, identity).await?;
         match f(&txn).await {
             Ok(value) => {
                 txn.commit().await?;
@@ -148,6 +138,36 @@ impl Orm {
             }
         }
     }
+}
+
+/// Runs the rest of the transaction `txn` as `identity`: `SET LOCAL ROLE`
+/// and `set_config('brocanth.<key>', $value, true)`, the statements
+/// [`DbIdentity::statements`] builds. For a SeaORM transaction this crate
+/// did not open, such as the admin's data source.
+///
+/// Call it first in the transaction: it does not clear what an earlier call
+/// set, as `Tx::assume` does.
+///
+/// # Errors
+/// [`DbErr::Custom`] with a `help:` line for a role, key or value
+/// [`DbIdentity`] refuses; a [`DbErr`] from `SET ROLE` or `set_config`.
+pub async fn assume<C: ConnectionTrait>(txn: &C, identity: &DbIdentity) -> Result<(), DbErr> {
+    let statements = identity
+        .statements()
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
+    if let Some(role) = statements.role {
+        txn.execute_unprepared(&role).await?;
+    }
+    if let Some((sql, binds)) = statements.settings {
+        let values = binds.into_iter().map(sea_orm::Value::from);
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
+        .await?;
+    }
+    Ok(())
 }
 
 impl Deref for Orm {

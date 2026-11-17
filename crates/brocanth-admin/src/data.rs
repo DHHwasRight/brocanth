@@ -246,9 +246,10 @@ impl Locked {
 /// connection as that person, for a database that applies its own row
 /// rules (`SET ROLE`, a session variable an RLS policy reads).
 ///
-/// `#[non_exhaustive]`, so a field can be added -- a database identity the
-/// application resolved, a request id -- without a change to the sources
-/// that do not read it.
+/// `#[non_exhaustive]`, so a field can be added -- a request id -- without
+/// a change to the sources that do not read it. A database identity is not
+/// a field: the source builds it from the principal, as
+/// `brocanth_admin_model`'s `as_identity` does.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct RequestCx<'a> {
@@ -277,6 +278,21 @@ pub trait AdminData: Send + Sync + 'static {
     fn for_request(&self, cx: &RequestCx<'_>) -> Option<SharedData> {
         let _ = cx;
         None
+    }
+
+    /// Refuses a configuration this source cannot serve a request with,
+    /// before the admin serves one.
+    ///
+    /// [`Admin::try_new`](crate::Admin::try_new) calls it, so a generated
+    /// project fails at start, not on the first request. A source that
+    /// runs each request as a database identity builds one here and checks
+    /// it. The default accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`DataError::Backend`] with the problem and a `help:` line.
+    fn check(&self) -> Result<(), DataError> {
+        Ok(())
     }
 
     /// Every model this source holds, before the admin's discovery filter.

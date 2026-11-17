@@ -24,7 +24,12 @@ brocanth-admin.workspace = true
 # The ORM, through the layer that owns it. The version, the runtime and the
 # registry are `brocanth-model`'s decisions and are not restated here.
 # `policy` is the adapter from a row policy to a SeaORM `WHERE`.
-brocanth-model = { workspace = true, features = ["policy"] }
+brocanth-model = { workspace = true, features = ["policy", "db"] }
+
+# `DbIdentity`: who each request's statements run as, for a table under
+# Postgres row-level security (`as_identity`). `db` above already links
+# this crate; it is named because the macro's struct holds one.
+brocanth-db.workspace = true
 
 # And one feature that is this crate's decision rather than the model
 # layer's. `set_from_json` and `into_json` are both behind `with-json`, and
