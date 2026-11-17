@@ -123,6 +123,39 @@ than ignore it. A test or a development build over it calls
 `AdminConfig::unscoped_rows_unsafe_for_development()`, which lets a model
 with no resource show every row.
 
+### Under Postgres row-level security
+
+On a table under forced row-level security (`brocanth-rls`), a statement
+that does not run as a database identity sees no row. So the data source
+runs each request as the staff member's identity
+(docs/policy-rls-bridge.md, decision 13):
+
+```rust
+let data = Models::new(orm.connection().clone()).as_identity(crate::plugins::rls::staff);
+```
+
+- `as_identity(who)` takes a function from the request's `Principal` to a
+  `DbIdentity`. `AdminData::for_request` then gives each request a copy of
+  the source bound to `who(principal)`.
+- Each read and each write runs in a transaction that assumed the
+  identity first (`SET LOCAL ROLE`, `set_config`). A save with inline rows
+  runs in one such transaction.
+- The per-tab RBAC and the row policy do not change. The admin still
+  `AND`s the `Scope` into every statement. The database adds its own
+  policy to the same statement: two checks, one statement.
+- `AdminData::check` runs in `Admin::try_new`. It builds the identity of
+  an anonymous principal and checks it as `Tx::assume` would: a bad role
+  name or key fails when the admin is built. A generated project builds
+  the admin over the same source in `AdminSettings::configure`, so it fails
+  at start, not on the first request.
+
+A generated project with `admin-model`, `rls` and `policy` writes this
+line. `crate::plugins::rls::staff` is the policy's `Visitor` with `admin`
+set, as `brocanth_rls::identity(&app_user(), &visitor)`. A table the admin
+shows needs a grant to `app_user` and a policy that admits staff, or the
+admin sees no row of it. `crates/brocanth-admin-model/tests/rls.rs` tests
+it on a forced table, with the identity and without it.
+
 **Open.** A conditional create rule needs the proposed row as a one-row CTE
 (`brocanth_resource::sql::create_admission`) and typed values the admin's
 string form does not have yet. The edit and delete links on a list row are

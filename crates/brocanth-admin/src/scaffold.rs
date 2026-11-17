@@ -86,6 +86,14 @@ impl Module for Backoffice {
             "the rows are read through the ORM, from `src/plugins/admin/models.rs`",
         )
         .adapts_to(
+            "rls",
+            "with `admin-model` and `policy`, the ORM source runs each request as the staff member's database identity",
+        )
+        .adapts_to(
+            "policy",
+            "with `admin-model` and `rls`, the staff member's database identity is the policy's `Visitor`",
+        )
+        .adapts_to(
             "commands",
             "the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project",
         )
@@ -134,6 +142,19 @@ impl Module for Backoffice {
                 without
             }
         };
+        // With `rls` and `policy`, the ORM source runs each request as the
+        // staff member's database identity (docs/policy-rls-bridge.md,
+        // decision 13). The start-time check builds the same source, so a
+        // bad identity fails at start.
+        let as_staff = over_orm && project.has("rls") && project.has("policy");
+        let (source, check_source) = if as_staff {
+            (SOURCE_ORM_RLS, CHECK_SOURCE_ORM_RLS)
+        } else {
+            (
+                pick(SOURCE_ORM, SOURCE),
+                pick(CHECK_SOURCE_ORM, CHECK_SOURCE),
+            )
+        };
         s.file(
             "src/plugins/admin/mod.rs",
             ADMIN_RS
@@ -147,8 +168,8 @@ impl Module for Backoffice {
                 .replace("@CONFIGURED_CALL@", CONFIGURED_CALL)
                 .replace("@HOLD@", HOLD)
                 .replace("@LATER@", LATER)
-                .replace("@SOURCE@", pick(SOURCE_ORM, SOURCE))
-                .replace("@CHECK_SOURCE@", pick(CHECK_SOURCE_ORM, CHECK_SOURCE))
+                .replace("@SOURCE@", source)
+                .replace("@CHECK_SOURCE@", check_source)
                 .replace(
                     "@WHO_LABEL@",
                     if project.has("superuser") {
@@ -606,6 +627,11 @@ fn before_chosen(text: &str) -> String {
     if !text.contains(PLUGIN_NOW) {
         return text.to_string();
     }
+    // The staff identity came later than every older form: an older file
+    // has the plain ORM source.
+    let text = &text
+        .replace(SOURCE_ORM_RLS, SOURCE_ORM)
+        .replace(CHECK_SOURCE_ORM_RLS, CHECK_SOURCE_ORM);
     let orm = text.contains(SOURCE_ORM);
     let later_orm = LATER
         .replace("@SOURCE@", SOURCE_ORM)
@@ -805,6 +831,27 @@ const CONFIGURED_TAIL: &str = "    (config, late)\n}\n\n";
 
 /// The call to `configured` at the top of `mount`.
 const CONFIGURED_CALL: &str = "    let (config, late) = configured(prefix);\n";
+
+/// [`CHECK_SOURCE_ORM`], as the staff member's database identity: with
+/// `rls` and `policy`. `Admin::try_new` checks the identity.
+const CHECK_SOURCE_ORM_RLS: &str = "    Arc::new(
+        models::Models::unconnected(brocanth_model::sea_orm::DbBackend::Postgres)
+            .as_identity(crate::plugins::rls::staff),
+    )\n";
+
+/// [`SOURCE_ORM`], as the staff member's database identity: each request
+/// reads and writes as `crate::plugins::rls::staff`.
+const SOURCE_ORM_RLS: &str = r#"            let admin = match ctx.provided::<brocanth_model::Orm, _>() {
+                Some(orm) => Admin::try_new(
+                    Arc::new(
+                        models::Models::new(orm.connection().clone())
+                            .as_identity(crate::plugins::rls::staff),
+                    ),
+                    config,
+                ),
+                None => Admin::try_new(Arc::new(Fixture::new()), config),
+            };
+"#;
 
 /// The data source without `admin-model`.
 const SOURCE: &str = r#"            // An empty in-memory source: no models, so no rows to read. Put

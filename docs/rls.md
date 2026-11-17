@@ -340,6 +340,62 @@ SELECT set_config($1, $2, true), …;   -- 'brocanth.tenant_id', '7'
   request; `brocanth_db::DbIdentity` is who the database transaction runs
   as. A request maps the first to the second.
 
+### How a request sets its identity
+
+docs/policy-rls-bridge.md, decision 6. With a `brocanth-policy` subject,
+the identity is built in one place:
+
+```rust
+let me = brocanth_rls::identity(&app_user(), &visitor);   // DbIdentity
+```
+
+`identity` sets the role and **every** key of `Subject::ATTRS`, one
+`brocanth.<key>` per attribute. An absent value (`None`) sets `''`, which
+`NULLIF` reads as `NULL`, so "absent" means "anonymous" in the application
+and in the database. A present value goes through the typed `Setting` of
+its kind (`bigint`, `integer`, `boolean`, `text`, `uuid`, `timestamptz`).
+It is written as Postgres casts it back: a uuid hyphenated, a timestamp as
+ISO 8601 in UTC with microseconds. A value the type refuses fails at
+`assume`, with a `help:` line.
+
+In a generated project with `rls` and `policy`, `src/plugins/rls/mod.rs`
+has:
+
+- `app_user()`: the one role every request runs as (decision 7).
+  `schema()` creates it. The login needs `.member(<login>)` unless it is a
+  superuser.
+- `impl Subject for Visitor`: the attributes of the policy's subject.
+- `RowSecurity`: a plugin that puts `Identity(identity(&app_user(),
+  &visitor))` on each request's typed context. The visitor is the one a
+  request hook put in the request state; without one, the request is
+  anonymous. `configure` builds the anonymous identity once, so a bad role
+  name stops the start.
+- `identity(ctx)`: the request's `DbIdentity`, for `transact_as`.
+
+A handler then runs its work as that identity:
+
+```rust
+let me = crate::plugins::rls::identity(ctx).expect("dispatched");
+// sqlx
+let rows = ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
+// SeaORM
+let orm = ctx.provided::<brocanth_model::Orm, _>().expect("dispatched");
+let posts = orm.transact_as(me, async |txn| post::Entity::find().all(txn).await).await?;
+```
+
+`Identity` is a newtype: `ContextItem` is the core's trait and `DbIdentity`
+is `brocanth-db`'s type, so the generated project cannot implement one for
+the other (the reason `brocanth_model::Orm` is a newtype too).
+
+The records API and the backoffice carry the identity too (decision 13):
+
+- `brocanth-resource`: `ResourceData::session(&identity)` opens one session
+  per operation, and `flow::update_as(resource, &identity, …)` runs the
+  admission read, the `Verified` write and the re-read in it.
+  `PageSubject::identity` reads the identity off the request.
+- `brocanth-admin-model`: `Models::new(db).as_identity(staff)` runs each
+  request in a transaction as `staff(principal)`. `docs/backoffice.md` §2a.
+
 The login role needs `GRANT app_user TO app_login` (`Role::member`) for
 `SET ROLE`. It needs no privilege on the tables.
 
@@ -441,8 +497,7 @@ with `SqlExpr` and `crud`. The database rule is the floor: a missing
   first if the role must stay.
 - Policies on views, and `security_invoker` views.
 - Functions in other languages than SQL.
-- A per-request identity for `brocanth-admin-model`'s data source. Its
-  `AdminData` methods take no request, so it queries the `Orm` as the
-  login role: on a `FORCE` table it sees no row. Give the admin a policy
-  for the login (or a staff role), or keep its tables out of RLS.
+- The admin's data source runs as the staff member's identity only with
+  `as_identity` (§4, "How a request sets its identity"). Without it, it
+  queries the `Orm` as the login role: on a `FORCE` table it sees no row.
 - `rls check` does not compare a function's `EXECUTE` grants.

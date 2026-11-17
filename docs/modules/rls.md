@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/rls.rs`. A setting is read at run
 | Provides | none |
 | Requires | `PgPool` (a Postgres pool): the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal; providers: [`db`](db.md) |
 | Uses | none |
-| Adapts to | [`model`](model.md): `rls make` writes a SeaORM migration file, not a SQL file; [`admin-model`](admin-model.md): AGENTS.md says the admin queries as the login role, so a FORCE table shows it no row |
+| Adapts to | [`model`](model.md): `rls make` writes a SeaORM migration file, not a SQL file; [`admin-model`](admin-model.md): with `policy`, `staff` is the identity the admin runs each request as; without it, AGENTS.md says the admin queries as the login role; [`policy`](policy.md): the `RowSecurity` plugin puts the request's `DbIdentity`, built from the policy's `Visitor`, on the context; [`resource`](resource.md): AGENTS.md says how a resource runs each operation as the request's identity |
 | Contributes | `AgentsSection` `rls`: how row-level security is declared in Rust and migrated |
 | Collects | none |
 | Exports | none |
@@ -46,12 +46,17 @@ alternatives are in [`docs/rls.md`](../rls.md).
 Files:
 
 - `src/plugins/rls/mod.rs`: `schema()`, the roles, tables, functions and
-  policies, in Rust. The project owns it. It starts empty.
+  policies, in Rust. The project owns it. It starts empty. With
+  [`policy`](policy.md), it also holds `app_user()` (the one role, which
+  `schema()` creates), `impl Subject for Visitor`, the `RowSecurity`
+  plugin and `identity(ctx)`; with [`admin-model`](admin-model.md) too,
+  `staff`.
 - `src/commands/rls.rs`: the `rls` command.
 
 Slots:
 
-- src/plugins/mod.rs: `pub mod rls;`
+- src/plugins/mod.rs: `pub mod rls;`; with `policy`, the `RowSecurity`
+  registration and its line in the provider list
 - src/commands/mod.rs: `pub mod rls;`
 - AGENTS.md: `## Row-level security`
 
@@ -78,6 +83,12 @@ let me = brocanth_db::DbIdentity::new().role("app_member").setting(&crate::plugi
 let rows: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
 ```
 
+With [`policy`](policy.md), the `RowSecurity` plugin builds the identity
+of each request, `brocanth_rls::identity(&app_user(), &visitor)`, and
+puts it on the context. A page reads it with
+`crate::plugins::rls::identity(ctx)` and passes it to `transact_as`
+(`docs/rls.md` §4, "How a request sets its identity").
+
 `transact_as` runs `SET LOCAL ROLE` and `set_config('brocanth.<key>', $1,
 true)` at the start of the transaction. Both end with it. A statement on
 `ctx.db()` outside `transact_as` runs as the login role, and a policy that
@@ -86,11 +97,14 @@ reads a setting sees `NULL`.
 With [`model`](model.md), a SeaORM query takes the identity through
 `Orm::transact_as(&me, async |txn| …)`, which runs the same statements.
 
-With [`admin-model`](admin-model.md), the admin queries the `Orm` with no
-identity, as the login role. On a `FORCE` table it sees no row. Give the
-admin its own policy, or keep the tables it edits out of row-level
-security. A per-request identity for the admin's data source is not built
-yet.
+With [`admin-model`](admin-model.md) and [`policy`](policy.md), the
+admin's data source runs each request as `crate::plugins::rls::staff`
+(`Models::as_identity`): the `Visitor` with `admin` set. A table the admin
+shows needs a grant to `app_user` and a policy that admits staff. Without
+`policy`, the admin queries the `Orm` with no identity, as the login role,
+and on a `FORCE` table it sees no row: call `Models::as_identity` in
+`src/plugins/admin/mod.rs` with an identity of your own, or keep the
+tables it edits out of row-level security.
 
 ## What it does not manage
 

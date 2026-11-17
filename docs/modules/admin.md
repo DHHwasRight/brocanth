@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/admin.rs`. A setting is read at r
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`middleware-csrf`](middleware-csrf.md): every form carries the CSRF token; [`superuser`](superuser.md): the principal is the signed-in member of staff, read from the session; [`admin-model`](admin-model.md): the rows are read through the ORM, from `src/plugins/admin/models.rs`; [`commands`](commands.md): the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project |
+| Adapts to | [`middleware-csrf`](middleware-csrf.md): every form carries the CSRF token; [`superuser`](superuser.md): the principal is the signed-in member of staff, read from the session; [`admin-model`](admin-model.md): the rows are read through the ORM, from `src/plugins/admin/models.rs`; [`rls`](rls.md): with `admin-model` and `policy`, the ORM source runs each request as the staff member's database identity; [`policy`](policy.md): with `admin-model` and `rls`, the staff member's database identity is the policy's `Visitor`; [`commands`](commands.md): the binary gets `admin eject` and `admin diff`, which run `brocanth admin` in the project |
 | Contributes | `AgentsSection` `admin`: how a model gets an admin screen |
 | Collects | `AdminPanel`: each tab in the sidebar, behind its RBAC resource; `plugins::admin_panels` lists them |
 | Exports | none |

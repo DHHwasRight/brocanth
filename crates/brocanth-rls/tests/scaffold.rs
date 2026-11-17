@@ -34,6 +34,27 @@ fn a_model_project_writes_seaorm_migrations() {
     shape("rls-model", &["db", "model", "commands", "rls"]);
 }
 
+/// With `policy`, the `RowSecurity` plugin puts the request's identity on
+/// the context; with `admin-model` too, the admin runs as `staff`; with
+/// `resource`, AGENTS.md says how a resource takes the identity.
+#[test]
+fn a_policy_project_builds_the_request_identity() {
+    shape(
+        "rls-policy",
+        &[
+            "config",
+            "db",
+            "model",
+            "commands",
+            "policy",
+            "resource",
+            "admin",
+            "admin-model",
+            "rls",
+        ],
+    );
+}
+
 /// Without `commands` there is nowhere to run `rls make`.
 #[test]
 fn rls_without_commands_is_refused_with_the_reason() {

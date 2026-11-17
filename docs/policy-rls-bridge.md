@@ -231,6 +231,26 @@ database checks the same rule.
 Reason: without it, the first `#[db]` table breaks the backoffice, and the
 "two checks, one statement" claim above has no call site.
 
+Built in phase 4 (17 November 2026), with three changes to the sketches
+above:
+
+- `APP_USER` is a function, `app_user() -> Role`: `Role` holds a `String`,
+  so it cannot be a `const`.
+- The context item is `Identity(DbIdentity)`, a newtype of the generated
+  project, read with `crate::plugins::rls::identity(ctx)`. Reason: the
+  orphan rule. `ContextItem` is the core's trait and `DbIdentity` is
+  `brocanth-db`'s type.
+- `brocanth-resource` links no driver, so it cannot name `DbIdentity`.
+  `ResourceData` names its own `type Identity` (`()` for a source with
+  none) and opens a `Session` per operation; `flow::*_as` runs as an
+  identity, and `flow::*` as `Identity::default()`. The admin already had
+  a per-request source (`AdminData::for_request`), so `admin_source!` gained
+  `as_identity` and the admin gained `AdminData::check`, run at build.
+
+Until the policy scaffold derives `Subject` (phase 6), the generated
+`src/plugins/rls/mod.rs` implements `Subject` for the scaffold's `Visitor`
+by hand.
+
 ## 3. Commands
 
 `brocanth_rls::Policy::from_rules::<P>(&role)` writes up to four policies,

@@ -2476,6 +2476,8 @@ macro_rules! register {
                 crate::plugins::superuser_settings(&layers)?,
             ),
         );
+        let builder = builder
+            .plugin(<crate::plugins::rls::RowSecurity as brocanth::plugin_api::Plugin>::new(()));
 
         // -- file routes ---------------------------------------------------
         //
@@ -2554,7 +2556,8 @@ type WithErrors = After<brocanth_errors::Errors, WithWebhooksOut>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithErrors>;
 type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithAudit>;
 type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
-type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithSuperuser>;
+type WithRls = After<crate::plugins::rls::RowSecurity, WithSuperuser>;
+type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithRls>;
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithStorageRoutes>;
 type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithOauthClient>;
 pub type Installed = WithAuthScreens;
@@ -6108,7 +6111,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: c79806934ea59ec1
+// brocanth-digest: 6f4d78831515bf98
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -14523,7 +14526,10 @@ impl Later {
             let config = branded(config, settings);
             let admin = match ctx.provided::<brocanth_model::Orm, _>() {
                 Some(orm) => Admin::try_new(
-                    Arc::new(models::Models::new(orm.connection().clone())),
+                    Arc::new(
+                        models::Models::new(orm.connection().clone())
+                            .as_identity(crate::plugins::rls::staff),
+                    ),
                     config,
                 ),
                 None => Admin::try_new(Arc::new(Fixture::new()), config),
@@ -14548,9 +14554,10 @@ fn check(data: SharedData, config: AdminConfig, settings: &Settings) -> Result<(
 
 /// The data source [`check`] builds the admin over.
 fn check_source() -> SharedData {
-    Arc::new(models::Models::unconnected(
-        brocanth_model::sea_orm::DbBackend::Postgres,
-    ))
+    Arc::new(
+        models::Models::unconnected(brocanth_model::sea_orm::DbBackend::Postgres)
+            .as_identity(crate::plugins::rls::staff),
+    )
 }
 
 /// `config` with the titles, the "View site" link and the theme.
@@ -19954,18 +19961,168 @@ impl PageError for Error {
 //!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
 //! ```
 //!
-//! A request then runs as its identity, inside one transaction:
+//! A request runs as its identity, inside one transaction. The
+//! `RowSecurity` plugin below builds it from the policy's `Visitor`: the
+//! role [`app_user`] and one setting per attribute (`brocanth.account_id`,
+//! `brocanth.admin`). [`identity`] reads it off the request:
 //!
 //! ```ignore
-//! let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
-//! let posts: Vec<(i64, String)> = ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
+//! let me = crate::plugins::rls::identity(ctx).expect("dispatched");
+//! let posts: Vec<(i64, String)> = ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
 //! ```
 
 use brocanth_rls::Schema;
 
 /// Every role, table, function and policy row-level security needs.
 pub fn schema() -> Schema {
-    Schema::new()
+    Schema::new().role(app_user())
+}
+
+// ---------------------------------------------------------------------------
+// Who a request runs as
+// ---------------------------------------------------------------------------
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth::plugin_hooks::{Request, RequestState};
+use brocanth_policy::{Attr, AttrKind, AttrType, Attributes, Subject};
+use brocanth_rls::{DbIdentity, Role};
+
+use crate::plugins::policy::Visitor;
+
+/// The one role every request under a policy runs as. "Admin" is a setting
+/// the policy guards on, not a role: a role per kind of user needs a grant
+/// and a migration per kind.
+///
+/// `schema()` creates it. The login the application connects with must be
+/// a member, or `SET ROLE` fails: add `.member("<your login role>")` here
+/// when the application does not connect as a superuser.
+pub fn app_user() -> Role {
+    Role::new("app_user")
+}
+
+/// The attributes of `Visitor` a database policy may read: one setting
+/// each, `brocanth.<field>`, of the field's type.
+///
+/// Keep it in step with `Visitor` in `src/plugins/policy/mod.rs`: one entry
+/// per field a rule reads, in `ATTRS` and in `attributes`. A field that is
+/// not here never reaches the database.
+impl Subject for Visitor {
+    const ATTRS: &'static [Attr] = &[
+        Attr {
+            key: "account_id",
+            kind: AttrKind::BigInt,
+            optional: true,
+        },
+        Attr {
+            key: "admin",
+            kind: AttrKind::Boolean,
+            optional: false,
+        },
+    ];
+
+    fn attributes(&self) -> Attributes {
+        Attributes::new()
+            .with("account_id", self.account_id.attr_value())
+            .with("admin", self.admin.attr_value())
+    }
+}
+
+/// The request's database identity, on its typed context.
+///
+/// A newtype: `ContextItem` is brocanth's trait and `DbIdentity` is
+/// `brocanth-db`'s type, so only a type of this crate can carry it.
+pub struct Identity(pub DbIdentity);
+
+impl ContextItem for Identity {}
+
+/// Who the request `ctx` runs as in the database: pass it to
+/// `transact_as`. `None` on a `Ctx` built by hand.
+#[allow(dead_code)]
+pub fn identity(ctx: &crate::pages::Ctx) -> Option<&DbIdentity> {
+    ctx.provided::<Identity, _>().map(|identity| &identity.0)
+}
+
+/// Puts the request's [`Identity`] on the context:
+/// `brocanth_rls::identity(&app_user(), &visitor)`, the role and every key
+/// of `Visitor::ATTRS`. An absent value is set to `''`, which a policy
+/// reads as `NULL`.
+///
+/// The visitor is the one a request hook of yours put in the request
+/// state (`state.insert(visitor)`), after it read the session. Without
+/// one, the request is anonymous.
+pub struct RowSecurity;
+
+impl Plugin for RowSecurity {
+    /// No setting: the role is code, in [`app_user`].
+    type Config = ();
+    type Provides = ProvidesContext<Identity>;
+    const NAME: &'static str = "rls";
+
+    fn new(_config: ()) -> Self {
+        Self
+    }
+
+    /// Builds the anonymous identity once, at start: a role name or a key
+    /// that `SET ROLE` or `set_config` would refuse stops the start, not
+    /// the first request.
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        brocanth_rls::identity(&app_user(), &Visitor::anonymous())
+            .statements()
+            .map(drop)
+            .map_err(|e| PluginError::new(format!("[rls] the request identity: {e}")))
+    }
+
+    /// A context with no request: the anonymous identity.
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(Identity(brocanth_rls::identity(
+            &app_user(),
+            &Visitor::anonymous(),
+        )));
+    }
+
+    fn provide_for_request(
+        &self,
+        _request: &Request,
+        state: &RequestState,
+        cx: &mut ContextBuilder,
+    ) {
+        let anonymous = Visitor::anonymous();
+        let who = state.get::<Visitor>().unwrap_or(&anonymous);
+        cx.insert(Identity(brocanth_rls::identity(&app_user(), who)));
+    }
+}
+
+/// Who a backoffice request runs as in the database: the member of staff,
+/// as a `Visitor` with `admin` set. The admin's own row policy still goes
+/// into every `WHERE`; the database checks the same rows under the
+/// `admin` guard. An anonymous principal gets the anonymous identity: the
+/// admin refuses it before it reads a row.
+///
+/// `src/plugins/admin/mod.rs` passes it to `Models::as_identity`.
+pub fn staff(principal: brocanth_admin::Principal<'_>) -> DbIdentity {
+    let who = Visitor {
+        admin: !principal.is_anonymous(),
+        ..Visitor::anonymous()
+    };
+    brocanth_rls::identity(&app_user(), &who)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every attribute is set, also when it is absent: `''` reads as
+    /// `NULL`, so "absent" is "anonymous" in the database too.
+    #[test]
+    fn an_anonymous_visitor_sets_every_key() {
+        let me = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
+        assert_eq!(me.role_name(), Some("app_user"));
+        let keys: Vec<&str> = me.settings().iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["account_id", "admin"]);
+        assert_eq!(me.settings()[0].1, "");
+        me.statements().expect("the identity is one Postgres takes");
+    }
 }
 ===== src/plugins/robots/mod.rs =====
 //! The robots.txt, as this application answers it.
@@ -22541,13 +22698,21 @@ then run `brocanth rls make <name>` and read the file it writes. Commit it
 with `migrations/rls.json`.
 
 A request that reads or writes a table with a policy runs in one
-transaction, as its identity. Set each value through the `Setting`
-constant the policy reads, so the key cannot drift:
+transaction, as its identity. The `RowSecurity` plugin in
+`src/plugins/rls/mod.rs` builds it for each request:
+`brocanth_rls::identity(&app_user(), &visitor)`, the role `app_user` and
+one setting per attribute of `Visitor`. Do not build a `DbIdentity` by
+hand: every key is always set, and an absent value reads as `NULL`.
+A request hook puts the request's `Visitor` in the request state; without
+one, the request is anonymous. With `sqlx`:
 
 ```rust
-let me = brocanth_db::DbIdentity::new().role("app_user").setting(&TENANT, tenant_id);
-ctx.db().transact_as(&me, async |tx| tx.all(&q).await).await?;
+let me = crate::plugins::rls::identity(ctx).expect("dispatched");
+ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
 ```
+
+A field a database policy reads is an entry in `impl Subject for Visitor`
+in that file: add it there when you add it to `Visitor`.
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
@@ -22556,21 +22721,33 @@ table is forced by default. On a table declared `.no_force()` the owner
 bypasses the policies: when the login role owns the tables, a statement
 outside `transact_as` returns every row.
 
-A SeaORM query takes the identity the same way. `Orm::transact_as` runs
-the same statements in a SeaORM transaction:
+A SeaORM query takes the same identity. `Orm::transact_as` runs the same
+statements in a SeaORM transaction:
 
 ```rust
-orm.transact_as(&me, async |txn| post::Entity::find().all(txn).await).await?;
+let orm = ctx.provided::<brocanth_model::Orm, _>().expect("dispatched");
+orm.transact_as(me, async |txn| post::Entity::find().all(txn).await).await?;
 ```
 
-A query on the `Orm` itself runs as the login role, and on a `FORCE`
+A query on `ctx.orm()` itself runs as the login role, and on a `FORCE`
 table it sees no row.
 
-The admin's data source queries the `Orm` with no identity, as the login
-role. On a table with a policy it sees only what the login may see, and
-on a `FORCE` table nothing. Give the admin its own policy (`TO` the login
-role, or a staff role it is granted), or keep the tables it edits out of
-row-level security.
+A resource of the records API runs each operation in one session as the
+request's identity. Its data source takes
+`type Identity = Option<brocanth_db::DbIdentity>` and opens a `Tx` that
+assumes it in `ResourceData::session`. Its `PageSubject` reads the
+identity off the request:
+
+```rust
+fn identity(&self, ctx: &Ctx) -> Result<Option<DbIdentity>, Failure> {
+    Ok(crate::plugins::rls::identity(ctx).cloned())
+}
+```
+
+The admin's data source runs each request as `crate::plugins::rls::staff`:
+`Models::as_identity` in `src/plugins/admin/mod.rs`. A table the admin
+shows needs a grant to `app_user` (`Table::grant`), and a policy that
+admits staff (`who.admin => always`), or the admin sees no row of it.
 
 Never connect as a superuser: a superuser bypasses every policy.
 
@@ -22660,7 +22837,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: ee335626a1d4d0a9 -->
+<!-- brocanth-digest: 1d2fe11ade07041d -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -22879,7 +23056,7 @@ kind = ["enhancer"]
 files = ["src/modules/rls.rs", "src/commands/rls.rs", "src/plugins/rls/"]
 config = []
 crates = ["brocanth-rls"]
-adapted_to = ["model", "admin-model"]
+adapted_to = ["model", "admin-model", "policy", "resource"]
 
 [modules.storage]
 version = "0.1.0"
@@ -23015,7 +23192,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/admin.rs", "src/commands/admin.rs", "src/plugins/admin/"]
 config = ["admin"]
 crates = ["brocanth-admin"]
-adapted_to = ["middleware-csrf", "superuser", "admin-model", "commands"]
+adapted_to = ["middleware-csrf", "superuser", "admin-model", "rls", "policy", "commands"]
 
 [modules.admin-model]
 version = "0.1.0"
@@ -23257,4 +23434,4 @@ config = []
 crates = []
 adapted_to = ["docker", "db"]
 
-# brocanth-digest: b6904d35cfafab98
+# brocanth-digest: cc93a1bb114bf8ef
