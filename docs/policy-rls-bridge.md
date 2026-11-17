@@ -1,15 +1,16 @@
 # One rule, two enforcers: the policy-RLS bridge
 
-Written 12 November 2026. Status: **design, not built**. Postgres only.
+Written 12 November 2026. Status: **accepted 17 November 2026, not built**.
+Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
 `condition()` for lists, `Verified` for writes) and the database policy
 (`brocanth-rls`). The author writes the rule once.
 
-This doc uses the **target API of `feat/rls`**, which a concurrent change
-writes now: `DbIdentity` (was `Principal`), typed `&Setting` setters,
-`is()` refused on a setting, typed SeaORM columns, `Orm::transact_as`. It
-replaces the sketch in `docs/rls.md` §5.
+This doc uses the API that `feat/rls` landed on main (54db8067):
+`DbIdentity` (was `Principal`), typed `&Setting` setters, `is()` refused on
+a setting, typed SeaORM columns, `Orm::transact_as`. It replaces the sketch
+in `docs/rls.md` §5.
 
 ## 0. The problem in one example
 
@@ -61,13 +62,13 @@ readers drifts only where the readers differ, and §4 tests that. Without
 | `always`, `never` | `TRUE`, `FALSE` | |
 | `col == lit` (and `!=`, `<`, …) | `"col" = 'lit'` | literal, written by sea-query |
 | `col == who.x else deny` | `(s(x) IS NOT NULL AND "col" = s(x))` | FALSE, not NULL, when absent; see §4 |
-| `col == who.x else allow` | `(s(x) IS NULL OR "col" = s(x))` | allowed; the role still gates (§4) |
+| `col == who.x else allow` | refused with `#[db]` | decision 3 |
 | `col == who.x else null` | `"col" = s(x)` | three-valued, as the app |
 | `col == who.x` (non-`Option` field) | `(s(x) IS NOT NULL AND "col" = s(x))` | a NULL setting fails closed |
 | `col is lit`, `col is null` | `IS NOT DISTINCT FROM 'lit'`, `IS NULL` | literal only |
 | `col in [lits]`, `not in` | `IN (…)`, `NOT IN (…)` | literal only |
 | `&&`, `\|\|`, `!` | `AND`, `OR`, `NOT` | |
-| `Pred::Exists` (membership) | `EXISTS (SELECT 1 FROM "t" WHERE …)` | filter values may be `who.x` |
+| `exists T(…)` (membership, new syntax) | `EXISTS (SELECT 1 FROM "t" WHERE …)` | filter values may be `who.x`; see below |
 | guard `who.f`, `!who.f`, `who.f == lit`, `&&`/`\|\|` of them | boolean over `s(f)` | see below |
 
 A guard chain `g1 => r1, g2 => r2, f` becomes:
@@ -78,6 +79,17 @@ s(g1) IS NOT NULL AND s(g2) IS NOT NULL AND (
   OR (NOT g1 AND g2 AND r2)
   OR (NOT g1 AND NOT g2 AND f))
 ```
+
+Membership needs a syntax: today `Pred::Exists` enters a `policy!` only
+through a `{ }` block, which decision 3 refuses. Phase 2 adds
+
+```rust
+list { exists Member(post_id == id, user_id == who.user_id else deny) }
+```
+
+where the left side of each `==` is a column of `Member` and the right side
+is a column of the outer entity, a literal, or `who.<field>`. It builds the
+same `Pred::Exists` as the hand-written form.
 
 A term with `never` drops out. A NULL guard setting makes the rule FALSE.
 Reason: a Rust `bool` has no third value; without the prefix, a missing
@@ -92,10 +104,17 @@ so the planner sees plain `AND`/`OR` (phase 5 checks the index is kept).
 | a guard that is not `who.<field>`, `!`, `== lit`, `&&`, `\|\|` | macro | `help: add the value to the subject as a #[attr] field and test that` |
 | a value that uses `who` and is not exactly `who.<field>` | macro | `help: compute the value when you build the subject, and store it in a field` |
 | `col is who.x`, `col is not who.x` | macro | `help: use == with else deny; IS NOT DISTINCT FROM matches NULL to a missing setting` |
-| `col in who.xs` (a list attribute) | macro | `help: a setting holds one value; use a membership table and Pred::Exists` |
+| `col in who.xs` (a list attribute) | macro | `help: a setting holds one value; use a membership table and exists` |
+| `col == who.x else allow` | macro | `help: put the fact in a bool #[attr] field and guard on it` |
 | `Pred::Opaque` | macro (it is a `{ }` block) | as the first row |
 | a `#[db]` policy whose subject field has no `#[attr]` | compiler (the accessor does not exist) | the derive's error |
 | an `#[app_only]` rule on a command | `rls make` | `help: write a SqlExpr for <table> <command> in src/plugins/rls/mod.rs with .manual(...)` |
+
+Reason for the `else allow` refusal: it compiles to `(s(x) IS NULL OR …)`.
+A key that is missing from the identity reads as NULL (a second `assume`
+sets a dropped key to `''`), so a missing key opens the table.
+`check_identity` refuses unknown keys but does not require every key. A
+guard on a bool attribute fails closed instead (the `IS NOT NULL` prefix).
 
 Reason for the `is` refusal: `NULL IS NOT DISTINCT FROM NULL` is TRUE, so
 a request with no `user_id` matches every row with no author. `feat/rls`
@@ -127,8 +146,15 @@ pub struct Visitor {
 
 The derive emits `Visitor::ATTRS: &[Attr]` (key, kind, optional) and
 `fn attributes(&self) -> Attributes`. The kinds are the `Value` kinds:
-`i64`/`i32` -> `bigint`/`integer`, `bool` -> `boolean`, `String` -> `text`.
-`brocanth-rls` turns each `Attr` into a typed `Setting`.
+`i64`/`i32` -> `bigint`/`integer`, `bool` -> `boolean`, `String` -> `text`,
+`Uuid` -> `uuid`, `chrono::DateTime<Utc>` -> `timestamptz`. `brocanth-rls` turns
+each `Attr` into a typed `Setting`.
+
+Phase 1 adds `Uuid` and `Timestamptz` as `typed::Kind`s and `Value`
+variants. Today a policy entity cannot have a uuid column at all
+(`ColumnType` covers integers, floats, `bool`, `String`, `Vec<u8>`).
+Reason against `text` and a cast: the cast lands on the column, so
+Postgres cannot use the column's index, and phase 5 checks that it does.
 
 Reasons: the key comes from the field name, so a rename changes both sides
 at the next build. `Attr` is plain data, so `brocanth-policy` stays free of
@@ -177,6 +203,19 @@ hand stays possible.
 `Verified` writes run in the same `Tx`: Postgres adds the RLS policy to the
 app's `UPDATE … WHERE id = ? AND <condition>`. Two checks, one statement.
 
+### Decision 13: resource and admin paths carry the identity.
+
+`ResourceData` today is `&self` and `'static`, with no `Tx` and no
+identity, and the admin data source has none either. On a forced table
+they would see no rows. Phase 4 gives `ResourceData` the request's
+`DbIdentity` and runs each read and write in `transact_as`. The backoffice
+builds the identity of the staff member: its per-tab RBAC
+(module-capabilities.md §5.2) still folds into `condition()`, and the
+database checks the same rule.
+
+Reason: without it, the first `#[db]` table breaks the backoffice, and the
+"two checks, one statement" claim above has no call site.
+
 ## 3. Commands
 
 `brocanth_rls::Policy::from_rules::<P>(&role)` writes up to four policies,
@@ -184,15 +223,15 @@ named `<table>_<role>_<command>`, like `crud`.
 
 | `Policy` method | Database policy | Reason |
 |---|---|---|
-| `list` OR `view` | `FOR SELECT USING (list OR view)` | Postgres has one read command. The database floor is the union. The app narrows a list with `list`. |
-| `create` | `FOR INSERT WITH CHECK (create)` | both check the proposed row |
-| `update` | `FOR UPDATE USING (update) WITH CHECK (update)` | see decision 8 |
+| `list` OR `view` | `FOR SELECT USING (list OR view)` | Postgres has one read command. The database floor is the union. The app narrows a list with `list`. `view` defaults to `list`, so the union is `list` for most policies. |
+| `create` | `FOR INSERT WITH CHECK (create)` | both check the proposed row; grants `USAGE` on the table's serial sequence |
+| `update` | `FOR UPDATE USING (update) WITH CHECK (update_check)` | see decision 8 |
 | `delete` | `FOR DELETE USING (delete)` | |
 | a rule that is `never` for every guard | no policy, no grant | RLS denies what no policy allows. No grant gives a clear `permission denied`. |
 
 `from_rules` also grants the commands that have a policy, and forces RLS.
 
-### Decision 8: `UPDATE … WITH CHECK` uses the `update` rule.
+### Decision 8: `UPDATE … WITH CHECK` uses `update_check`, which defaults to the `update` rule.
 
 The app's `update` checks the stored row only (policy.rs: "decides on the
 row as stored"). The `writable` mask is what stops an author from moving a
@@ -202,12 +241,15 @@ row too.
 Reason: the extra strictness covers the hole the mask covers, so the
 database refuses an owner change when a write path forgets the mask. Cost:
 `update: status == "draft"` with `status` writable lets the app publish a
-draft that the database refuses. §4's test finds it; the author then writes
-`update_check: <pred>` (new, optional; `always` = stored row only).
+draft that the database refuses. So `update_check: <pred>` ships in phase
+2, not later (optional; `always` = stored row only), and the scaffold's
+example policy is a status change (`draft` to `published`) that uses it.
+§4's test finds every other case.
 
 Postgres also applies the `SELECT` policy to an `UPDATE`/`DELETE` that
-reads a column, so a row you may update but not see stays unchanged. §4
-reports it; the docs will say: keep `update` and `delete` inside `list`.
+reads a column, so a row you may update but not see stays unchanged. §4's
+test fails on such a row; the docs say: keep `update` and `delete` inside
+`list`.
 
 ### Decision 9: write masks stay in the app in the first version.
 
@@ -227,13 +269,16 @@ of the role): the grant is then exact. A guarded mask stays app-only, and
 ### The layers that fail closed
 
 1. **No identity, no grant.** Without `transact_as`, the query runs as the
-   login role, which has no table privilege: `permission denied`.
+   login role, which has no table privilege: `permission denied`. This
+   holds only when the login does not own the table. A small deployment
+   that connects as the owner sees every row of a `.no_force()` table.
+   `rls check` reports each `no_force` table that the login owns.
 2. **A missing non-`Option` attribute denies** (`s(x) IS NOT NULL AND …`).
 3. **`else deny` is FALSE, not NULL.** The app folds `or_deny(None)` to
    `Never`, and `negate(Never)` is `Always`. `NOT (col = NULL)` is NULL, a
    deny: they would disagree. `(s IS NOT NULL AND col = s)` is FALSE, and
    `NOT FALSE` is TRUE, as in the app. Faithful beats "more closed".
-4. **`else allow` is the author's word**, in both places. Layer 1 holds.
+4. **`else allow` is refused** with `#[db]` (decision 3).
 
 ### Decision 10: an agreement test, on Postgres, per `#[db]` policy.
 
@@ -247,7 +292,11 @@ db {
 }
 ```
 
-It is skipped without `BROCANTH_TEST_DATABASE_URL`. Per case it:
+In this repo it reads `BROCANTH_TEST_DATABASE_URL`. In an app it is on by
+default, with no flag: it reads the app's `[db] url` through the settings
+layers, as the generated `rls check` does, and prints `!! SKIPPED` when no
+URL is set. The generated CI already starts Postgres for a project with
+`db`. Per case it:
 
 1. creates a schema, the table from the entity's column types, the role and
    the policies from `rules()` (the same SQL `rls make` writes);
@@ -307,7 +356,7 @@ fail). If the table is forgotten too, it has no RLS, as today.
 Edit the rule, `rls make <name>` (snapshot diff, rls.md §3, unchanged),
 `migrate up`.
 
-Decision 12: `rls make --check` exits non-zero when `schema()` differs
+Decision 12: `rls diff` exits non-zero when `schema()` differs
 from `migrations/rls.json`; generated CI runs it. Reason: a rule edit
 without a migration moves the app's `WHERE` and leaves the database on the
 old rule. It needs no database.
@@ -317,7 +366,7 @@ old rule. It needs no database.
 - Roles beyond `app_user`, `BYPASSRLS` jobs, and the login's membership.
 - Functions (`Function::new`) a rule needs that the algebra does not have.
 - `#[app_only]` rules: their database floor is a hand-written `SqlExpr`.
-- Guarded write masks (decision 9), sequence `USAGE`, schema `USAGE`.
+- Guarded write masks (decision 9), schema `USAGE`.
 - Hand-written `impl Policy` (decision 1): write `crud(…)` with `SqlExpr`.
 - Background jobs and commands: they choose an identity, or run as a role
   that bypasses on purpose. The bridge does not guess.
@@ -328,28 +377,38 @@ Sizes are focused hours for one person, with tests.
 
 | Phase | Work | Hours |
 |---|---|---|
-| 0 | `feat/rls` lands the target API (other change). This plan waits. | — |
-| 1 | `brocanth-policy`: `Attr`, `Attributes`, `#[derive(Subject)]`, the `Rules<E>` tree (guards + `Operand::{Value, Attr}`) and `resolve`. No change to `Pred`, `Value` or `condition()`. | 6 |
-| 2 | `policy!` `#[db]`: emit `rules()` and `impl Policy` via `resolve`; the refusals of decision 3 with `help:` lines; trybuild tests. | 10 |
-| 3 | `brocanth-rls`: `SqlExpr::from_rule`, guard chains, `Policy::from_rules`, grants, `.manual(…)`, the `#[app_only]` refusal at `rls make`. Goldens. | 8 |
-| 4 | `brocanth_rls::identity`, the request provider, the sqlx and SeaORM call sites in the scaffold. | 5 |
+| 0 | `feat/rls` lands the target API. Done (54db8067). | — |
+| 1 | `brocanth-policy`: `Attr`, `Attributes`, `#[derive(Subject)]` (in `brocanth-policy-macros`), the `Rules<E>` tree (guards + `Operand::{Value, Attr}`) and `resolve`; `Uuid` and `Timestamptz` kinds. No change to `Pred` or `condition()`. | 9 |
+| 2 | `policy!` `#[db]`: emit `rules()` and `impl Policy` via `resolve`; `update_check`; `exists` syntax; the refusals of decision 3 with `help:` lines; strip `#[db]`/`#[app_only]` from the emitted struct; trybuild tests. | 14 |
+| 3 | `brocanth-rls` (depends on `brocanth-policy` under `runtime` only): `SqlExpr::from_rule`, guard chains, `Policy::from_rules`, grants with sequence `USAGE`, `.manual(…)`, the `#[app_only]` refusal at `rls make`, the owned-`no_force` report in `rls check`. Goldens. | 8 |
+| 4 | `brocanth_rls::identity`, the request provider, the sqlx and SeaORM call sites in the scaffold; `ResourceData` and the admin data source run as the identity (decision 13). | 10 |
 | 5 | Agreement on Postgres: the harness in `brocanth-rls`, the `db { … }` clause, `EXPLAIN` check on the example (index kept). | 9 |
-| 6 | Scaffold: `rls` reads `policy`, `rls make --check` in CI, goldens re-blessed, docs/rls.md §5 and docs/policy.md updated, ADR in PLAN.md §13. | 6 |
+| 6 | Scaffold: `rls` reads `policy`, `rls diff` in CI, goldens re-blessed, docs/rls.md §5 and docs/policy.md updated, ADR in PLAN.md §13. | 6 |
 | 7 | Optional: column grants for unguarded masks. | 4 |
 
-Total: about 44 hours (48 with phase 7). Phase 5 lands before any
+Total: about 56 hours (60 with phase 7). Phase 5 lands before any
 project turns `#[db]` on.
 
-## 7. Open questions for the owner
+## 7. Owner answers (17 November 2026)
 
-1. **Macro-only.** Hand-written `impl Policy` gets no database policy. OK?
-2. **One role** with guards on settings, or a role per kind of user (which
-   makes column grants exact)?
-3. **`UPDATE … WITH CHECK`**: the `update` rule (this doc) or `TRUE`?
-4. **`SELECT` = `list OR view`**, or require `view == list` under `#[db]`?
-5. **Masks** app-only in v1, column grants for unguarded masks later?
-6. **Kinds**: `Value` has no `uuid`/timestamp. Add kinds, or `text` + cast?
-7. **Crates**: `brocanth-rls` -> `brocanth-policy`; `brocanth-db` keeps only
-   `SettingKey`. Confirm against the concurrent `Setting` work.
-8. **`else allow` on an attribute**: permit (this doc) or refuse?
-9. **App agreement test** needs Postgres in app CI: on by default or flag?
+1. **Macro-only:** yes. A hand-written `impl Policy` writes `crud(…)` with
+   `SqlExpr`.
+2. **One role** with guards on settings. A role per kind is as trusted by
+   the app as a setting, and costs a grant and a migration per kind.
+3. **`UPDATE … WITH CHECK`:** `update_check`, which defaults to `update`;
+   it ships in phase 2 (decision 8).
+4. **`SELECT` = `list OR view`.** The agreement test fails when `update`
+   or `delete` reach a row outside it.
+5. **Masks** app-only in v1; column grants for unguarded masks in phase 7.
+6. **Kinds:** add `Uuid` and `Timestamptz` (decision 5).
+7. **Crates:** `brocanth-rls` depends on `brocanth-policy` under `runtime`
+   only; `brocanth-db` keeps `SettingKey`. No cycle: `brocanth-policy` has
+   no brocanth dependency. The config `Setting` of module-capabilities.md
+   is a different type with the same name.
+8. **`else allow` on an attribute:** refused with `#[db]` (decision 3).
+9. **App agreement test:** on by default, skipped with `!! SKIPPED` when
+   no database URL is set (decision 10).
+
+Added after review: decision 13 (identity on resource and admin paths),
+the owner-login precondition of layer 1, `exists` syntax, `rls diff`, and
+the sequence grant.
