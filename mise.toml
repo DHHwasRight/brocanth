@@ -1,7 +1,9 @@
 [tools]
 # Matches the depoth ecosystem: rsx's proc-macro artifacts are not compatible
 # across patch releases.
-rust = "1.98"
+# rustfmt and clippy: the gate runs both, and module tests pipe generated
+# code through rustfmt.
+rust = { version = "1.98", components = "rustfmt,clippy" }
 
 [tasks.build]
 run = "cargo build --workspace"
