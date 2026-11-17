@@ -372,11 +372,22 @@ async fn without_migrate_no_table_is_made_and_a_failed_flush_keeps_the_entries()
     assert_eq!(trail.pending(), 1, "kept for the next flush");
     assert!(trail.last_error().unwrap().contains("brocanth_audit"));
 
-    // The table appears (a migration ran); the next flush writes it.
+    // The table appears (a migration ran); the next flush writes it. The
+    // plugin's own timer may flush first, so assert on the outcome, not on
+    // the count this one call returns.
     sandbox.store.migrate().await.unwrap();
-    assert_eq!(trail.flush().await.unwrap(), 1);
+    trail.flush().await.unwrap();
+    assert_eq!(trail.pending(), 0);
+    assert_eq!(audit_rows(&sandbox.db).await, 1);
     assert_eq!(trail.last_error(), None);
     sandbox.drop().await;
+}
+
+async fn audit_rows(db: &Db) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM brocanth_audit")
+        .fetch_one(db.pool())
+        .await
+        .expect("a query")
 }
 
 async fn table_exists(db: &Db) -> bool {
