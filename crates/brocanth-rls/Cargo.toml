@@ -16,8 +16,10 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = { version = "2", optional = true }
 # `Policy::from_rules` and `SqlExpr::from_rule` read a policy's `Rules` and
-# its subject's `Attr`s (docs/policy-rls-bridge.md §3). Under `runtime`
-# only: the CLI builds `scaffold` alone and links no policy algebra.
+# its subject's `Attr`s (docs/policy-rls-bridge.md §3), and
+# `identity(&role, &subject)` sets the subject's attributes as a request's
+# settings (decision 6). Under `runtime` only: the CLI builds `scaffold`
+# alone and links no policy algebra.
 brocanth-policy = { workspace = true, optional = true }
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
@@ -37,7 +39,11 @@ brocanth-model = { path = "../brocanth-model", features = ["db"] }
 async-trait = "0.1"
 # tests/rules.rs and tests/bridge_postgres.rs: an entity and a subject from
 # `policy!` and `#[derive(Subject)]`, with hand-written `Rules`.
-brocanth-policy = { workspace = true, features = ["macro"] }
+# tests/identity.rs: a subject with every attribute kind, so `uuid` and
+# `chrono` too.
+brocanth-policy = { workspace = true, features = ["macro", "uuid", "chrono"] }
+uuid = { version = "1", default-features = false }
+chrono = { version = "0.4", default-features = false }
 
 [features]
 default = ["runtime"]

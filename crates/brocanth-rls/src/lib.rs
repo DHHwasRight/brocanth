@@ -14,6 +14,8 @@
 //!   graph.
 //! - [`migration`]: the migration file and `rls make`.
 //! - [`catalog::drift`]: the live database against a snapshot.
+//! - [`identity()`]: a policy subject as the [`DbIdentity`] a request runs
+//!   as.
 //!
 //! The design and its rejected alternatives are in `docs/rls.md`.
 
@@ -37,6 +39,8 @@ pub mod graph;
 #[cfg(feature = "runtime")]
 mod ident;
 #[cfg(feature = "runtime")]
+pub mod identity;
+#[cfg(feature = "runtime")]
 pub mod migration;
 #[cfg(feature = "scaffold")]
 pub mod scaffold;
@@ -59,6 +63,8 @@ pub use error::RlsError;
 pub use expr::{Setting, SqlExpr};
 #[cfg(feature = "runtime")]
 pub use ident::{SqlType, MAX_IDENT};
+#[cfg(feature = "runtime")]
+pub use identity::identity;
 #[cfg(feature = "runtime")]
 pub use schema::Schema;
 #[cfg(feature = "runtime")]

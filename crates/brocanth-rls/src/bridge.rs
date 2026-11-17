@@ -21,8 +21,7 @@ use brocanth_policy::{
 
 use crate::def::{Policy, Role, Table};
 use crate::error::RlsError;
-use crate::expr::{Setting, SqlExpr};
-use crate::ident::SqlType;
+use crate::expr::SqlExpr;
 use crate::schema::Schema;
 use crate::snapshot::{Command, Privilege};
 
@@ -128,7 +127,7 @@ impl Ctx<'_> {
     /// lack it.
     fn setting(&self, key: &str) -> Result<(SqlExpr, bool), Refusal> {
         let attr = self.attr(key)?;
-        Ok((Setting::new(key, sql_type(attr.kind)).get(), attr.optional))
+        Ok((crate::identity::setting_of(attr).get(), attr.optional))
     }
 
     fn rule<C: Column>(&self, rule: &Rule<C>) -> Result<Folded, Refusal> {
@@ -357,18 +356,6 @@ fn apply(col: SqlExpr, op: Op, other: SqlExpr) -> SqlExpr {
     }
 }
 
-/// The setting's type for an attribute's kind.
-fn sql_type(kind: AttrKind) -> SqlType {
-    match kind {
-        AttrKind::Boolean => SqlType::Boolean,
-        AttrKind::Integer => SqlType::Integer,
-        AttrKind::BigInt => SqlType::BigInt,
-        AttrKind::Text => SqlType::Text,
-        AttrKind::Uuid => SqlType::Uuid,
-        AttrKind::Timestamptz => SqlType::Custom(kind.sql_type().to_string()),
-    }
-}
-
 /// A rule's literal as a sea-query value, which sea-query's Postgres writer
 /// escapes.
 fn literal(value: &Value) -> Result<SeaValue, Refusal> {
@@ -399,7 +386,8 @@ impl SqlExpr {
     /// `table` is the policy's table: an `exists` subquery names its
     /// columns as `"table"."column"`. `attrs` is the subject's
     /// [`Subject::ATTRS`]: each attribute the rule reads becomes a
-    /// [`Setting`] of its kind. A rule that admits no row is `FALSE`.
+    /// [`Setting`](crate::Setting) of its kind. A rule that admits no row
+    /// is `FALSE`.
     ///
     /// A guard chain `g1 => r1, g2 => r2, f` becomes
     /// `s(g1) IS NOT NULL AND s(g2) IS NOT NULL AND ((g1 AND r1) OR (NOT g1

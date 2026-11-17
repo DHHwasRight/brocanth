@@ -752,6 +752,7 @@ dependencies = [
  "async-trait",
  "brocanth",
  "brocanth-admin",
+ "brocanth-db",
  "brocanth-model",
  "brocanth-policy",
  "brocanth-test",
@@ -1429,6 +1430,7 @@ version = "0.1.0"
 dependencies = [
  "brocanth",
  "brocanth-cli",
+ "brocanth-db",
  "brocanth-events",
  "brocanth-pagination",
  "brocanth-policy",
@@ -1451,10 +1453,12 @@ dependencies = [
  "brocanth-policy",
  "brocanth-rls",
  "brocanth-scaffold",
+ "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

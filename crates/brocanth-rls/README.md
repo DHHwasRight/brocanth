@@ -143,6 +143,16 @@ async fn titles(db: &Db, tenant: i64) -> Result<Vec<(String,)>, DbError> {
 }
 ```
 
+With a `brocanth-policy` subject, `identity(&role, &subject)` builds the
+whole identity: the role, and every key of `Subject::ATTRS`, typed by its
+kind. An absent value is `''`, which a policy reads as `NULL`
+(docs/policy-rls-bridge.md, decision 6):
+
+```rust,ignore
+let me = brocanth_rls::identity(&Role::new("app_user"), &visitor);
+db.transact_as(&me, async |tx| tx.all(&q).await).await?;
+```
+
 ### Errors
 
 A definition that cannot become correct SQL is refused before any SQL is
