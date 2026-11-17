@@ -231,6 +231,8 @@ fn same(a: &Node<'_>, b: &Node<'_>) -> bool {
         (Node::Table(a), Node::Table(b)) => a.force == b.force,
         (Node::Grant(_, _, a), Node::Grant(_, _, b)) => a == b,
         (Node::Policy(_, _, a), Node::Policy(_, _, b)) => a == b,
+        // The key holds the sequence and the grantee: nothing else to compare.
+        (Node::SequenceUsage(..), Node::SequenceUsage(..)) => true,
         _ => a == b,
     }
 }
@@ -450,6 +452,11 @@ fn create_sql(node: &Node<'_>) -> Vec<String> {
             grantee_sql(grantee)
         )],
         Node::Policy(t, name, p) => vec![policy_create(t, name, p)],
+        Node::SequenceUsage(t, sequence, grantee) => vec![format!(
+            "GRANT USAGE ON SEQUENCE {} TO {}",
+            qualified(t.schema.as_deref(), sequence),
+            grantee_sql(grantee)
+        )],
     }
 }
 
@@ -546,6 +553,11 @@ fn drop_sql(node: &Node<'_>) -> Vec<String> {
             "DROP POLICY IF EXISTS {} ON {}",
             quote(name),
             table_sql(t)
+        )],
+        Node::SequenceUsage(t, sequence, grantee) => vec![format!(
+            "REVOKE USAGE ON SEQUENCE {} FROM {}",
+            qualified(t.schema.as_deref(), sequence),
+            grantee_sql(grantee)
         )],
     }
 }

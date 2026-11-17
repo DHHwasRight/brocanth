@@ -21,6 +21,9 @@ pub enum NodeKey {
     Grant(String, String),
     /// A policy: table key, name.
     Policy(String, String),
+    /// `USAGE` on a table's sequence for one grantee: table key, sequence,
+    /// grantee. Last, so the order of a schema without one is unchanged.
+    SequenceUsage(String, String, String),
 }
 
 impl fmt::Display for NodeKey {
@@ -31,6 +34,9 @@ impl fmt::Display for NodeKey {
             NodeKey::Table(key) => write!(f, "table {key}"),
             NodeKey::Grant(table, grantee) => write!(f, "grant on {table} to {grantee}"),
             NodeKey::Policy(table, name) => write!(f, "policy {name} on {table}"),
+            NodeKey::SequenceUsage(table, sequence, grantee) => {
+                write!(f, "usage on sequence {sequence} of {table} to {grantee}")
+            }
         }
     }
 }
@@ -43,6 +49,8 @@ pub(crate) enum Node<'a> {
     Table(&'a TableSpec),
     Grant(&'a TableSpec, &'a str, &'a BTreeSet<Privilege>),
     Policy(&'a TableSpec, &'a str, &'a PolicySpec),
+    /// The table, the sequence's name, the grantee.
+    SequenceUsage(&'a TableSpec, &'a str, &'a str),
 }
 
 /// Every node of a snapshot.
@@ -67,6 +75,14 @@ pub(crate) fn nodes(s: &Snapshot) -> BTreeMap<NodeKey, Node<'_>> {
                 NodeKey::Policy(key.clone(), name.clone()),
                 Node::Policy(table, name, policy),
             );
+        }
+        if let Some(sequence) = &table.sequence {
+            for grantee in &sequence.usage {
+                out.insert(
+                    NodeKey::SequenceUsage(key.clone(), sequence.name.clone(), grantee.clone()),
+                    Node::SequenceUsage(table, &sequence.name, grantee),
+                );
+            }
         }
     }
     out
@@ -97,7 +113,7 @@ pub(crate) fn deps(key: &NodeKey, s: &Snapshot) -> Vec<NodeKey> {
                 out
             })
             .unwrap_or_default(),
-        NodeKey::Grant(table, grantee) => {
+        NodeKey::Grant(table, grantee) | NodeKey::SequenceUsage(table, _, grantee) => {
             let mut out = vec![NodeKey::Table(table.clone())];
             out.extend(role(grantee));
             out

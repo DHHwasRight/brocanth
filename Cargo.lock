@@ -1448,6 +1448,7 @@ dependencies = [
  "brocanth-cli",
  "brocanth-db",
  "brocanth-model",
+ "brocanth-policy",
  "brocanth-rls",
  "brocanth-scaffold",
  "serde",

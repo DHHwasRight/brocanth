@@ -11,7 +11,8 @@
 //!   the project, in Rust. The project owns it.
 //! - `src/commands/rls.rs`: `rls make <name>` writes the migration and
 //!   `migrations/rls.json`; `rls sql` prints the whole schema as SQL;
-//!   `rls check` compares the database with the snapshot.
+//!   `rls diff` fails when `schema()` has changes no migration holds, with
+//!   no database; `rls check` compares the database with the snapshot.
 //! - A section in `AGENTS.md`: a request that reads tenant data runs in
 //!   `transact_as`.
 //!
@@ -152,7 +153,9 @@ const COMMAND_RS: &str = r#"//! `rls` -- the row-level security of `src/plugins/
 //! `rls make <name>` compares `schema()` with `migrations/rls.json` and
 //! writes the difference as a migration, with its `-- down` part. It
 //! applies nothing: `migrate up` does. `rls sql` prints the whole schema as
-//! SQL. `rls check` compares the database in `[db] url` with the snapshot.
+//! SQL. `rls diff` fails when `schema()` differs from the snapshot; it needs
+//! no database, so CI can run it. `rls check` compares the database in
+//! `[db] url` with the snapshot.
 
 use std::path::Path;
 
@@ -184,6 +187,8 @@ enum Action {
     },
     /// Print the SQL that creates the whole schema
     Sql,
+    /// Fail when schema() has changes that migrations/rls.json does not hold
+    Diff,
     /// Compare the database in `[db] url` with migrations/rls.json
     Check,
 }
@@ -205,18 +210,38 @@ impl Command for Rls {
                 }
             },
             Action::Sql => print!("{}", schema.create_sql()?),
+            Action::Diff => {
+                let steps = migration::pending(&schema, dir)?;
+                if steps.is_empty() {
+                    println!("migrations/rls.json matches schema().");
+                } else {
+                    for step in &steps {
+                        println!("  {step}");
+                    }
+                    anyhow::bail!(
+                        "schema() differs from migrations/rls.json\n\
+                         help: run `rls make <name>` and commit the migration with migrations/rls.json"
+                    );
+                }
+            }
             Action::Check => {
                 let snapshot = migration::read_snapshot(dir)?;
                 let config = database()?;
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                let drift = runtime.block_on(async {
+                let (drift, owned) = runtime.block_on(async {
                     let db = Db::connect(&config).await?;
                     let drift = brocanth_rls::catalog::drift(&db, &snapshot).await;
+                    let owned = brocanth_rls::catalog::owned_unforced(&db, &snapshot).await;
                     db.close().await;
-                    anyhow::Ok(drift?)
+                    anyhow::Ok((drift?, owned?))
                 })?;
+                // Not drift: the snapshot says `.no_force()`. But the login
+                // bypasses the policies of a table it owns.
+                for line in &owned {
+                    eprintln!("warning: {line}");
+                }
                 if drift.is_empty() {
                     println!("The database matches migrations/rls.json.");
                 } else {

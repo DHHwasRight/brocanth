@@ -6,6 +6,8 @@
 //!   definitions.
 //! - [`SqlExpr`] and [`Setting`]: `USING` and `WITH CHECK`, as sea-query
 //!   expressions that know what they use.
+//! - [`Policy::from_rules`] and [`SqlExpr::from_rule`]: a `brocanth-policy`
+//!   `DbPolicy`'s rules as database policies (`docs/policy-rls-bridge.md`).
 //! - [`Schema`]: every definition, checked; [`Schema::snapshot`] is the
 //!   data the diff reads.
 //! - [`diff()`]: two snapshots into a [`Plan`], ordered by the dependency
@@ -18,6 +20,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "runtime")]
+mod bridge;
 #[cfg(feature = "runtime")]
 pub mod catalog;
 #[cfg(feature = "runtime")]
@@ -41,6 +45,8 @@ mod schema;
 #[cfg(feature = "runtime")]
 pub mod snapshot;
 
+#[cfg(feature = "runtime")]
+pub use bridge::{IntoPolicies, RulePolicies};
 #[cfg(feature = "runtime")]
 pub use brocanth_db::DbIdentity;
 #[cfg(feature = "runtime")]

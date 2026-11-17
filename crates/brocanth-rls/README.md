@@ -84,6 +84,15 @@ assert_eq!(
 );
 ```
 
+### From a `brocanth-policy` rule set
+
+`Policy::from_rules::<P>(&role)` reads a `DbPolicy`'s rules and writes the
+table, its grants and up to four policies, one rule each. A subject
+attribute becomes a typed setting read; a guard chain becomes a boolean
+over settings. A rule the database cannot follow faithfully is refused at
+`Schema::snapshot`, with a `help:` line, until `.manual(command, expr)`
+replaces it. `docs/rls.md` §5 has the details.
+
 ### A change is a diff, both ways
 
 ```rust

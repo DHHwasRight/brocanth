@@ -4,11 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use brocanth_db::DbIdentity;
 
+use crate::bridge::IntoPolicies;
 use crate::def::{Function, Grantee, Policy, Role, Table};
 use crate::error::RlsError;
 use crate::expr::{SqlExpr, Uses};
 use crate::ident::{self, SqlType};
-use crate::snapshot::{Command, FunctionSpec, PolicySpec, RoleSpec, Snapshot, TableSpec, KEYWORDS};
+use crate::snapshot::{
+    Command, FunctionSpec, PolicySpec, Privilege, RoleSpec, SequenceSpec, Snapshot, TableSpec,
+    KEYWORDS,
+};
 
 /// The roles, tables, functions and policies of one database.
 ///
@@ -20,6 +24,9 @@ pub struct Schema {
     tables: Vec<Table>,
     functions: Vec<Function>,
     policies: Vec<Policy>,
+    /// Refusals from [`Policy::from_rules`](crate::Policy::from_rules),
+    /// reported by [`Schema::snapshot`]: message, help.
+    refused: Vec<(String, String)>,
 }
 
 impl Schema {
@@ -54,9 +61,26 @@ impl Schema {
         self
     }
 
-    /// Adds policies, such as the ones [`crate::crud`] returns.
-    pub fn policies(mut self, policies: impl IntoIterator<Item = Policy>) -> Schema {
+    /// Adds policies: the ones [`crate::crud`] returns, or the
+    /// [`RulePolicies`](crate::RulePolicies) of
+    /// [`Policy::from_rules`](crate::Policy::from_rules), which add their
+    /// table and its grants too.
+    pub fn policies(self, policies: impl IntoPolicies) -> Schema {
+        policies.add_to(self)
+    }
+
+    pub(crate) fn extend_policies(mut self, policies: impl IntoIterator<Item = Policy>) -> Schema {
         self.policies.extend(policies);
+        self
+    }
+
+    /// Records a refusal for [`Schema::snapshot`] to report.
+    pub(crate) fn refuse(mut self, error: RlsError) -> Schema {
+        let (message, help) = match error {
+            RlsError::Definition { message, help } => (message, help),
+            other => (other.to_string(), String::new()),
+        };
+        self.refused.push((message, help));
         self
     }
 
@@ -115,6 +139,9 @@ impl Schema {
     /// # Errors
     /// [`RlsError::Definition`], with a `help:` line, for the first problem.
     pub fn snapshot(&self) -> Result<Snapshot, RlsError> {
+        if let Some((message, help)) = self.refused.first() {
+            return Err(RlsError::definition(message.clone(), help.clone()));
+        }
         let mut snapshot = Snapshot::default();
         let mut known_roles: BTreeSet<&str> = BTreeSet::new();
 
@@ -230,12 +257,27 @@ impl Schema {
                     .extend(privileges.iter().copied());
             }
             grants.retain(|_, p| !p.is_empty());
+            let sequence = match &table.sequence {
+                Some(name) => {
+                    ident::check("sequence", name)?;
+                    Some(SequenceSpec {
+                        name: name.clone(),
+                        usage: grants
+                            .iter()
+                            .filter(|(_, p)| p.contains(&Privilege::Insert))
+                            .map(|(g, _)| g.clone())
+                            .collect(),
+                    })
+                }
+                None => None,
+            };
             let spec = TableSpec {
                 schema: table.schema.clone(),
                 name: table.name.clone(),
                 force: table.force,
                 grants,
                 policies: BTreeMap::new(),
+                sequence,
             };
             if snapshot.tables.insert(key.clone(), spec).is_some() {
                 return Err(RlsError::definition(

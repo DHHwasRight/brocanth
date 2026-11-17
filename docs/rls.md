@@ -43,10 +43,12 @@ let schema = Schema::new()
 | `Table::of(Entity)` / `Table::of_in(s, Entity)`; strings: `Table::named(name)` / `Table::named_in(s, name)` | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `… FORCE ROW LEVEL SECURITY` | enabled and forced |
 | `.no_force()` | no `FORCE`: the owner bypasses the policies | |
 | `.grant(&role, privileges)` | `GRANT SELECT, … ON … TO …` | |
+| `.sequence("posts_id_seq")` | `GRANT USAGE ON SEQUENCE … TO …` for each grantee with `INSERT` | no sequence |
 | `Policy::new(name, &table)` | `CREATE POLICY` | `AS PERMISSIVE FOR ALL TO PUBLIC` |
 | `.restrictive()`, `.command(Command::Select)`, `.to(&role)` | `AS RESTRICTIVE`, `FOR SELECT`, `TO "role"` | |
 | `.using(expr)`, `.with_check(expr)` | `USING (…)`, `WITH CHECK (…)` | none |
 | `crud(&table, &role, read, modify)` | four policies, as Drizzle's `crudPolicy` | |
+| `Policy::from_rules::<P>(&role)` | the table, its grants and up to four policies from a `DbPolicy`'s rules (§5) | |
 | `Setting::new(key, type)` | `CAST(NULLIF(current_setting('brocanth.key', TRUE), '') AS type)` | |
 | `Function::new(name, returns)` | `CREATE OR REPLACE FUNCTION … LANGUAGE sql STABLE` | `SECURITY INVOKER` |
 
@@ -101,7 +103,8 @@ Function ─▶ Function
 
 - A policy needs its table (RLS on), each managed role in its `TO`, and
   each function its expressions call.
-- A grant needs its table and its role.
+- A grant needs its table and its role. So does a sequence `USAGE` grant
+  (`Table::sequence`), one node per grantee.
 - A role's membership needs the role.
 - A function needs each function its body calls. A cycle is refused, with
   the names on it.
@@ -116,7 +119,7 @@ cycle, two policies with one name on one table. Each refusal carries a
 `help:` line.
 
 Creates run in topological order. Ties break by kind (role, function,
-table, grant, policy), then by name, so the output is stable. Drops run in
+table, grant, policy, sequence usage), then by name, so the output is stable. Drops run in
 the reverse order of the old graph. So a policy is dropped before its role
 and its function, which Postgres requires. Drizzle drops roles before
 policies, and that migration fails; this order does not.
@@ -147,8 +150,19 @@ Reasons:
 
 The catalog is still read, for a different question: `rls check` compares
 the structural fields (roles, `relrowsecurity`, `relforcerowsecurity`,
-policy names, `permissive`, `cmd`, `roles`, grants) with the snapshot. It
-reports drift. It does not compare expressions, for reason 1.
+policy names, `permissive`, `cmd`, `roles`, grants, sequence `USAGE`) with
+the snapshot. It reports drift. It does not compare expressions, for
+reason 1. It also warns about each `.no_force()` table that the
+connecting login owns: the owner bypasses the policies of such a table, so
+a statement outside `transact_as` sees every row. That is not drift, so it
+does not fail the check.
+
+`rls diff` answers a third question with no database: does `schema()`
+differ from `migrations/rls.json`? It prints the steps `rls make` would
+write and exits non-zero when there are any
+(`brocanth_rls::migration::pending`). A rule edit without its migration
+moves the application's `WHERE` and leaves the database on the old rule;
+CI can run `rls diff` to catch it.
 
 Rejected:
 
@@ -172,6 +186,7 @@ recreate (drop then create).
 | Function | body, volatility or `SECURITY DEFINER`: `CREATE OR REPLACE`; `EXECUTE` grants: `REVOKE` the removed, `GRANT` the added | arguments or return type |
 | Table | `FORCE`/`NO FORCE` (a table that stays keeps `ENABLE`) | never |
 | Grant | `REVOKE` the removed privileges, `GRANT` the added ones | never |
+| Sequence `USAGE` | never: the node's key is the table, the sequence and the grantee | a new sequence name is a drop and a create |
 | Policy | `ALTER POLICY … TO … USING … WITH CHECK …` | `AS` or `FOR` changed, the table changed, or `USING`/`WITH CHECK` removed (`ALTER POLICY` cannot clear one) |
 
 A recreate spreads to the nodes that depend on it: `DROP FUNCTION` fails
@@ -341,18 +356,48 @@ application that connected as the owner saw every row.)
 ## 5. The bridge to `brocanth-policy`
 
 Goal: one rule, written once, drives the application's `WHERE` and the
-database policy. The design is `docs/policy-rls-bridge.md` (not built yet).
+database policy. The design is `docs/policy-rls-bridge.md`. Built: the
+rule tree (`brocanth_policy::Rules`, phase 1), `policy!` with `#[db]`,
+which emits it (phase 2), and its translation here (phase 3).
 
 An earlier sketch here walked the `Pred` that a rule returns for a
 symbolic subject. It fails on the first guard: `who.admin => always` is a
 Rust `if`, so the walk sees one branch only, and `who.user_id` is folded
-into a literal before the walk sees it. The bridge reads the `policy!`
-syntax instead.
+into a literal before the walk sees it. The bridge reads the rule as data
+instead.
 
-Until then, write the database rule with `SqlExpr` and keep the application
-rule. The database rule is the floor: a missing `WHERE` shows nothing it
-should not. The application rule stays the one that shapes lists and
-masks.
+```rust
+let app_user = Role::new("app_user").member("app_login");
+Schema::new()
+    .role(app_user.clone())
+    .policies(
+        Policy::from_rules::<PostPolicy>(&app_user)
+            .sequence("posts_id_seq")
+            // An `#[app_only]` rule needs its database floor by hand.
+            .manual(Command::Update, SqlExpr::column(post::Column::Status).eq(SqlExpr::val("draft"))),
+    )
+```
+
+- `SqlExpr::from_rule(&rule, &table, Visitor::ATTRS)` writes one rule by
+  the translation table of the bridge doc §1. Each subject attribute is a
+  `Setting` of its kind. `else deny` (and a field that is not an
+  `Option`) is `(s IS NOT NULL AND col = s)`: FALSE, not NULL, when the
+  setting is missing. A guard chain is boolean, with an `s(g) IS NOT NULL`
+  test per guard key in front, not a `CASE`.
+- `Policy::from_rules::<P>(&role)` writes `<table>_<role>_select`
+  (`list OR view`), `_insert` (`create`), `_update` (`USING update WITH
+  CHECK update_check`) and `_delete`. A rule that admits no row writes no
+  policy and no grant. The table is forced, and the role gets each command
+  that has a policy.
+- Refused, with a `help:` line, when `Schema::snapshot` (so `rls make`)
+  runs: `else allow` on an attribute, `is` against an attribute, a guard on
+  an attribute that is not a `bool`, an attribute the subject does not
+  declare, and an app-only rule (`Rule::app_only`). `.manual(command,
+  expr)` replaces that command's expression.
+
+A hand-written `impl Policy` has no rule tree: write its database rule
+with `SqlExpr` and `crud`. The database rule is the floor: a missing
+`WHERE` shows nothing it should not.
 
 ## 6. Rejected alternatives
 
@@ -386,11 +431,11 @@ masks.
 
 ## 7. What is not done
 
-- The `brocanth-policy` bridge (§5, `docs/policy-rls-bridge.md`).
+- The rest of the `brocanth-policy` bridge: the request identity and the
+  agreement test (`docs/policy-rls-bridge.md` §6).
 - Expression drift in `rls check`. It compares structure only.
-- `USAGE` on a schema other than `public`, column-level grants, sequence
-  grants (`USAGE` on a `serial` sequence for `INSERT`), and default
-  privileges. Grant them in a SQL migration.
+- `USAGE` on a schema other than `public`, column-level grants, and
+  default privileges. Grant them in a SQL migration.
 - Turning a `Role::new` into a `Role::existing` leaves the snapshot, so the
   next migration drops the role. Remove it from the snapshot by hand
   first if the role must stay.

@@ -89,6 +89,7 @@ pub struct Table {
     pub(crate) name: String,
     pub(crate) force: bool,
     pub(crate) grants: Vec<(String, Vec<Privilege>)>,
+    pub(crate) sequence: Option<String>,
 }
 
 impl Table {
@@ -127,6 +128,7 @@ impl Table {
             name: name.into(),
             force: true,
             grants: Vec::new(),
+            sequence: None,
         }
     }
 
@@ -160,6 +162,16 @@ impl Table {
     pub fn grant(mut self, role: &Role, privileges: impl IntoIterator<Item = Privilege>) -> Table {
         self.grants
             .push((role.name.clone(), privileges.into_iter().collect()));
+        self
+    }
+
+    /// The table's `serial` sequence, by name, in the table's schema:
+    /// `posts_id_seq`. Each grantee with `INSERT` on the table also gets
+    /// `USAGE` on the sequence: the column default calls `nextval`, and
+    /// without `USAGE` an insert fails with `permission denied for sequence`.
+    /// An identity column needs no declaration.
+    pub fn sequence(mut self, name: impl Into<String>) -> Table {
+        self.sequence = Some(name.into());
         self
     }
 

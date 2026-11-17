@@ -1,6 +1,8 @@
 //! The schema the tests share, and the Postgres setup around it.
 #![allow(dead_code)]
 
+pub mod policy;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 

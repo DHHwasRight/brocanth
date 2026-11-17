@@ -2,7 +2,9 @@
 //!
 //! It compares structure only: roles and their attributes and members,
 //! `relrowsecurity` and `relforcerowsecurity`, policy names, `permissive`,
-//! `cmd`, `roles`, table privileges, and that each function exists. It
+//! `cmd`, `roles`, table privileges, sequence `USAGE`, and that each
+//! function exists. [`owned_unforced`] answers another question for
+//! `rls check`: which unforced tables the login owns. It
 //! reports what the database lacks and what it has beyond the snapshot: an
 //! extra policy, an extra privilege on a managed table (`PUBLIC` included),
 //! an extra member of a managed role. It does not compare `USING` and
@@ -155,6 +157,37 @@ pub async fn drift(db: &Db, snapshot: &Snapshot) -> Result<Vec<String>, RlsError
             ));
         }
 
+        if let Some(sequence) = &t.sequence {
+            let seq = qualified(t.schema.as_deref(), &sequence.name);
+            let row: Option<(Vec<String>,)> = sqlx::query_as(
+                "SELECT ARRAY(SELECT CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END \
+                 FROM aclexplode(c.relacl) a WHERE a.privilege_type = 'USAGE' AND a.grantee <> c.relowner) \
+                 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass($1) AND c.relkind = 'S'",
+            )
+            .bind(&seq)
+            .fetch_optional(pool)
+            .await
+            .map_err(q)?;
+            match row {
+                None => out.push(format!("sequence {} of {key}: missing", sequence.name)),
+                Some((live,)) => {
+                    let live: BTreeSet<String> = live.into_iter().collect();
+                    for grantee in sequence.usage.difference(&live) {
+                        out.push(format!(
+                            "sequence {} of {key}: {grantee} lacks USAGE",
+                            sequence.name
+                        ));
+                    }
+                    for grantee in live.difference(&sequence.usage) {
+                        out.push(format!(
+                            "sequence {} of {key}: {grantee} has USAGE; the schema does not grant it",
+                            sequence.name
+                        ));
+                    }
+                }
+            }
+        }
+
         let policies: Vec<(String, String, String, Vec<String>)> = sqlx::query_as(
             "SELECT p.polname::text, \
                     CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END, \
@@ -209,6 +242,38 @@ pub async fn drift(db: &Db, snapshot: &Snapshot) -> Result<Vec<String>, RlsError
         }
         for extra in live.iter().filter(|p| !t.policies.contains_key(**p)) {
             out.push(format!("policy {extra} on {key}: not in the schema"));
+        }
+    }
+    Ok(out)
+}
+
+/// Each table of `snapshot` that is not forced and that the connecting
+/// login owns, one line each (docs/policy-rls-bridge.md §4, layer 1).
+///
+/// The owner bypasses the policies of a table without `FORCE`. So when the
+/// application connects as the owner, a statement outside `transact_as`
+/// sees every row of such a table. `rls check` prints these lines as
+/// warnings: [`drift`] reports a difference from the snapshot, and this is
+/// not one.
+///
+/// # Errors
+/// [`RlsError::Db`] when a catalog query failed.
+pub async fn owned_unforced(db: &Db, snapshot: &Snapshot) -> Result<Vec<String>, RlsError> {
+    let mut out = Vec::new();
+    for (key, t) in snapshot.tables.iter().filter(|(_, t)| !t.force) {
+        let owned: Option<(String,)> = sqlx::query_as(
+            "SELECT current_user::text FROM pg_catalog.pg_class \
+             WHERE oid = to_regclass($1) AND relowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)",
+        )
+        .bind(qualified(t.schema.as_deref(), &t.name))
+        .fetch_optional(db.pool())
+        .await
+        .map_err(|e| RlsError::Db(DbError::from(e)))?;
+        if let Some((login,)) = owned {
+            out.push(format!(
+                "table {key}: not forced, and the login {login} owns it, so a statement outside transact_as sees every row\n\
+                 help: connect as a login that does not own the table, or remove .no_force() from the table in schema()"
+            ));
         }
     }
     Ok(out)

@@ -200,10 +200,25 @@ impl SqlExpr {
     /// setting is `NULL`, and `IS NOT DISTINCT FROM` would admit every row
     /// whose column is `NULL`. Use [`SqlExpr::eq`], which admits no row.
     pub fn is(self, other: SqlExpr) -> SqlExpr {
-        let e = Expr::cust_with_exprs(
-            "$1 IS NOT DISTINCT FROM $2",
-            [self.expr.clone(), other.expr.clone()],
-        );
+        self.null_safe(other, "$1 IS NOT DISTINCT FROM $2", "is", "NULL", "eq")
+    }
+
+    /// `self IS DISTINCT FROM other`: not equal, and `NULL` differs from
+    /// every value. Refused on a [`Setting`], as [`SqlExpr::is`] is: with no
+    /// identity it would admit every row whose column is not `NULL`.
+    pub fn is_not(self, other: SqlExpr) -> SqlExpr {
+        self.null_safe(other, "$1 IS DISTINCT FROM $2", "is_not", "not NULL", "ne")
+    }
+
+    fn null_safe(
+        self,
+        other: SqlExpr,
+        template: &'static str,
+        name: &str,
+        admits: &str,
+        instead: &str,
+    ) -> SqlExpr {
+        let e = Expr::cust_with_exprs(template, [self.expr.clone(), other.expr.clone()]);
         let mut out = SqlExpr::with(e, &self, &other);
         if let Some(key) = self
             .uses
@@ -213,7 +228,7 @@ impl SqlExpr {
             .next()
         {
             out.uses.problems.push(format!(
-                "`is` compares the setting `{key}`, so a transaction without it admits every row whose column is NULL\nhelp: use `eq`: with no `{key}` it admits no row"
+                "`{name}` compares the setting `{key}`, so a transaction without it admits every row whose column is {admits}\nhelp: use `{instead}`: with no `{key}` it admits no row"
             ));
         }
         out
@@ -261,6 +276,15 @@ impl SqlExpr {
         let values: Vec<Value> = values.into_iter().map(Into::into).collect();
         SqlExpr {
             expr: self.expr.is_in(values),
+            uses: self.uses,
+        }
+    }
+
+    /// `self NOT IN (v, …)`.
+    pub fn is_not_in<V: Into<Value>>(self, values: impl IntoIterator<Item = V>) -> SqlExpr {
+        let values: Vec<Value> = values.into_iter().map(Into::into).collect();
+        SqlExpr {
+            expr: self.expr.is_not_in(values),
             uses: self.uses,
         }
     }

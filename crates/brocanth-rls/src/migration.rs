@@ -181,6 +181,20 @@ pub fn make(
     }))
 }
 
+/// `rls diff`: the steps `rls make` would write, one line each. Empty when
+/// `dir/rls.json` matches `schema`. It reads no database and writes no
+/// file, so CI can run it on every change: a rule edit without its
+/// migration moves the application's `WHERE` and leaves the database on the
+/// old rule.
+///
+/// # Errors
+/// What [`Schema::snapshot`] refuses; a snapshot that cannot be read.
+pub fn pending(schema: &Schema, dir: &Path) -> Result<Vec<String>, RlsError> {
+    let old = read_snapshot(dir)?;
+    let new = schema.snapshot()?;
+    Ok(diff(&old, &new)?.describe())
+}
+
 fn write(path: &Path, text: &str) -> Result<(), RlsError> {
     std::fs::write(path, text).map_err(|source| RlsError::Io {
         path: path.to_path_buf(),

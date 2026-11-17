@@ -146,6 +146,21 @@ pub struct TableSpec {
     /// Policies by name.
     #[serde(default)]
     pub policies: BTreeMap<String, PolicySpec>,
+    /// The `serial` sequence ([`crate::Table::sequence`]). Absent from the
+    /// file when the table declares none, so an older `rls.json` reads the
+    /// same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<SequenceSpec>,
+}
+
+/// A table's `serial` sequence, and who may call `nextval` on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceSpec {
+    /// The name, in the table's schema.
+    pub name: String,
+    /// The grantees with `USAGE`: each grantee with `INSERT` on the table.
+    #[serde(default)]
+    pub usage: BTreeSet<String>,
 }
 
 /// A table privilege.

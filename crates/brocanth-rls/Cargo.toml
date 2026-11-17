@@ -15,6 +15,10 @@ brocanth-db = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = { version = "2", optional = true }
+# `Policy::from_rules` and `SqlExpr::from_rule` read a policy's `Rules` and
+# its subject's `Attr`s (docs/policy-rls-bridge.md §3). Under `runtime`
+# only: the CLI builds `scaffold` alone and links no policy algebra.
+brocanth-policy = { workspace = true, optional = true }
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
 # `rls`. Optional and off: only the CLI asks for `features = ["scaffold"]`.
@@ -31,12 +35,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # project with `model`. Postgres, the model layer's default.
 brocanth-model = { path = "../brocanth-model", features = ["db"] }
 async-trait = "0.1"
+# tests/rules.rs and tests/bridge_postgres.rs: an entity and a subject from
+# `policy!` and `#[derive(Subject)]`, with hand-written `Rules`.
+brocanth-policy = { workspace = true, features = ["macro"] }
 
 [features]
 default = ["runtime"]
 # Everything an application runs. The CLI turns it off and takes `scaffold`
 # alone, so `brocanth create` links no driver to write a project that has one.
-runtime = ["dep:brocanth-db", "dep:serde", "dep:serde_json", "dep:thiserror"]
+runtime = ["dep:brocanth-db", "dep:brocanth-policy", "dep:serde", "dep:serde_json", "dep:thiserror"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]
