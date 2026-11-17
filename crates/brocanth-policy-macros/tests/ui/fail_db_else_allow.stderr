@@ -1,0 +1,6 @@
+error: `else allow` cannot become a database policy: a missing setting would open the table
+       help: put the fact in a bool #[attr] field and guard on it
+  --> tests/ui/fail_db_else_allow.rs:24:45
+   |
+24 |         list: author_id == who.user_id else allow,
+   |                                             ^^^^^

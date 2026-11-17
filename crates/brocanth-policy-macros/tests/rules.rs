@@ -2,13 +2,14 @@
 //! expansion (docs/policy-rls-bridge.md, decision 2).
 //!
 //! Each policy is written twice: with `policy!`, as today, and as a
-//! `Rules<Post>` tree, as `policy!` with `#[db]` will emit it. For every
-//! subject and every command, `rule.resolve(&who.attributes())` must be the
-//! same `Pred`, with the same SQL and binds, as the `Policy` method.
+//! `Rules<Post>` tree by hand. For every subject and every command,
+//! `rule.resolve(&who.attributes())` must be the same `Pred`, with the same
+//! SQL and binds, as the `Policy` method. The `#[db]` twins then show that
+//! `policy!` with `#[db]` emits exactly the hand-built tree.
 
 use brocanth_policy::{
-    Attr, AttrKind, Attributes, Dialect, EntityPred, Exists, Guard, Ident, Missing, Op, Operand,
-    Policy, Pred, Rule, Rules, Subject, Term, Value,
+    Attr, AttrKind, Attributes, DbPolicy, Dialect, EntityPred, Exists, Guard, Ident, Missing, Op,
+    Operand, Policy, Pred, Rule, Rules, Subject, Term, Value,
 };
 use uuid::Uuid;
 
@@ -58,6 +59,12 @@ brocanth_policy::policy! {
         title: String,
     }
 
+    /// The link table of `Teams`.
+    pub entity PostTeam in "post_teams" {
+        #[key] post_id: i64,
+        team_id: Option<Uuid>,
+    }
+
     /// docs/policy-rls-bridge.md §0, and docs/policy.md's example.
     pub policy PostPolicy(who: &Visitor) for Post {
         list {
@@ -101,7 +108,46 @@ brocanth_policy::policy! {
         }
     }
 
-    /// Membership, by hand today; `exists` syntax in phase 2.
+    /// `PostPolicy` with `#[db]`.
+    #[db]
+    pub policy PostPolicyDb(who: &Visitor) for Post {
+        list {
+            who.banned => never,
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
+        }
+        create: author_id == who.user_id else deny,
+        update {
+            who.admin => always,
+            author_id == who.user_id else deny,
+        }
+        delete {
+            who.admin => always,
+        }
+    }
+
+    /// `Guards` with `#[db]`, without its `update` (`else allow` is refused).
+    #[db]
+    pub policy GuardsDb(who: &Visitor) for Post {
+        list {
+            who.admin && !who.banned => always,
+            who.role == "editor" || who.admin => status != "secret",
+            !who.banned => status == "published" || author_id == who.user_id else deny,
+            never,
+        }
+        view {
+            !(who.role == "editor") => title in [] as [&str; 0],
+            title not in [] as [&str; 0],
+        }
+    }
+
+    /// `Teams` with the `exists` syntax and `#[db]`.
+    #[db]
+    pub policy TeamsDb(who: &Visitor) for Post {
+        list: exists PostTeam(post_id == id, team_id == who.team else deny),
+    }
+
+    /// Membership, by hand: the form `exists` replaces.
     pub policy Teams(who: &Visitor) for Post {
         list: {
             match brocanth_policy::Membership::new(
@@ -302,6 +348,23 @@ fn guard_chains_resolve_to_the_policy_expansion() {
 #[test]
 fn membership_resolves_to_the_hand_written_exists() {
     assert_same(&Teams, &teams_rules());
+}
+
+#[test]
+fn db_emits_the_hand_built_tree() {
+    assert_eq!(PostPolicyDb::rules(), post_rules());
+    assert_eq!(TeamsDb::rules(), teams_rules());
+    let guards = GuardsDb::rules();
+    let expected = guards_rules();
+    assert_eq!(guards.list, expected.list);
+    assert_eq!(guards.view, expected.view);
+    assert_eq!(guards.update, Rule::never());
+}
+
+#[test]
+fn db_policies_resolve_to_the_hand_written_policy() {
+    assert_same(&PostPolicyDb, &post_rules());
+    assert_same(&TeamsDb, &teams_rules());
 }
 
 #[test]

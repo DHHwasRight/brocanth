@@ -1,0 +1,20 @@
+error: entity `Team` is not declared in this `policy!` block
+       help: declare the link table as `entity Team in "table" { … }` in the same block
+  --> tests/ui/fail_exists_names.rs:28:22
+   |
+28 |         list: exists Team(post_id == id),
+   |                      ^^^^
+
+error: `idd` is not a column of entity `Post`
+       help: did you mean `id`?
+  --> tests/ui/fail_exists_names.rs:29:42
+   |
+29 |         view: exists PostTeam(post_id == idd),
+   |                                          ^^^
+
+error: `post_idd` is not a column of entity `PostTeam`
+       help: did you mean `post_id`?
+  --> tests/ui/fail_exists_names.rs:30:33
+   |
+30 |         update: exists PostTeam(post_idd == id),
+   |                                 ^^^^^^^^

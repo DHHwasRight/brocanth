@@ -1,0 +1,23 @@
+error: a `{ … }` block cannot become a database policy
+       help: write the rule in the policy! syntax, or mark it #[app_only("reason")]
+  --> tests/ui/fail_db_block.rs:24:15
+   |
+24 |         list: { brocanth_policy::Pred::Always },
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: a `{ … }` block cannot become a database policy
+       help: write the rule in the policy! syntax, or mark it #[app_only("reason")]
+  --> tests/ui/fail_db_block.rs:25:15
+   |
+25 |           view: {
+   |  _______________^
+26 | |             brocanth_policy::Pred::Opaque(brocanth_policy::Opaque::new("a function", "f(?)", vec![]))
+27 | |         },
+   | |_________^
+
+error: this guard cannot become a database policy
+       help: write the rule in the policy! syntax, or mark it #[app_only("reason")]
+  --> tests/ui/fail_db_block.rs:29:13
+   |
+29 |             { who.admin } => always,
+   |             ^^^^^^^^^^^^^

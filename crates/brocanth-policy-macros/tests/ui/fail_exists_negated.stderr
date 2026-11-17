@@ -1,0 +1,6 @@
+error: `!` over a comparison with `else deny` turns the decision for an absent value around
+       help: put `!` directly before `exists`: `!exists` keeps `else deny` as written
+  --> tests/ui/fail_exists_negated.rs:28:15
+   |
+28 |         list: !(exists PostTeam(post_id == id, team_id == who.user_id else deny) || status == "x"),
+   |               ^

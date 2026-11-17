@@ -1,0 +1,6 @@
+error: a set of subject values cannot become a database policy
+       help: a setting holds one value; use a membership table and exists
+  --> tests/ui/fail_db_in_who.rs:24:28
+   |
+24 |         list: author_id in &who.team_ids,
+   |                            ^

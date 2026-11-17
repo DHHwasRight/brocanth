@@ -1,0 +1,13 @@
+error: `is` with a subject value cannot become a database policy
+       help: use == with else deny; IS NOT DISTINCT FROM matches NULL to a missing setting
+  --> tests/ui/fail_db_is_who.rs:24:28
+   |
+24 |         list: author_id is who.user_id else null,
+   |                            ^^^
+
+error: `is` with a subject value cannot become a database policy
+       help: use == with else deny; IS NOT DISTINCT FROM matches NULL to a missing setting
+  --> tests/ui/fail_db_is_who.rs:25:32
+   |
+25 |         view: author_id is not who.user_id else null,
+   |                                ^^^

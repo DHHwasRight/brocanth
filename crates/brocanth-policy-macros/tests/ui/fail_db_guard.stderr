@@ -1,0 +1,13 @@
+error: this guard cannot become a database policy
+       help: add the value to the subject as a #[attr] field and test that
+  --> tests/ui/fail_db_guard.rs:25:13
+   |
+25 |             who.user_id.is_none() => never,
+   |             ^^^
+
+error: this guard cannot become a database policy
+       help: add the value to the subject as a #[attr] field and test that
+  --> tests/ui/fail_db_guard.rs:29:13
+   |
+29 |             who.name.len() > 3 => always,
+   |             ^^^

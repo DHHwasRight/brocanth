@@ -1,0 +1,13 @@
+error: this value is not a literal
+       help: the database policy holds the value written at `rls make`; use a literal or a constant, or store the value in a #[attr] field of the subject
+  --> tests/ui/fail_db_literal.rs:24:25
+   |
+24 |         list: status == String::from("published"),
+   |                         ^^^^^^
+
+error: this set is not a list of literals
+       help: the database policy holds the value written at `rls make`; use a literal or a constant, or store the value in a #[attr] field of the subject
+  --> tests/ui/fail_db_literal.rs:25:25
+   |
+25 |         view: status in vec!["a", "b"],
+   |                         ^^^

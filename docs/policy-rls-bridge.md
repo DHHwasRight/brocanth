@@ -1,8 +1,9 @@
 # One rule, two enforcers: the policy-RLS bridge
 
-Written 12 November 2026. Status: **accepted 17 November 2026; phase 1
-built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
-`uuid` and `timestamptz` kinds).
+Written 12 November 2026. Status: **accepted 17 November 2026; phases 1
+and 2 built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
+`uuid` and `timestamptz` kinds; `policy!` `#[db]`, `update_check`,
+`exists`, `#[app_only]`, the decision 3 refusals).
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -93,6 +94,15 @@ where the left side of each `==` is a column of `Member` and the right side
 is a column of the outer entity, a literal, or `who.<field>`. It builds the
 same `Pred::Exists` as the hand-written form.
 
+`!exists` (phase 2): `!exists T(…)` is `Exists { negated: true }`, one
+term. An absent `else deny` value in its filter makes it `never`, in
+`resolve` as for a plain `exists`. So the database writes
+`s(x) IS NOT NULL AND NOT EXISTS (…)` for each such `x`, not
+`NOT EXISTS (… s(x) …)`, which is TRUE when `x` is missing. Reason:
+fail-closed, and the two readers agree. `policy!` refuses `!` over a larger
+predicate that holds such an `exists`, so `Term::Not(Term::Exists(…))`
+never comes from the macro.
+
 A term with `never` drops out. A NULL guard setting makes the rule FALSE.
 Reason: a Rust `bool` has no third value; without the prefix, a missing
 `brocanth.banned` reads as "not banned". The form is boolean, not `CASE`,
@@ -125,6 +135,9 @@ refuses the same on `SqlExpr`.
 ### Decision 4: an app-only rule never becomes open or closed by default.
 
 `#[app_only("reason")]` on one rule lets the app keep a Rust-only check.
+In `rules()`, that rule is `Rule::app_only(reason)`: `Rule::app_only` is
+`Some(reason)`, with no arms and a `never` fallback. A reader tests
+`rule.app_only` first and never reads the arms of such a rule (phase 2).
 `rls make` then refuses until `schema()` gives that table and command a
 hand-written `SqlExpr` (`Policy::from_rules::<P>(&role).manual(Command::Update, expr)`).
 

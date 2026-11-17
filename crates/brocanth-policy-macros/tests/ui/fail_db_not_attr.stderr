@@ -1,0 +1,15 @@
+error[E0609]: no field `owner` on type `Visitor_attributes`
+  --> tests/ui/fail_db_not_attr.rs:23:17
+   |
+23 |             who.owner => always,
+   |                 ^^^^^ unknown field
+   |
+   = note: available fields are: `user_id`, `admin`
+
+error[E0609]: no field `boss_id` on type `Visitor_attributes`
+  --> tests/ui/fail_db_not_attr.rs:26:34
+   |
+26 |         update: author_id == who.boss_id else deny,
+   |                                  ^^^^^^^ unknown field
+   |
+   = note: available fields are: `user_id`, `admin`

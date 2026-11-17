@@ -110,7 +110,8 @@ types from it.
 Rules: `list`, `view`, `create`, `update`, `delete`, `writable`,
 `writable_on_create`. Each is the `Policy` method of the same name. A rule
 you omit keeps the trait default: `view` is `list`, `writable_on_create` is
-`writable`, every other rule denies.
+`writable`, every other rule denies. A `#[db]` policy can also have
+`update_check` (see [`#[db]`](#db-one-rule-for-the-application-and-the-database)).
 
 A rule has two forms:
 
@@ -135,6 +136,7 @@ Doc comments on a rule go on the generated method.
 | `a && b && c` | `Pred::all([a, b, c])` |
 | `a \|\| b` | `Pred::any([a, b])` |
 | `!a` | `Pred::negate(a)` |
+| `exists T(fk == col, …)` | `Pred::Exists(Membership)`: see [Membership](#membership-exists) |
 | `( … )` | grouping |
 | `{ rust }` | the block, unchanged: any expression that returns the `Pred` |
 
@@ -198,12 +200,139 @@ own id on a create. We decided against one mask with a `create`/`update`
 argument: each existing policy would break to say the same thing, and the
 `policy!` guards would need a name for the argument.
 
+### Membership: `exists`
+
+```rust
+pub entity PostTeam in "post_teams" {
+    #[key] post_id: i64,
+    team_id: Option<Uuid>,
+}
+
+pub policy PostPolicy(who: &Visitor) for Post {
+    list: status == "published"
+        || exists PostTeam(post_id == id, team_id == who.team else deny),
+}
+```
+
+`exists T(…)` is a row of the link entity `T` that points at this row. `T`
+is an entity of the same `policy!` block, so each column is checked. Inside
+the parentheses, the left side of each comparison is a column of `T`. The
+right side is one of:
+
+* a bare name: a column of the outer entity. Exactly one comparison is
+  `<column of T> == <column of this entity>`; it links the two tables, and
+  both columns hold the same kind of value.
+* a literal, or `is null` / `is not null`.
+* a value such as `who.team else deny`, with the same absence words as
+  everywhere.
+
+It expands to the `Membership::new(…).filter_by(…)` chain that you write by
+hand, so the `Pred` is the same. An absent `else deny` value makes it
+`never`. `else allow` drops that filter, as `filter_by` does. `in` is not
+allowed inside `exists`. Write a constant with its path (`self::TEAM`): a
+bare name is a column.
+
+**`!exists` is one term.** `!exists T(…)` (or `!(exists T(…))`) is
+`NOT EXISTS`. When an `else deny` value in its filter is absent, it is
+`never`, not `always`. Reason: `else deny` makes the term that holds it
+`never`, and `NOT EXISTS` is the term. Without this, an anonymous visitor
+passes `!exists Block(blocked_id == author_id, blocker_id == who.user_id
+else deny)` and sees every post. The database does the same
+(`s(x) IS NOT NULL AND NOT EXISTS (…)`), so the two agree. `!` over a
+larger predicate that holds such an `exists`, as in
+`!(exists T(…) || status == "x")`, does not compile, for the reason in
+[Absence](#absence).
+
 ### Escape hatch
 
 A `{ … }` block in place of a predicate or a mask is plain Rust. Use it for
-`Pred::Exists` (team membership), `Pred::Opaque`, or a rule that reuses
-another: `update: { self.list(who) },`. Inside a block, the macro checks
-nothing.
+`Pred::Opaque`, or a rule that reuses another: `update: { self.list(who) },`.
+Inside a block, the macro checks nothing. A `#[db]` policy refuses a block in
+a rule (but not in a mask); see below.
+
+### `#[db]`: one rule for the application and the database
+
+docs/policy-rls-bridge.md. Put `#[db]` on a policy, and the macro also
+emits the rules as data: `impl DbPolicy` with `fn rules() -> Rules<Post>`.
+`brocanth-rls` reads it to write the database policy (RLS). The `Policy`
+methods then resolve the same tree with the subject's attributes:
+`rules().list.resolve(&who.attributes())`. So `condition()` and the RLS
+expression come from one tree. `tests/db.rs` proves that a policy gives the
+same `Pred`, SQL, binds and `eval` with and without `#[db]`.
+
+```rust
+#[derive(brocanth_policy::Subject)]
+pub struct Visitor {
+    #[attr] pub user_id: Option<i64>,
+    #[attr] pub admin: bool,
+    #[attr] pub banned: bool,
+}
+
+brocanth_policy::policy! {
+    pub entity Post in "posts" { #[key] id: i64, author_id: Option<i64>, status: String }
+
+    #[db]
+    pub policy PostPolicy(who: &Visitor) for Post {
+        list {
+            who.banned => never,
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
+        }
+        update {
+            who.admin => always,
+            author_id == who.user_id else deny && status == "draft",
+        }
+        // The new row of an update: an author may publish a draft.
+        update_check {
+            who.admin => always,
+            author_id == who.user_id else deny && status in ["draft", "published"],
+        }
+        writable { only [status] }
+    }
+}
+```
+
+The subject derives `Subject`, and a rule reads only its `#[attr]` fields.
+Each `#[attr]` field becomes a setting, `brocanth.<field>`. A field without
+`#[attr]` is a compile error,
+`` no field `x` on type `Visitor_attributes` ``, with the list of attributes.
+
+**`update_check`** is the database's `UPDATE … WITH CHECK`: which rows an
+update may leave (bridge decision 8). It defaults to `update`. The
+application does not read it: there, the `writable` mask does that job. So
+`update_check` needs `#[db]`; without it, the macro refuses the rule.
+
+**`#[app_only("reason")]`** on one rule keeps that rule in Rust. The
+`Policy` method runs the Rust code, and `rules()` holds
+`Rule::app_only("reason")`: no arms, `never`, and `app_only` set. It
+resolves to `never`. `rls make` refuses the command until the schema gives
+it a hand-written `SqlExpr` (bridge decision 4). Use it for a rule the
+database cannot check, such as one that reads the clock. It needs `#[db]`,
+and it does not apply to `update_check` or to a mask.
+
+**Field masks** stay in the application (bridge decision 9): `writable`
+and `writable_on_create` expand as without `#[db]`, `{ … }` blocks and Rust
+guards included.
+
+**What a `#[db]` rule may hold.** The database reads settings and literals.
+It cannot run Rust. Each refusal is a compile error on your token, with a
+`help:` line:
+
+| You wrote | help |
+|---|---|
+| a `{ … }` block in a rule or a guard (also `Pred::Opaque`) | write the rule in the policy! syntax, or mark it #[app_only("reason")] |
+| a guard other than `who.f`, `!g`, `who.f == lit`, `who.f != lit`, `&&`, `\|\|`, `( … )` | add the value to the subject as a #[attr] field and test that |
+| a value that uses `who` and is not exactly `who.<field>` | compute the value when you build the subject, and store it in a field |
+| `col is who.x`, `col is not who.x` | use == with else deny; IS NOT DISTINCT FROM matches NULL to a missing setting |
+| `col in who.xs` | a setting holds one value; use a membership table and exists |
+| `col == who.x else allow` | put the fact in a bool #[attr] field and guard on it |
+| a value that is not a literal or a constant (`String::from(…)`, `vec![…]`) | the database policy holds the value written at `rls make`; use a literal or a constant, or store the value in a #[attr] field of the subject |
+| `else …` on a literal | `else` says what a missing subject value means; remove it |
+
+A guard reads a `bool` attribute or compares one with a literal. A
+`who.f` with no `else` must be a non-`Option` field: the database denies
+when its setting is missing. The types are checked as without `#[db]`:
+`status == who.user_id` does not compile.
 
 ### `eval { … }`: the agreement test
 
@@ -441,6 +570,9 @@ Each error points at the token you wrote.
 | `#[model(M)]` and a different type | `mismatched types`, on the column |
 | `read: …` | `` `read` is not a rule `` / `help: the rule for one row is `view`` |
 | no `#[key]` | `` entity `Post` has no key column `` |
+| `exists PostTeam(team_id == 3)` | `` `exists PostTeam` does not say which row of `PostTeam` belongs to this row `` |
+| `update_check` without `#[db]` | `` `update_check` needs `#[db]` `` |
+| a `#[db]` refusal | see [`#[db]`](#db-one-rule-for-the-application-and-the-database) |
 
 `crates/brocanth-policy-macros/tests/ui/` holds each case with the
 compiler's output.
@@ -467,7 +599,7 @@ compiler's output.
   model can hold relation fields that are not columns. A field the entity
   omits is not writable (`FieldMask::check` refuses an unknown name), which is
   the safe direction.
-* **No sugar for `EXISTS`.** Team membership is a `{ … }` block with
-  `Membership::new(…)`.
+* **`exists` links one column.** A link table that joins on two columns
+  needs a `{ … }` block with `Membership`, and so is not `#[db]`.
 * **The `eval` test needs `agreement-proptest`.** Without the feature, the
   test fails to compile with "cannot find function `policy_agrees`".

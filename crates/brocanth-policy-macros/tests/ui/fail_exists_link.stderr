@@ -1,0 +1,6 @@
+error: `exists PostTeam` does not say which row of `PostTeam` belongs to this row
+       help: add `<column of PostTeam> == <column of this entity>`, for example `post_id == id`
+  --> tests/ui/fail_exists_link.rs:27:30
+   |
+27 |         list: exists PostTeam(team_id == who.user_id else deny),
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

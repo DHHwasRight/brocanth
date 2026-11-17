@@ -1,0 +1,13 @@
+error: a value computed from the subject cannot become a database policy
+       help: compute the value when you build the subject, and store it in a field
+  --> tests/ui/fail_db_who_value.rs:24:28
+   |
+24 |         list: author_id == who.user_id.map(|id| id + 1) else deny,
+   |                            ^^^
+
+error: a value computed from the subject cannot become a database policy
+       help: compute the value when you build the subject, and store it in a field
+  --> tests/ui/fail_db_who_value.rs:25:25
+   |
+25 |         view: status == who.name.to_lowercase(),
+   |                         ^^^

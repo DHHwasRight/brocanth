@@ -1,0 +1,13 @@
+error: `#[app_only]` needs `#[db]`
+       help: without `#[db]`, every rule runs in the application only; remove the attribute
+  --> tests/ui/fail_db_only_without_db.rs:24:20
+   |
+24 |         #[app_only("reads the clock")]
+   |                    ^^^^^^^^^^^^^^^^^
+
+error: `update_check` needs `#[db]`
+       help: only the database reads `update_check`; put `#[db]` on the policy, or remove the rule (the application checks the new row with `writable`)
+  --> tests/ui/fail_db_only_without_db.rs:26:9
+   |
+26 |         update_check: status == "draft",
+   |         ^^^^^^^^^^^^

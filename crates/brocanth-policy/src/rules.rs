@@ -146,6 +146,15 @@ impl<E: Entity> PartialEq for Rules<E> {
 /// `g1 => t1, g2 => t2, f` means: `t1` when `g1`, else `t2` when `g2`, else
 /// `f`. This is `if g1 { return t1; } if g2 { return t2; } f`, which is
 /// what `policy!` writes in Rust.
+///
+/// # App-only rules
+///
+/// `#[app_only("reason")]` on a rule of a `#[db]` policy keeps that rule in
+/// Rust (bridge decision 4). Its `Rule` is [`Rule::app_only`]: no arms,
+/// [`Term::Never`], and [`Rule::app_only`] set to the reason. A reader that
+/// writes a database policy must test [`Rule::app_only`] first and refuse
+/// the command until a hand-written expression replaces it. It must not
+/// read the arms or the fallback of such a rule: they are not the rule.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rule<C: Column> {
     /// The guarded arms, in source order.
@@ -153,6 +162,10 @@ pub struct Rule<C: Column> {
     /// The term when no guard holds. [`Term::Never`] when the source has no
     /// fallback.
     pub fallback: Term<C>,
+    /// `Some(reason)` when the rule is Rust code that only the application
+    /// runs: `#[app_only("reason")]`. The arms and the fallback are then
+    /// empty and mean nothing.
+    pub app_only: Option<&'static str>,
 }
 
 impl<C: Column> Rule<C> {
@@ -161,6 +174,20 @@ impl<C: Column> Rule<C> {
         Rule {
             arms: Vec::new(),
             fallback,
+            app_only: None,
+        }
+    }
+
+    /// A rule that only the application can run, with the author's reason.
+    ///
+    /// [`Rule::resolve`] gives [`Pred::Never`] for it: the data does not
+    /// hold the rule, so it fails closed. `policy!` does not call it for
+    /// such a rule; the `Policy` method runs the Rust code instead.
+    pub fn app_only(reason: &'static str) -> Self {
+        Rule {
+            arms: Vec::new(),
+            fallback: Term::Never,
+            app_only: Some(reason),
         }
     }
 
@@ -194,7 +221,12 @@ impl<C: Column> Rule<C> {
     /// chain reads is absent, the rule is [`Pred::Never`]: see the module
     /// documentation. So is a guard with no answer ([`Guard::holds`] is
     /// `None`).
+    ///
+    /// An [`Rule::app_only`] rule is [`Pred::Never`].
     pub fn resolve(&self, attrs: &Attributes) -> Pred<C> {
+        if self.app_only.is_some() {
+            return Pred::Never;
+        }
         if self.guard_keys().iter().any(|k| attrs.get(k).is_none()) {
             return Pred::Never;
         }
@@ -407,6 +439,15 @@ impl<C: Column> Exists<C> {
     /// The predicate for these attributes: the [`Membership`] the hand-written
     /// form builds, with [`Membership::filter_by`] for each filter. An absent
     /// `else deny` filter value makes it [`Pred::Never`], as there.
+    ///
+    /// Also when [`Exists::negated`]: `!exists T(…, col == who.x else deny)`
+    /// with no `x` is `never`, not `always`. `else deny` makes the term that
+    /// holds it `never`, and `NOT EXISTS` is one term. A database reader
+    /// writes `s(x) IS NOT NULL AND NOT EXISTS (…)` for each such `x`, so it
+    /// agrees. A [`Term::Not`] around a non-negated `Exists` is different:
+    /// [`Pred::negate`] turns `never` into `always`. `policy!` never builds
+    /// that shape: it folds `!exists` into [`Exists::negated`], and refuses
+    /// `!` over a larger predicate that holds an `else deny` filter.
     pub fn resolve(&self, attrs: &Attributes) -> Pred<C> {
         let mut membership = Membership::new(self.local, self.table, self.foreign);
         for (column, op, operand) in &self.filter {
@@ -473,6 +514,26 @@ mod tests {
             Guard::Any(vec![Guard::Eq("a", Value::Int(1)), Guard::Attr("b")]),
         ]);
         assert_eq!(g.keys(), ["b", "a"]);
+    }
+
+    #[test]
+    fn an_app_only_rule_resolves_to_never() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        enum C {
+            Id,
+        }
+        impl Column for C {
+            const ALL: &'static [Self] = &[Self::Id];
+            fn name(&self) -> &'static str {
+                "id"
+            }
+        }
+        let rule: Rule<C> = Rule::app_only("reads the clock");
+        assert_eq!(rule.app_only, Some("reads the clock"));
+        assert!(rule.arms.is_empty());
+        assert!(rule.resolve(&attrs()).is_never());
+        assert!(Rule::<C>::new(Term::Always).app_only.is_none());
+        let _ = C::Id;
     }
 
     #[test]
