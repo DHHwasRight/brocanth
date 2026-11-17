@@ -67,6 +67,17 @@ pub struct Rules<E: Entity> {
     pub delete: Rule<E::Column>,
 }
 
+/// A policy whose rules are data, so the database can enforce them too.
+///
+/// `policy!` with `#[db]` implements it, and implements [`crate::Policy`]
+/// by resolving these rules with the subject's [`crate::Attributes`].
+/// `brocanth-rls` reads [`DbPolicy::rules`] to write the database policies.
+/// A hand-written `impl Policy` does not implement it (bridge decision 1).
+pub trait DbPolicy: crate::Policy<Subject: crate::Subject> {
+    /// The rules, before any subject is known.
+    fn rules() -> Rules<Self::Entity>;
+}
+
 impl<E: Entity> Rules<E> {
     /// Every command denies, as the [`crate::Policy`] defaults do. Set the
     /// fields to open one.

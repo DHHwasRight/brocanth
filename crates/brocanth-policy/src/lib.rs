@@ -147,7 +147,7 @@ pub use eval::{MapRow, RowView, Truth};
 pub use mask::{FieldMask, MaskViolation};
 pub use policy::Policy;
 pub use pred::{EntityPred, Membership, Op, Opaque, Pred, Shape};
-pub use rules::{Exists, Guard, Operand, Rule, Rules, Term};
+pub use rules::{DbPolicy, Exists, Guard, Operand, Rule, Rules, Term};
 pub use sql::{Condition, Dialect, Query};
 pub use subject::{Attr, AttrKind, AttrType, Attributes, Subject};
 pub use value::{Bound, Missing, Value};
