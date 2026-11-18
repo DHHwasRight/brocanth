@@ -293,6 +293,77 @@ async fn each_request_reads_and_writes_as_the_staff_members_identity() {
     db.drop_all().await;
 }
 
+/// A column grant (an unguarded write mask, docs/rls.md): the member may
+/// update `title` only. An admin edit names the columns it changes, so the
+/// edit goes through, and the stored `author_id` is not written back.
+#[tokio::test]
+async fn an_edit_writes_only_the_columns_it_changes() {
+    let Some(db) = Forced::new().await else {
+        return;
+    };
+    let (schema, member) = (&db.schema, &db.member);
+    for statement in [
+        format!("REVOKE UPDATE ON \"{schema}\".post FROM \"{member}\""),
+        format!("GRANT UPDATE (title) ON \"{schema}\".post TO \"{member}\""),
+    ] {
+        db.admin.execute_unprepared(&statement).await.unwrap();
+    }
+    let models = db.source();
+    let model = post_model();
+    static SEVEN: i64 = 7;
+    let seven = for_staff(&models, &SEVEN);
+    let mine = PrimaryKey::single("id", "1");
+
+    // The form sends every field; only `title` moves.
+    let changed = seven
+        .update(
+            &model,
+            &mine,
+            &[
+                ("author_id".into(), Value::Int(7)),
+                ("title".into(), Value::Text("edited".into())),
+            ],
+            Scope::Unscoped,
+        )
+        .await
+        .expect("an edit of a granted column");
+    assert_eq!(changed, 1);
+    let row = seven
+        .fetch(&model, &mine, Scope::Unscoped)
+        .await
+        .unwrap()
+        .expect("its own row");
+    assert_eq!(row.get("title"), Some(&Value::Text("edited".into())));
+
+    // Nothing moves: no statement, and still one row matched.
+    let changed = seven
+        .update(
+            &model,
+            &mine,
+            &[("title".into(), Value::Text("edited".into()))],
+            Scope::Unscoped,
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    // A column outside the grant is refused by the database.
+    let refused = seven
+        .update(
+            &model,
+            &mine,
+            &[("author_id".into(), Value::Int(9))],
+            Scope::Unscoped,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("permission denied"),
+        "{refused}"
+    );
+    db.drop_all().await;
+}
+
 /// The identity is checked when the admin is built, at start: a role name
 /// Postgres would truncate fails there, with its `help:` line.
 #[tokio::test]

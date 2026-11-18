@@ -460,9 +460,24 @@ where
         }
     }
 
+    // Parse the merged row, then mark only the columns whose value moves.
+    // The `UPDATE` then names those columns alone: a role with column
+    // grants (an unguarded write mask, docs/rls.md) may update the fields
+    // it was given without the statement touching the others.
+    let mut parsed = <E::ActiveModel as ActiveModelTrait>::default();
+    parsed.set_from_json(merged).map_err(unreadable)?;
     let mut active = found.into_active_model();
-    active.set_from_json(merged).map_err(unreadable)?;
-    active.update(&txn).await.map_err(invalid)?;
+    for column in E::Column::iter() {
+        let Some(next) = parsed.get(column).into_value() else {
+            continue;
+        };
+        if active.get(column).into_value().as_ref() != Some(&next) {
+            active.set(column, next);
+        }
+    }
+    if active.is_changed() {
+        active.update(&txn).await.map_err(invalid)?;
+    }
     txn.commit().await.map_err(backend)?;
     Ok(Locked::new(1, Some(before)))
 }
