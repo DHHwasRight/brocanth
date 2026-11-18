@@ -2,7 +2,7 @@
 //!
 //! It compares structure only: roles and their attributes and members,
 //! `relrowsecurity` and `relforcerowsecurity`, policy names, `permissive`,
-//! `cmd`, `roles`, table privileges, sequence `USAGE`, and that each
+//! `cmd`, `roles`, table and column privileges, sequence `USAGE`, and that each
 //! function exists. [`owned_unforced`] answers another question for
 //! `rls check`: which unforced tables the login owns. It
 //! reports what the database lacks and what it has beyond the snapshot: an
@@ -154,6 +154,41 @@ pub async fn drift(db: &Db, snapshot: &Snapshot) -> Result<Vec<String>, RlsError
         for (grantee, p) in live.difference(&wanted) {
             out.push(format!(
                 "table {key}: {grantee} has {p}; the schema does not grant it"
+            ));
+        }
+
+        // Every column privilege but the owner's own: grantee, privilege,
+        // column. A table grant does not show here; Postgres keeps it in
+        // `relacl` only.
+        let granted: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END, a.privilege_type::text, att.attname::text \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_attribute att ON att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped, \
+             aclexplode(att.attacl) a \
+             WHERE c.oid = to_regclass($1) AND a.grantee <> c.relowner",
+        )
+        .bind(&name)
+        .fetch_all(pool)
+        .await
+        .map_err(q)?;
+        let live: BTreeSet<(String, String, String)> = granted.into_iter().collect();
+        let wanted: BTreeSet<(String, String, String)> = t
+            .column_grants
+            .iter()
+            .flat_map(|(grantee, privileges)| {
+                privileges.iter().flat_map(move |(p, columns)| {
+                    columns
+                        .iter()
+                        .map(move |c| (grantee.clone(), p.as_sql().to_string(), c.clone()))
+                })
+            })
+            .collect();
+        for (grantee, p, column) in wanted.difference(&live) {
+            out.push(format!("table {key}: {grantee} lacks {p} ({column})"));
+        }
+        for (grantee, p, column) in live.difference(&wanted) {
+            out.push(format!(
+                "table {key}: {grantee} has {p} ({column}); the schema does not grant it"
             ));
         }
 

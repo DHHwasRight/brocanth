@@ -3577,16 +3577,23 @@ impl Command for Rls {
         let dir = Path::new("migrations");
         let schema = crate::plugins::rls::schema();
         match self.action {
-            Action::Make { name } => match migration::make(&schema, dir, &name, FORMAT)? {
-                None => println!("Nothing to write: migrations/rls.json matches schema()."),
-                Some(made) => {
-                    println!("wrote {}", made.path.display());
-                    for step in made.steps {
-                        println!("  {step}");
-                    }
-                    println!("{NEXT}");
+            Action::Make { name } => {
+                // A write mask with a guard: the database grants every
+                // column, and only the application checks the mask.
+                for line in schema.warnings() {
+                    eprintln!("warning: {line}");
                 }
-            },
+                match migration::make(&schema, dir, &name, FORMAT)? {
+                    None => println!("Nothing to write: migrations/rls.json matches schema()."),
+                    Some(made) => {
+                        println!("wrote {}", made.path.display());
+                        for step in made.steps {
+                            println!("  {step}");
+                        }
+                        println!("{NEXT}");
+                    }
+                }
+            }
             Action::Sql => print!("{}", schema.create_sql()?),
             Action::Diff => {
                 let steps = migration::pending(&schema, dir)?;

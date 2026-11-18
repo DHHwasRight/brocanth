@@ -233,6 +233,7 @@ fn same(a: &Node<'_>, b: &Node<'_>) -> bool {
         (Node::Policy(_, _, a), Node::Policy(_, _, b)) => a == b,
         // The key holds the sequence and the grantee: nothing else to compare.
         (Node::SequenceUsage(..), Node::SequenceUsage(..)) => true,
+        (Node::ColumnGrant(_, _, _, a), Node::ColumnGrant(_, _, _, b)) => a == b,
         _ => a == b,
     }
 }
@@ -271,6 +272,12 @@ fn grantee_sql(name: &str) -> String {
     } else {
         quote(name)
     }
+}
+
+/// `UPDATE ("a", "b")`.
+fn columns_sql<'a>(privilege: Privilege, columns: impl IntoIterator<Item = &'a String>) -> String {
+    let columns: Vec<String> = columns.into_iter().map(|c| quote(c)).collect();
+    format!("{} ({})", privilege.as_sql(), columns.join(", "))
 }
 
 fn privileges_sql<'a>(privileges: impl IntoIterator<Item = &'a Privilege>) -> String {
@@ -457,6 +464,12 @@ fn create_sql(node: &Node<'_>) -> Vec<String> {
             qualified(t.schema.as_deref(), sequence),
             grantee_sql(grantee)
         )],
+        Node::ColumnGrant(t, grantee, privilege, columns) => vec![format!(
+            "GRANT {} ON {} TO {}",
+            columns_sql(*privilege, columns.iter()),
+            table_sql(t),
+            grantee_sql(grantee)
+        )],
     }
 }
 
@@ -559,6 +572,12 @@ fn drop_sql(node: &Node<'_>) -> Vec<String> {
             qualified(t.schema.as_deref(), sequence),
             grantee_sql(grantee)
         )],
+        Node::ColumnGrant(t, grantee, privilege, columns) => vec![format!(
+            "REVOKE {} ON {} FROM {}",
+            columns_sql(*privilege, columns.iter()),
+            table_sql(t),
+            grantee_sql(grantee)
+        )],
     }
 }
 
@@ -633,6 +652,28 @@ fn alter_sql(old: &Node<'_>, new: &Node<'_>, dropped_roles: &BTreeSet<&str>) -> 
                 out.push(format!(
                     "GRANT {} ON {} TO {}",
                     privileges_sql(added),
+                    table_sql(t),
+                    grantee_sql(grantee)
+                ));
+            }
+            out
+        }
+        (Node::ColumnGrant(_, _, _, a), Node::ColumnGrant(t, grantee, privilege, b)) => {
+            let mut out = Vec::new();
+            let gone: Vec<&String> = a.difference(b).collect();
+            if !gone.is_empty() {
+                out.push(format!(
+                    "REVOKE {} ON {} FROM {}",
+                    columns_sql(*privilege, gone),
+                    table_sql(t),
+                    grantee_sql(grantee)
+                ));
+            }
+            let added: Vec<&String> = b.difference(a).collect();
+            if !added.is_empty() {
+                out.push(format!(
+                    "GRANT {} ON {} TO {}",
+                    columns_sql(*privilege, added),
                     table_sql(t),
                     grantee_sql(grantee)
                 ));

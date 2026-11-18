@@ -4,6 +4,7 @@ Written 12 November 2026. Status: **accepted 17 November 2026; phases 1
 and 2 built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
 `uuid` and `timestamptz` kinds; `policy!` `#[db]`, `update_check`,
 `exists`, `#[app_only]`, the decision 3 refusals).
+Phase 7 built: column grants for write masks with no guard (decision 9).
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -299,6 +300,31 @@ column grants for a mask with **no guard** (the same mask for every subject
 of the role): the grant is then exact. A guarded mask stays app-only, and
 `rls make` prints one line per such table, so the gap is visible.
 
+Phase 7, as built. `#[db]` puts each mask in `Rules` as data:
+`MaskRule::Fixed(FieldMask)` when the mask has no guard and no `{ … }`
+block, else `MaskRule::PerSubject`. `Policy::from_rules` then grants:
+
+| Mask | `INSERT` / `UPDATE` grant |
+|---|---|
+| none written | on the table, as before |
+| `all` | on the table |
+| `only [..]`, `except [..]` | on the columns it permits, never also on the table |
+| `none` | no grant and no policy for the command |
+| guard or block | on the table, and one `warning:` line per table in `rls make` |
+
+`INSERT` reads `writable_on_create`, or `writable` when there is none, as
+the trait does. The table `SELECT` grant stays, so `UPDATE … WHERE id = $1
+AND <condition>` reads its columns; a Postgres test proves it, and that a
+column outside the mask fails with `permission denied`. The snapshot holds
+the column grants in an optional `column_grants` field, so an older
+`rls.json` reads the same; the diff revokes and grants columns, and
+`rls check` compares them.
+
+Reason for "none written: table grant": the trait's default mask denies
+every column, so the exact grant would be no `UPDATE` at all. That would
+change every existing `#[db]` policy that writes no mask. A project that
+wants the grant writes the mask.
+
 ## 4. NULL, fail-closed, and the agreement test
 
 ### The layers that fail closed
@@ -419,7 +445,7 @@ Sizes are focused hours for one person, with tests.
 | 4 | `brocanth_rls::identity`, the request provider, the sqlx and SeaORM call sites in the scaffold; `ResourceData` and the admin data source run as the identity (decision 13). | 10 |
 | 5 | Agreement on Postgres: the harness in `brocanth-rls`, the `db { … }` clause, `EXPLAIN` check on the example (index kept). | 9 |
 | 6 | Scaffold: `rls` reads `policy`, `rls diff` in CI, goldens re-blessed, docs/rls.md §5 and docs/policy.md updated, ADR in PLAN.md §13. | 6 |
-| 7 | Optional: column grants for unguarded masks. | 4 |
+| 7 | Optional: column grants for unguarded masks. Done. | 4 |
 
 Total: about 56 hours (60 with phase 7). Phase 5 lands before any
 project turns `#[db]` on.

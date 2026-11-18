@@ -89,6 +89,7 @@ pub struct Table {
     pub(crate) name: String,
     pub(crate) force: bool,
     pub(crate) grants: Vec<(String, Vec<Privilege>)>,
+    pub(crate) column_grants: Vec<(String, Privilege, Vec<String>)>,
     pub(crate) sequence: Option<String>,
 }
 
@@ -128,6 +129,7 @@ impl Table {
             name: name.into(),
             force: true,
             grants: Vec::new(),
+            column_grants: Vec::new(),
             sequence: None,
         }
     }
@@ -162,6 +164,29 @@ impl Table {
     pub fn grant(mut self, role: &Role, privileges: impl IntoIterator<Item = Privilege>) -> Table {
         self.grants
             .push((role.name.clone(), privileges.into_iter().collect()));
+        self
+    }
+
+    /// `GRANT <privilege> (<columns>) ON <table> TO "role"`: the role may
+    /// use these columns and no others. With `INSERT` or `UPDATE`, the
+    /// database form of a write mask with no guard
+    /// (docs/policy-rls-bridge.md, decision 9).
+    ///
+    /// Postgres takes `SELECT`, `INSERT` and `UPDATE` per column. The role
+    /// must not also hold `privilege` on the whole table:
+    /// [`Schema::snapshot`](crate::Schema::snapshot) refuses both, because
+    /// the table grant would admit every column.
+    pub fn grant_columns<S: Into<String>>(
+        mut self,
+        role: &Role,
+        privilege: Privilege,
+        columns: impl IntoIterator<Item = S>,
+    ) -> Table {
+        self.column_grants.push((
+            role.name.clone(),
+            privilege,
+            columns.into_iter().map(Into::into).collect(),
+        ));
         self
     }
 

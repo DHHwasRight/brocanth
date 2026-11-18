@@ -16,9 +16,9 @@ use std::str::FromStr;
 use brocanth_db::sea_query::{Expr, ExprTrait, Order, Query};
 use brocanth_db::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use brocanth_db::{Db, DbError, DbIdentity, Exec};
-use brocanth_policy::{Subject, Value};
+use brocanth_policy::{FieldMask, MaskRule, Subject, Value};
 use brocanth_rls::{catalog, Policy, Role, Schema};
-use common::policy::{PostDb, Visitor};
+use common::policy::{db_policy, post_rules, PostColumn, PostDb, Visitor};
 use common::{apply, connect, example, setup, teardown, url, Names};
 
 macro_rules! require_db {
@@ -265,5 +265,195 @@ async fn rls_check_reports_an_unforced_table_the_login_owns() {
         .unwrap()
         .is_empty());
     owner.close().await;
+    teardown(&admin, &n).await;
+}
+
+/// `writable: only [title, status]`, `writable_on_create: only [title,
+/// author_id, tenant_id]`: column grants (bridge decision 9).
+pub struct Masked;
+db_policy!(Masked, {
+    let mut rules = post_rules();
+    rules.writable = Some(MaskRule::Fixed(FieldMask::only([
+        PostColumn::Title,
+        PostColumn::Status,
+    ])));
+    rules.writable_on_create = Some(MaskRule::Fixed(FieldMask::only([
+        PostColumn::Title,
+        PostColumn::AuthorId,
+        PostColumn::TenantId,
+    ])));
+    rules
+});
+
+/// The same rules, with a `writable` mask that has a guard.
+pub struct GuardedMask;
+db_policy!(GuardedMask, {
+    let mut rules = post_rules();
+    rules.writable = Some(MaskRule::PerSubject);
+    rules
+});
+
+#[tokio::test]
+async fn an_unguarded_mask_is_a_column_grant_and_a_guarded_one_is_the_table() {
+    let url = require_db!();
+    let n = Names::unique("rls_masks");
+    let admin = connect(&url, None).await;
+    teardown(&admin, &n).await;
+    let s = &n.schema;
+    apply(
+        &admin,
+        &format!(
+            "CREATE ROLE {login} LOGIN PASSWORD 'pw' NOINHERIT;
+             CREATE SCHEMA {s};
+             CREATE TABLE {s}.posts (id bigserial PRIMARY KEY, author_id bigint, tenant_id bigint NOT NULL, status text NOT NULL DEFAULT 'draft', title text NOT NULL);
+             INSERT INTO {s}.posts (author_id, tenant_id, status, title) VALUES
+               (1, 1, 'draft', 'd1'),
+               (2, 1, 'draft', 'd2');",
+            login = n.login,
+        ),
+    )
+    .await;
+    let member = Role::new(&n.member).member(&n.login);
+    let masked = || {
+        Schema::new()
+            .role(member.clone())
+            .role(Role::existing(&n.login))
+            .policies(Policy::from_rules::<Masked>(&member).sequence("posts_id_seq"))
+    };
+    assert!(masked().warnings().is_empty());
+    let sql = masked().create_sql().unwrap();
+    apply(&admin, &format!("SET LOCAL search_path = {s};\n{sql}")).await;
+    apply(
+        &admin,
+        &format!("GRANT USAGE ON SCHEMA {s} TO {}", n.member),
+    )
+    .await;
+    let snapshot = masked().snapshot().unwrap();
+    let scoped = admin_in(&url, s).await;
+    let drift = catalog::drift(&scoped, &snapshot).await.unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
+
+    let login = connect(&url, Some(&n.login)).await;
+    let author = identity(&n, &visitor(Some(1), false, false));
+    let posts = (n.schema.clone(), "posts".to_string());
+    let set = |column: &str, value: Expr| {
+        Query::update()
+            .table(posts.clone())
+            .value(column.to_string(), value)
+            // The WHERE reads `id` and `status`: the table SELECT grant
+            // covers them, and the policies still filter the rows.
+            .and_where(Expr::col("id").eq(1))
+            .and_where(Expr::col("status").eq("draft"))
+            .to_owned()
+    };
+
+    // A granted column passes the grant, then the policy.
+    let title = set("title", Expr::val("edited"));
+    let changed = login
+        .transact_as(&author, async |tx| tx.execute(&title).await)
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+    // Another author's draft: granted column, but the policy hides the row.
+    let other = Query::update()
+        .table(posts.clone())
+        .value("title", "taken")
+        .and_where(Expr::col("id").eq(2))
+        .to_owned();
+    let changed = login
+        .transact_as(&author, async |tx| tx.execute(&other).await)
+        .await
+        .unwrap();
+    assert_eq!(changed, 0);
+    // A column the mask leaves out: permission denied before any row.
+    let owner = set("author_id", Expr::val(1));
+    let e = login
+        .transact_as(&author, async |tx| tx.execute(&owner).await)
+        .await
+        .unwrap_err();
+    assert_refused(&e, "42501", "permission denied for table posts");
+
+    // INSERT: the `writable_on_create` columns, and the sequence default.
+    let insert = |columns: &[&str]| {
+        let values: Vec<Expr> = columns
+            .iter()
+            .map(|c| match *c {
+                "author_id" => Expr::val(1),
+                "tenant_id" => Expr::val(1),
+                "status" => Expr::val("draft"),
+                _ => Expr::val("new"),
+            })
+            .collect();
+        Query::insert()
+            .into_table(posts.clone())
+            .columns(columns.iter().map(|c| c.to_string()))
+            .values_panic(values)
+            .to_owned()
+    };
+    let granted = insert(&["author_id", "tenant_id", "title"]);
+    let added = login
+        .transact_as(&author, async |tx| tx.execute(&granted).await)
+        .await
+        .unwrap();
+    assert_eq!(added, 1);
+    let with_status = insert(&["author_id", "tenant_id", "status", "title"]);
+    let e = login
+        .transact_as(&author, async |tx| tx.execute(&with_status).await)
+        .await
+        .unwrap_err();
+    assert_refused(&e, "42501", "permission denied for table posts");
+
+    // The catalog check sees a column grant revoked and one added.
+    apply(
+        &admin,
+        &format!(
+            "REVOKE UPDATE (title) ON {s}.posts FROM {m}; GRANT UPDATE (author_id) ON {s}.posts TO {m}",
+            m = n.member
+        ),
+    )
+    .await;
+    let drift = catalog::drift(&scoped, &snapshot).await.unwrap();
+    assert_eq!(
+        drift,
+        [
+            format!("table posts: {} lacks UPDATE (title)", n.member),
+            format!(
+                "table posts: {} has UPDATE (author_id); the schema does not grant it",
+                n.member
+            ),
+        ]
+    );
+
+    // The migration to a guarded mask: the column grants go, the table
+    // grant comes back, and `rls make` would warn.
+    apply(
+        &admin,
+        &format!(
+            "REVOKE UPDATE (author_id) ON {s}.posts FROM {m}; GRANT UPDATE (title) ON {s}.posts TO {m}",
+            m = n.member
+        ),
+    )
+    .await;
+    let guarded = Schema::new()
+        .role(member.clone())
+        .role(Role::existing(&n.login))
+        .policies(Policy::from_rules::<GuardedMask>(&member).sequence("posts_id_seq"));
+    assert_eq!(guarded.warnings().len(), 1, "{:?}", guarded.warnings());
+    let next = guarded.snapshot().unwrap();
+    let up = brocanth_rls::diff(&snapshot, &next).unwrap().sql();
+    apply(&admin, &format!("SET LOCAL search_path = {s};\n{up}")).await;
+    let drift = catalog::drift(&scoped, &next).await.unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
+    // The database no longer stops the owner column; the policy's
+    // WITH CHECK still keeps the row the author's.
+    let keep = set("author_id", Expr::val(1));
+    let changed = login
+        .transact_as(&author, async |tx| tx.execute(&keep).await)
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    scoped.close().await;
+    login.close().await;
     teardown(&admin, &n).await;
 }

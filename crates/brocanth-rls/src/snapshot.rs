@@ -143,6 +143,11 @@ pub struct TableSpec {
     /// Table privileges by grantee (`PUBLIC` or a role name).
     #[serde(default)]
     pub grants: BTreeMap<String, BTreeSet<Privilege>>,
+    /// Column privileges by grantee: each privilege with its columns
+    /// ([`crate::Table::grant_columns`]). Absent from the file when the
+    /// table has none, so an older `rls.json` reads the same.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_grants: BTreeMap<String, BTreeMap<Privilege, BTreeSet<String>>>,
     /// Policies by name.
     #[serde(default)]
     pub policies: BTreeMap<String, PolicySpec>,
@@ -158,7 +163,8 @@ pub struct TableSpec {
 pub struct SequenceSpec {
     /// The name, in the table's schema.
     pub name: String,
-    /// The grantees with `USAGE`: each grantee with `INSERT` on the table.
+    /// The grantees with `USAGE`: each grantee with `INSERT` on the table
+    /// or on some of its columns.
     #[serde(default)]
     pub usage: BTreeSet<String>,
 }
@@ -260,6 +266,12 @@ pub struct PolicySpec {
 pub const KEYWORDS: [&str; 4] = ["public", "current_user", "current_role", "session_user"];
 
 impl fmt::Display for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql())
+    }
+}
+
+impl fmt::Display for Privilege {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_sql())
     }

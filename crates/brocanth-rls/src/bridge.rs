@@ -15,8 +15,8 @@
 use brocanth_db::sea_query::prelude::{DateTime, Utc, Uuid};
 use brocanth_db::sea_query::{Expr, Query, Value as SeaValue};
 use brocanth_policy::{
-    Attr, AttrKind, Column, DbPolicy, Entity, Exists, Guard, Missing, Op, Operand, Rule, Subject,
-    Term, Value,
+    Attr, AttrKind, Column, DbPolicy, Entity, Exists, Guard, MaskRule, Missing, Op, Operand, Rule,
+    Subject, Term, Value,
 };
 
 use crate::def::{Policy, Role, Table};
@@ -449,7 +449,39 @@ pub struct RulePolicies {
     table: Table,
     role: Role,
     slots: [(Command, Slot); 4],
+    /// How `INSERT` and `UPDATE` are granted: from `writable_on_create`
+    /// and `writable` (decision 9).
+    insert: Write,
+    update: Write,
     problems: Vec<Refusal>,
+}
+
+/// How one write command is granted, from its mask (decision 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Write {
+    /// On the whole table: no mask, or `all`.
+    Table,
+    /// On these columns only: a mask with no guard. Empty: no grant and
+    /// no policy, as the application permits no column.
+    Columns(Vec<String>),
+    /// On the whole table, and a warning: the mask has a guard, so only
+    /// the application checks it.
+    Guarded,
+}
+
+impl Write {
+    fn of<C: Column>(mask: Option<&MaskRule<C>>) -> Write {
+        match mask {
+            None => Write::Table,
+            Some(MaskRule::PerSubject) => Write::Guarded,
+            Some(mask) => match mask.columns() {
+                None => Write::Table,
+                Some(columns) => {
+                    Write::Columns(columns.iter().map(|c| c.name().to_string()).collect())
+                }
+            },
+        }
+    }
 }
 
 impl Policy {
@@ -471,6 +503,13 @@ impl Policy {
     /// `Table::named(<entity's table>)`, forced, and `role` is granted each
     /// command that has a policy. With [`RulePolicies::sequence`], the role
     /// also gets `USAGE` on the table's sequence when it may insert.
+    ///
+    /// The write masks (decision 9): a `writable` mask with no guard grants
+    /// `UPDATE` on its columns instead of the table, and
+    /// `writable_on_create` (or `writable`) does the same for `INSERT`. A
+    /// mask that permits no column writes no policy and no grant for its
+    /// command. A mask with a guard keeps the table grant and adds a line
+    /// to [`Schema::warnings`].
     pub fn from_rules<P: DbPolicy>(role: &Role) -> RulePolicies {
         let rules = P::rules();
         let table = Table::named(<P::Entity as Entity>::TABLE.as_str());
@@ -503,6 +542,8 @@ impl Policy {
             Ok((Some(ctx.rule(&rules.delete)?), None))
         });
         RulePolicies {
+            insert: Write::of(rules.writable_on_create()),
+            update: Write::of(rules.writable.as_ref()),
             slots: [
                 (Command::Select, select),
                 (Command::Insert, insert),
@@ -599,6 +640,7 @@ impl RulePolicies {
         }
         let base = format!("{}_{}", self.table.name, self.role.name);
         let mut privileges = Vec::new();
+        let mut columns = Vec::new();
         let mut policies = Vec::new();
         for (command, slot) in self.slots {
             let (using, check) = match slot {
@@ -606,26 +648,61 @@ impl RulePolicies {
                 Slot::Refused(r) => return Err(r.into_error()),
                 Slot::Rule { using, check } => (using, check),
             };
-            let (suffix, privilege) = match command {
-                Command::Select => ("select", Privilege::Select),
-                Command::Insert => ("insert", Privilege::Insert),
-                Command::Update => ("update", Privilege::Update),
-                Command::Delete => ("delete", Privilege::Delete),
+            let (suffix, privilege, write) = match command {
+                Command::Select => ("select", Privilege::Select, &Write::Table),
+                Command::Insert => ("insert", Privilege::Insert, &self.insert),
+                Command::Update => ("update", Privilege::Update, &self.update),
+                Command::Delete => ("delete", Privilege::Delete, &Write::Table),
                 Command::All => continue,
             };
+            match write {
+                // The mask permits no column: the command cannot succeed.
+                Write::Columns(names) if names.is_empty() => continue,
+                Write::Columns(names) => columns.push((privilege, names.clone())),
+                Write::Table | Write::Guarded => privileges.push(privilege),
+            }
             let mut policy = Policy::new(format!("{base}_{suffix}"), &self.table)
                 .command(command)
                 .to(&self.role);
             policy.using = using;
             policy.with_check = check;
-            privileges.push(privilege);
             policies.push(policy);
         }
         let mut table = self.table.force();
         if !privileges.is_empty() {
             table = table.grant(&self.role, privileges);
         }
+        for (privilege, names) in columns {
+            table = table.grant_columns(&self.role, privilege, names);
+        }
         Ok((table, policies))
+    }
+
+    /// One line when a write mask with a guard leaves a granted command
+    /// open on every column: the application checks the mask, the
+    /// database does not (decision 9). `None` otherwise.
+    pub fn warning(&self) -> Option<String> {
+        let granted = |command: Command| {
+            self.slots
+                .iter()
+                .any(|(c, slot)| *c == command && matches!(slot, Slot::Rule { .. }))
+        };
+        let mut commands = Vec::new();
+        if self.insert == Write::Guarded && granted(Command::Insert) {
+            commands.push("INSERT");
+        }
+        if self.update == Write::Guarded && granted(Command::Update) {
+            commands.push("UPDATE");
+        }
+        if commands.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}: {} may {} any column; its write mask has a guard, so only the application checks it (docs/policy-rls-bridge.md, decision 9)",
+            self.table.key(),
+            self.role.name,
+            commands.join(" and ")
+        ))
     }
 }
 
@@ -644,6 +721,10 @@ impl<I: IntoIterator<Item = Policy>> IntoPolicies for I {
 
 impl IntoPolicies for RulePolicies {
     fn add_to(self, schema: Schema) -> Schema {
+        let schema = match self.warning() {
+            Some(line) => schema.warn(line),
+            None => schema,
+        };
         match self.build() {
             Ok((table, policies)) => schema.table(table).extend_policies(policies),
             Err(e) => schema.refuse(e),

@@ -27,6 +27,9 @@ pub struct Schema {
     /// Refusals from [`Policy::from_rules`](crate::Policy::from_rules),
     /// reported by [`Schema::snapshot`]: message, help.
     refused: Vec<(String, String)>,
+    /// Gaps the database leaves to the application, one line per table:
+    /// [`Schema::warnings`].
+    warnings: Vec<String>,
 }
 
 impl Schema {
@@ -82,6 +85,19 @@ impl Schema {
         };
         self.refused.push((message, help));
         self
+    }
+
+    /// Records a warning for [`Schema::warnings`].
+    pub(crate) fn warn(mut self, line: String) -> Schema {
+        self.warnings.push(line);
+        self
+    }
+
+    /// What the database does not enforce and the application does, one
+    /// line per table: a write mask with a guard
+    /// (docs/policy-rls-bridge.md, decision 9). `rls make` prints them.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// The settings the expressions read, by key, with the type each reads.
@@ -257,15 +273,59 @@ impl Schema {
                     .extend(privileges.iter().copied());
             }
             grants.retain(|_, p| !p.is_empty());
+            let mut column_grants: BTreeMap<String, BTreeMap<Privilege, BTreeSet<String>>> =
+                BTreeMap::new();
+            for (grantee, privilege, columns) in &table.column_grants {
+                if !role_ok(grantee)
+                    || (KEYWORDS.contains(&grantee.as_str()) && grantee != "public")
+                {
+                    return Err(RlsError::definition(
+                        format!("the table `{key}` grants columns to `{grantee}`, which is not a role of the schema"),
+                        format!("add `Role::new(\"{grantee}\")` or `Role::existing(\"{grantee}\")` to the schema"),
+                    ));
+                }
+                if *privilege == Privilege::Delete {
+                    return Err(RlsError::definition(
+                        format!("the table `{key}` grants DELETE on columns to `{grantee}`"),
+                        "DELETE removes a whole row: grant it on the table with `Table::grant`",
+                    ));
+                }
+                if columns.is_empty() {
+                    return Err(RlsError::definition(
+                        format!("the table `{key}` grants {privilege} on no column to `{grantee}`"),
+                        "name at least one column, or leave the grant out",
+                    ));
+                }
+                if grants.get(grantee).is_some_and(|p| p.contains(privilege)) {
+                    return Err(RlsError::definition(
+                        format!("the table `{key}` grants {privilege} to `{grantee}` on the table and on columns"),
+                        "keep one: the table grant admits every column",
+                    ));
+                }
+                for column in columns {
+                    ident::check("column", column)?;
+                }
+                column_grants
+                    .entry(grantee.clone())
+                    .or_default()
+                    .entry(*privilege)
+                    .or_default()
+                    .extend(columns.iter().cloned());
+            }
             let sequence = match &table.sequence {
                 Some(name) => {
                     ident::check("sequence", name)?;
+                    let column_insert = column_grants
+                        .iter()
+                        .filter(|(_, p)| p.contains_key(&Privilege::Insert))
+                        .map(|(g, _)| g.clone());
                     Some(SequenceSpec {
                         name: name.clone(),
                         usage: grants
                             .iter()
                             .filter(|(_, p)| p.contains(&Privilege::Insert))
                             .map(|(g, _)| g.clone())
+                            .chain(column_insert)
                             .collect(),
                     })
                 }
@@ -276,6 +336,7 @@ impl Schema {
                 name: table.name.clone(),
                 force: table.force,
                 grants,
+                column_grants,
                 policies: BTreeMap::new(),
                 sequence,
             };

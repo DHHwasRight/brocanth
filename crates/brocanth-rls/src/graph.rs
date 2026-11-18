@@ -24,6 +24,9 @@ pub enum NodeKey {
     /// `USAGE` on a table's sequence for one grantee: table key, sequence,
     /// grantee. Last, so the order of a schema without one is unchanged.
     SequenceUsage(String, String, String),
+    /// One privilege of a grantee on some columns of a table: table key,
+    /// grantee, privilege. After the table grant it can replace.
+    ColumnGrant(String, String, Privilege),
 }
 
 impl fmt::Display for NodeKey {
@@ -36,6 +39,9 @@ impl fmt::Display for NodeKey {
             NodeKey::Policy(table, name) => write!(f, "policy {name} on {table}"),
             NodeKey::SequenceUsage(table, sequence, grantee) => {
                 write!(f, "usage on sequence {sequence} of {table} to {grantee}")
+            }
+            NodeKey::ColumnGrant(table, grantee, privilege) => {
+                write!(f, "grant {privilege} on columns of {table} to {grantee}")
             }
         }
     }
@@ -51,6 +57,8 @@ pub(crate) enum Node<'a> {
     Policy(&'a TableSpec, &'a str, &'a PolicySpec),
     /// The table, the sequence's name, the grantee.
     SequenceUsage(&'a TableSpec, &'a str, &'a str),
+    /// The table, the grantee, the privilege, the columns.
+    ColumnGrant(&'a TableSpec, &'a str, Privilege, &'a BTreeSet<String>),
 }
 
 /// Every node of a snapshot.
@@ -75,6 +83,14 @@ pub(crate) fn nodes(s: &Snapshot) -> BTreeMap<NodeKey, Node<'_>> {
                 NodeKey::Policy(key.clone(), name.clone()),
                 Node::Policy(table, name, policy),
             );
+        }
+        for (grantee, privileges) in &table.column_grants {
+            for (privilege, columns) in privileges {
+                out.insert(
+                    NodeKey::ColumnGrant(key.clone(), grantee.clone(), *privilege),
+                    Node::ColumnGrant(table, grantee, *privilege, columns),
+                );
+            }
         }
         if let Some(sequence) = &table.sequence {
             for grantee in &sequence.usage {
@@ -115,6 +131,16 @@ pub(crate) fn deps(key: &NodeKey, s: &Snapshot) -> Vec<NodeKey> {
             .unwrap_or_default(),
         NodeKey::Grant(table, grantee) | NodeKey::SequenceUsage(table, _, grantee) => {
             let mut out = vec![NodeKey::Table(table.clone())];
+            out.extend(role(grantee));
+            out
+        }
+        // After the grantee's table grant: a `REVOKE` on the table also
+        // revokes the column privileges, so it must run first.
+        NodeKey::ColumnGrant(table, grantee, _) => {
+            let mut out = vec![
+                NodeKey::Table(table.clone()),
+                NodeKey::Grant(table.clone(), grantee.clone()),
+            ];
             out.extend(role(grantee));
             out
         }
