@@ -41,6 +41,7 @@
 //! this happens only to [`Attributes`] built by hand without the key.
 
 use crate::entity::{Column, Entity, Ident};
+use crate::mask::FieldMask;
 use crate::pred::{Membership, Op, Pred};
 use crate::subject::Attributes;
 use crate::value::{Bound, Missing, Value};
@@ -65,6 +66,45 @@ pub struct Rules<E: Entity> {
     pub update_check: Option<Rule<E::Column>>,
     /// Which rows a delete may remove.
     pub delete: Rule<E::Column>,
+    /// The `writable` mask as data (decision 9). `None`: the policy does
+    /// not write one.
+    pub writable: Option<MaskRule<E::Column>>,
+    /// The `writable_on_create` mask as data. `None`: the policy does not
+    /// write one, and [`Rules::writable_on_create`] reads `writable`.
+    pub writable_on_create: Option<MaskRule<E::Column>>,
+}
+
+/// A write mask as data: the columns a write may set.
+///
+/// docs/policy-rls-bridge.md, decision 9. A mask is per subject, and a
+/// database grant is per role. So the database can hold a mask only when it
+/// is the same for every subject: [`MaskRule::Fixed`]. `brocanth-rls` then
+/// grants the role these columns and no others.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MaskRule<C: Column> {
+    /// No guard: the same mask for every subject.
+    Fixed(FieldMask<C>),
+    /// A guard or a `{ … }` block chooses the mask per subject. It stays in
+    /// the application.
+    PerSubject,
+}
+
+impl<C: Column> MaskRule<C> {
+    /// The columns the mask permits, in declaration order. `None` when the
+    /// database cannot hold the mask as a column list: [`MaskRule::PerSubject`],
+    /// and [`FieldMask::All`], which is the whole table.
+    pub fn columns(&self) -> Option<Vec<C>> {
+        match self {
+            MaskRule::Fixed(FieldMask::All) | MaskRule::PerSubject => None,
+            MaskRule::Fixed(mask) => Some(
+                C::ALL
+                    .iter()
+                    .copied()
+                    .filter(|c| mask.permits(*c))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// A policy whose rules are data, so the database can enforce them too.
@@ -89,6 +129,8 @@ impl<E: Entity> Rules<E> {
             update: Rule::never(),
             update_check: None,
             delete: Rule::never(),
+            writable: None,
+            writable_on_create: None,
         }
     }
 
@@ -101,6 +143,12 @@ impl<E: Entity> Rules<E> {
     pub fn update_check(&self) -> &Rule<E::Column> {
         self.update_check.as_ref().unwrap_or(&self.update)
     }
+
+    /// The `writable_on_create` mask, or `writable` when the policy has
+    /// none, as [`crate::Policy::writable_on_create`] defaults.
+    pub fn writable_on_create(&self) -> Option<&MaskRule<E::Column>> {
+        self.writable_on_create.as_ref().or(self.writable.as_ref())
+    }
 }
 
 impl<E: Entity> Clone for Rules<E> {
@@ -112,6 +160,8 @@ impl<E: Entity> Clone for Rules<E> {
             update: self.update.clone(),
             update_check: self.update_check.clone(),
             delete: self.delete.clone(),
+            writable: self.writable.clone(),
+            writable_on_create: self.writable_on_create.clone(),
         }
     }
 }
@@ -126,6 +176,8 @@ impl<E: Entity> std::fmt::Debug for Rules<E> {
             .field("update", &self.update)
             .field("update_check", &self.update_check)
             .field("delete", &self.delete)
+            .field("writable", &self.writable)
+            .field("writable_on_create", &self.writable_on_create)
             .finish()
     }
 }
@@ -138,6 +190,8 @@ impl<E: Entity> PartialEq for Rules<E> {
             && self.update == other.update
             && self.update_check == other.update_check
             && self.delete == other.delete
+            && self.writable == other.writable
+            && self.writable_on_create == other.writable_on_create
     }
 }
 
@@ -534,6 +588,36 @@ mod tests {
         assert!(rule.resolve(&attrs()).is_never());
         assert!(Rule::<C>::new(Term::Always).app_only.is_none());
         let _ = C::Id;
+    }
+
+    #[test]
+    fn a_fixed_mask_lists_its_columns_and_the_others_do_not() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        enum C {
+            Id,
+            Title,
+            Body,
+        }
+        impl Column for C {
+            const ALL: &'static [Self] = &[Self::Id, Self::Title, Self::Body];
+            fn name(&self) -> &'static str {
+                match self {
+                    C::Id => "id",
+                    C::Title => "title",
+                    C::Body => "body",
+                }
+            }
+        }
+        let only = MaskRule::Fixed(FieldMask::only([C::Body, C::Title]));
+        assert_eq!(only.columns(), Some(vec![C::Title, C::Body]));
+        let except = MaskRule::Fixed(FieldMask::except([C::Id]));
+        assert_eq!(except.columns(), Some(vec![C::Title, C::Body]));
+        assert_eq!(
+            MaskRule::Fixed(FieldMask::<C>::None).columns(),
+            Some(vec![])
+        );
+        assert_eq!(MaskRule::Fixed(FieldMask::<C>::All).columns(), None);
+        assert_eq!(MaskRule::<C>::PerSubject.columns(), None);
     }
 
     #[test]

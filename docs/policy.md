@@ -312,7 +312,14 @@ and it does not apply to `update_check` or to a mask.
 
 **Field masks** stay in the application (bridge decision 9): `writable`
 and `writable_on_create` expand as without `#[db]`, `{ … }` blocks and Rust
-guards included.
+guards included. `DbPolicy::rules()` also holds each mask as data
+(`Rules::writable`, `Rules::writable_on_create`): `MaskRule::Fixed(mask)`
+for a mask with no guard, `MaskRule::PerSubject` for one with a guard or a
+block. `brocanth-rls` grants a fixed mask as columns (`GRANT UPDATE
+("title")`), so the database refuses the other columns too. A guarded mask
+cannot be a grant, because a grant is per role and the mask is per subject:
+`rls make` prints a warning for its table. Write the mask with no guard when
+it is the same for everyone.
 
 **What a `#[db]` rule may hold.** The database reads settings and literals.
 It cannot run Rust. Each refusal is a compile error on your token, with a

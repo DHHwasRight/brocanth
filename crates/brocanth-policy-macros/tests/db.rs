@@ -444,3 +444,69 @@ fn an_app_only_rule_stays_rust_and_is_marked_in_the_rules() {
         Pred::eq(PostColumn::Status, "published")
     );
 }
+
+#[test]
+fn a_mask_without_a_guard_is_a_fixed_column_list_and_a_guarded_one_is_not() {
+    use brocanth_policy::{FieldMask, MaskRule};
+    // `only [status]`, the same for every subject.
+    let article = ArticleDb::rules();
+    assert_eq!(
+        article.writable,
+        Some(MaskRule::Fixed(FieldMask::only([PostColumn::Status])))
+    );
+    assert_eq!(article.writable_on_create, None);
+    assert_eq!(article.writable_on_create(), article.writable.as_ref());
+    for who in visitors() {
+        assert_eq!(
+            Some(MaskRule::Fixed(ArticleDb.writable(&who))),
+            article.writable
+        );
+    }
+    // `who.admin => except [id]`: it depends on the subject.
+    assert_eq!(PostDb::rules().writable, Some(MaskRule::PerSubject));
+    // No mask written: nothing in the rules.
+    assert_eq!(TeamsDb::rules().writable, None);
+}
+
+brocanth_policy::policy! {
+    pub entity Note in "notes" {
+        #[key] id: i64,
+        owner_id: i64,
+        body: String,
+    }
+
+    #[db]
+    pub policy NoteDb(who: &Visitor) for Note {
+        list: owner_id == who.user_id else deny,
+        writable: except [id, owner_id],
+        writable_on_create: {
+            if who.admin {
+                brocanth_policy::FieldMask::all()
+            } else {
+                brocanth_policy::FieldMask::only([NoteColumn::Body])
+            }
+        },
+    }
+}
+
+#[test]
+fn an_except_mask_and_a_block_mask_are_data_too() {
+    use brocanth_policy::{FieldMask, MaskRule};
+    let rules = NoteDb::rules();
+    assert_eq!(
+        rules.writable,
+        Some(MaskRule::Fixed(FieldMask::except([
+            NoteColumn::Id,
+            NoteColumn::OwnerId
+        ])))
+    );
+    assert_eq!(
+        rules.writable.as_ref().and_then(MaskRule::columns),
+        Some(vec![NoteColumn::Body])
+    );
+    assert_eq!(rules.writable_on_create, Some(MaskRule::PerSubject));
+    // The application still runs the block.
+    assert!(NoteDb
+        .writable_on_create(&Visitor::admin())
+        .permits(NoteColumn::OwnerId));
+}

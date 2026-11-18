@@ -1552,6 +1552,29 @@ fn expand_policy(
                     Err(e) => push_error(&mut errors, e),
                 }
             }
+            // Decision 9: a mask with no guard is a column list the
+            // database can grant; any other mask stays in the application.
+            for (action, rule) in masks {
+                let fixed = match (&rule.arms[..], &rule.fallback) {
+                    ([], None) => Some(Ok(quote!(::brocanth_policy::FieldMask::deny_all()))),
+                    ([], Some(MaskExpr::Block(_))) => None,
+                    ([], Some(mask)) => Some(expand_mask(mask, &columns)),
+                    _ => None,
+                };
+                match fixed {
+                    Some(Ok(mask)) => fields.push(quote! {
+                        rules.#action = ::std::option::Option::Some(
+                            ::brocanth_policy::MaskRule::Fixed(#mask),
+                        );
+                    }),
+                    Some(Err(e)) => push_error(&mut errors, e),
+                    None => fields.push(quote! {
+                        rules.#action = ::std::option::Option::Some(
+                            ::brocanth_policy::MaskRule::PerSubject,
+                        );
+                    }),
+                }
+            }
             let checks = &cx.checks;
             Some(quote! {
                 impl ::brocanth_policy::DbPolicy for #name {
