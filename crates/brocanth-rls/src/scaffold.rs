@@ -648,9 +648,10 @@ user must be a superuser, because the test creates roles. When nothing
 answers at that URL, the test prints `!! SKIPPED` and passes. Give a new
 `#[db]` policy a `db { … }` clause too.
 
-A new project has no migration for `PostPolicy` yet, so `rls diff` fails
-until the first `rls make`. That migration alters `posts`: create the table
-in a migration of its own first, or remove the `.policies(…)` line.
+A new project has no migration for `PostPolicy` yet. Until the first
+`rls make`, CI skips `rls diff` and says so; after it, CI runs it. That
+migration alters `posts`: create the table in a migration of its own
+first, or remove the `.policies(…)` line.
 "#;
 
 const MODEL_AGENTS: &str = r#"

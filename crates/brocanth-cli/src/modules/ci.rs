@@ -133,8 +133,15 @@ jobs:
         out.push_str(
             r#"      # Fails when `schema()` in src/plugins/rls/mod.rs has a change that
       # migrations/rls.json does not hold: run `rls make <name>` and commit
-      # the migration with the snapshot.
-      - run: cargo run -- rls diff
+      # the migration with the snapshot. Before the first `rls make` there
+      # is no snapshot, and the step says so instead of failing.
+      - name: rls diff
+        run: |
+          if [ -f migrations/rls.json ]; then
+            cargo run -- rls diff
+          else
+            echo "!! SKIPPED rls diff: no migrations/rls.json yet. help: run \`brocanth rls make init\` and commit the migration"
+          fi
 "#,
         );
     }
@@ -190,7 +197,8 @@ mod tests {
     #[test]
     fn a_project_with_rls_checks_its_snapshot() {
         let out = written(&["db", "commands", "rls"]);
-        assert!(out.contains("- run: cargo run -- rls diff\n"), "{out}");
+        assert!(out.contains("            cargo run -- rls diff\n"), "{out}");
+        assert!(out.contains("if [ -f migrations/rls.json ]"), "{out}");
         assert!(!written(&["db", "commands"]).contains("rls diff"));
     }
 

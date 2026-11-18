@@ -5321,9 +5321,10 @@ user must be a superuser, because the test creates roles. When nothing
 answers at that URL, the test prints `!! SKIPPED` and passes. Give a new
 `#[db]` policy a `db { … }` clause too.
 
-A new project has no migration for `PostPolicy` yet, so `rls diff` fails
-until the first `rls make`. That migration alters `posts`: create the table
-in a migration of its own first, or remove the `.policies(…)` line.
+A new project has no migration for `PostPolicy` yet. Until the first
+`rls make`, CI skips `rls diff` and says so; after it, CI runs it. That
+migration alters `posts`: create the table in a migration of its own
+first, or remove the `.policies(…)` line.
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
@@ -5392,7 +5393,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: c80bef682861702c -->
+<!-- brocanth-digest: a1f009cd9f2e9775 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

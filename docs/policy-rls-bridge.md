@@ -515,8 +515,9 @@ Built in phase 6 (18 November 2026), with these changes to the sketch:
   that `check_identity` accepts the anonymous identity: a rule the
   database cannot check, or a key no policy reads, fails `cargo test`.
 - The scaffold writes no migration. The first `rls make` alters `posts`,
-  which the developer creates, so a new project fails `rls diff` until that
-  first `rls make`. Reason: a snapshot with no migration would say the
+  which the developer creates. Until that first `rls make` there is no
+  `migrations/rls.json`, and generated CI skips `rls diff` with a
+  `!! SKIPPED` line and a `help:`, so a new project starts green. Reason: a snapshot with no migration would say the
   database has policies it does not have, and a migration that creates
   `posts` is the application's schema, not the `rls` module's.
 

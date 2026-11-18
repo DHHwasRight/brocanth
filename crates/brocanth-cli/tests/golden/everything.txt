@@ -11498,8 +11498,15 @@ jobs:
       - run: cargo test
       # Fails when `schema()` in src/plugins/rls/mod.rs has a change that
       # migrations/rls.json does not hold: run `rls make <name>` and commit
-      # the migration with the snapshot.
-      - run: cargo run -- rls diff
+      # the migration with the snapshot. Before the first `rls make` there
+      # is no snapshot, and the step says so instead of failing.
+      - name: rls diff
+        run: |
+          if [ -f migrations/rls.json ]; then
+            cargo run -- rls diff
+          else
+            echo "!! SKIPPED rls diff: no migrations/rls.json yet. help: run \`brocanth rls make init\` and commit the migration"
+          fi
 
   image:
     runs-on: ubuntu-latest
@@ -22844,9 +22851,10 @@ user must be a superuser, because the test creates roles. When nothing
 answers at that URL, the test prints `!! SKIPPED` and passes. Give a new
 `#[db]` policy a `db { … }` clause too.
 
-A new project has no migration for `PostPolicy` yet, so `rls diff` fails
-until the first `rls make`. That migration alters `posts`: create the table
-in a migration of its own first, or remove the `.policies(…)` line.
+A new project has no migration for `PostPolicy` yet. Until the first
+`rls make`, CI skips `rls diff` and says so; after it, CI runs it. That
+migration alters `posts`: create the table in a migration of its own
+first, or remove the `.policies(…)` line.
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
@@ -22971,7 +22979,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 1722acb8994c09d6 -->
+<!-- brocanth-digest: fbbb75e890758c45 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

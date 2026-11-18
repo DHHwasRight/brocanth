@@ -83,9 +83,9 @@ With [`model`](model.md), the file is a SeaORM migration,
 Without `model`, it is a SQL file, `migrations/<UTC>_<name>.sql`.
 
 With [`policy`](policy.md), a new project has no migration for the
-example policy, so `rls diff` fails until the first `rls make`. The
-migration alters `posts`: create that table first, in a migration of its
-own, or remove the `.policies(…)` line.
+example policy. Until the first `rls make`, CI skips `rls diff` and says
+so; after it, CI runs it. The migration alters `posts`: create that table
+first, in a migration of its own, or remove the `.policies(…)` line.
 
 ## A request as its identity
 
