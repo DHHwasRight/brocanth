@@ -1454,6 +1454,7 @@ dependencies = [
  "brocanth-rls",
  "brocanth-scaffold",
  "chrono",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

@@ -42,7 +42,7 @@
 //! ```
 
 use brocanth_db::DbIdentity;
-use brocanth_policy::{Attr, AttrKind, Subject, Value};
+use brocanth_policy::{Attr, AttrKind, Attributes, Subject, Value};
 
 use crate::def::Role;
 use crate::expr::Setting;
@@ -61,9 +61,14 @@ use crate::ident::SqlType;
 /// `Orm::transact_as(&me, …)`. The role and the settings end with the
 /// transaction.
 pub fn identity<S: Subject>(role: &Role, who: &S) -> DbIdentity {
-    let values = who.attributes();
+    of_attributes(role, S::ATTRS, &who.attributes())
+}
+
+/// [`identity()`] from the attribute list and the values: each key of
+/// `attrs` is set, `''` when `values` lacks it.
+pub(crate) fn of_attributes(role: &Role, attrs: &[Attr], values: &Attributes) -> DbIdentity {
     let mut me = DbIdentity::new().role(role.name());
-    for attr in S::ATTRS {
+    for attr in attrs {
         me = match values.get(attr.key) {
             Some(value) => me.setting(&setting_of(attr), setting_text(value)),
             None => me.set(attr.key, ""),

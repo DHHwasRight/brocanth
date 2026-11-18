@@ -477,6 +477,47 @@ A hand-written `impl Policy` has no rule tree: write its database rule
 with `SqlExpr` and `crud`. The database rule is the floor: a missing
 `WHERE` shows nothing it should not.
 
+### The agreement test
+
+`brocanth_rls::agreement` (feature `agreement`) checks that a
+`DbPolicy`'s database policies admit the rows its `condition()` admits
+(bridge decision 10). `policy!`'s `db { … }` clause calls `run`; a test
+can call `check::<P>(&url, &subjects, cases)` directly.
+
+Per case, it creates a schema with the entity's table (from
+`TypedColumn::sql_type`), each link table an `exists` reads, and the SQL
+of `Policy::from_rules`. It inserts generated rows: the values of
+`brocanth_policy::agreement::pool`, with `NULL`s and near-misses. Then,
+for each subject:
+
+| Command | Application | Database (`transact_as(identity(subject))`) |
+|---|---|---|
+| `SELECT` | `SELECT id … WHERE <list OR view>` as the URL's user | `SELECT id …`, no `WHERE` |
+| `INSERT` | `create.eval` on each candidate row | the `INSERT`, in a savepoint |
+| `UPDATE` | `update` on the stored row, `update_check` on the new row | the `UPDATE`, in a savepoint: done, no row, or refused |
+| `DELETE` | `delete` on each row | the `DELETE`, in a savepoint |
+
+An `UPDATE` sets only the columns of an unguarded `writable` mask. An
+`INSERT` writes every column, so the test grants `INSERT` on the whole
+table: it compares rows, not column grants. An `#[app_only]` command, and
+a write command whose mask permits no column, is left out.
+
+It also unsets each setting in turn for one subject and compares `SELECT`
+again (a missing attribute denies, as in the application), and runs one
+`SELECT` with no identity, which must fail with `permission denied`. It
+fails when `update`, `delete` or `update_check` reach a row outside
+`list OR view`: Postgres hides such a row from the statement, or refuses
+the new row.
+
+The URL's user must be a superuser: the test creates two roles per run
+and reads around the policies as the application's side. `tests/agreement.rs`
+runs it over fixed rules that cover each row of the translation table,
+guard chains, `exists`, `update_check`, `else null`, and `uuid` and
+`timestamptz` columns. `tests/bridge_postgres.rs` checks with `EXPLAIN`
+that a comparison with a setting keeps the column's index. A guard chain
+does not keep it: the planner cannot read the guard's setting at plan
+time.
+
 ## 6. Rejected alternatives
 
 - **A string DSL or HCL file** (Atlas). A string is parsed at run time, and
@@ -509,8 +550,8 @@ with `SqlExpr` and `crud`. The database rule is the floor: a missing
 
 ## 7. What is not done
 
-- The rest of the `brocanth-policy` bridge: the request identity and the
-  agreement test (`docs/policy-rls-bridge.md` §6).
+- The rest of the `brocanth-policy` bridge: the scaffold and column
+  grants (`docs/policy-rls-bridge.md` §6, phases 6 and 7).
 - Expression drift in `rls check`. It compares structure only.
 - `USAGE` on a schema other than `public`, and default privileges. Grant
   them in a SQL migration.

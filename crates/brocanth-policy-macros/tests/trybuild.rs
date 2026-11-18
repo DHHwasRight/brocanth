@@ -42,6 +42,7 @@ fn db_refuses_what_the_database_cannot_check() {
     t.compile_fail("tests/ui/fail_db_not_attr.rs");
     t.compile_fail("tests/ui/fail_db_literal.rs");
     t.compile_fail("tests/ui/fail_db_only_without_db.rs");
+    t.compile_fail("tests/ui/fail_db_clause_without_db.rs");
     t.compile_fail("tests/ui/fail_exists_link.rs");
     t.compile_fail("tests/ui/fail_exists_negated.rs");
     t.compile_fail("tests/ui/fail_exists_names.rs");

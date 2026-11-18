@@ -1,9 +1,11 @@
 //! `Policy::from_rules` on a real Postgres: the SQL it writes applies, and
 //! a few rows per subject come out as the rules say. The full agreement
-//! harness (docs/policy-rls-bridge.md decision 10) is phase 5.
+//! harness (docs/policy-rls-bridge.md decision 10) runs in
+//! `tests/agreement.rs`.
 //!
-//! Also the owned-`no_force` report of `rls check` (§4, layer 1), and the
-//! sequence `USAGE` in the catalog check.
+//! Also the owned-`no_force` report of `rls check` (§4, layer 1), the
+//! sequence `USAGE` in the catalog check, and the `EXPLAIN` check: a
+//! comparison with a setting keeps the column's index (§1, decision 5).
 //!
 //! Skipped without `BROCANTH_TEST_DATABASE_URL` (a superuser URL). Each test
 //! has its own schema and roles.
@@ -454,6 +456,111 @@ async fn an_unguarded_mask_is_a_column_grant_and_a_guarded_one_is_the_table() {
     assert_eq!(changed, 1);
 
     scoped.close().await;
+    login.close().await;
+    teardown(&admin, &n).await;
+}
+
+#[derive(Clone, Debug, Default, brocanth_policy::Subject)]
+pub struct Reader {
+    #[attr]
+    pub user_id: Option<i64>,
+    #[attr]
+    pub team: Option<uuid::Uuid>,
+}
+
+brocanth_policy::policy! {
+    pub entity Ticket in "tickets" {
+        #[key] id: i64,
+        author_id: Option<i64>,
+        team_id: Option<uuid::Uuid>,
+    }
+
+    #[db]
+    pub policy OwnTickets(who: &Reader) for Ticket {
+        list: author_id == who.user_id else deny,
+    }
+
+    #[db]
+    pub policy TeamTickets(who: &Reader) for Ticket {
+        list: team_id == who.team else deny,
+    }
+}
+
+/// The plan of `SELECT id FROM tickets` as `who`, under `P`'s policies.
+async fn plan_as<P: brocanth_policy::DbPolicy<Subject = Reader>>(
+    admin: &Db,
+    login: &Db,
+    n: &Names,
+    who: &Reader,
+) -> String {
+    let member = Role::new(&n.member).member(&n.login);
+    let sql = Schema::new()
+        .role(member.clone())
+        .role(Role::existing(&n.login))
+        .policies(Policy::from_rules::<P>(&member))
+        .create_sql()
+        .unwrap();
+    let s = &n.schema;
+    apply(
+        admin,
+        &format!(
+            "SET LOCAL search_path = {s};\nDROP POLICY IF EXISTS \"tickets_{m}_select\" ON tickets;\n{sql}\nGRANT USAGE ON SCHEMA {s} TO {m};",
+            m = n.member
+        ),
+    )
+    .await;
+    let me = brocanth_rls::identity(&member, who);
+    let explain = format!("EXPLAIN SELECT id FROM {s}.tickets");
+    let lines: Vec<String> = login
+        .transact_as(&me, async |tx| {
+            brocanth_db::sqlx::query_scalar(brocanth_db::sqlx::AssertSqlSafe(explain))
+                .fetch_all(tx.connection())
+                .await
+                .map_err(DbError::from)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    lines.join("\n")
+}
+
+#[tokio::test]
+async fn a_setting_comparison_keeps_the_index() {
+    let url = require_db!();
+    let n = Names::unique("rls_explain");
+    let admin = connect(&url, None).await;
+    teardown(&admin, &n).await;
+    let s = &n.schema;
+    apply(
+        &admin,
+        &format!(
+            "CREATE ROLE {login} LOGIN PASSWORD 'pw' NOINHERIT;
+             CREATE SCHEMA {s};
+             CREATE TABLE {s}.tickets (id bigint PRIMARY KEY, author_id bigint, team_id uuid);
+             INSERT INTO {s}.tickets
+               SELECT g, g % 5000, md5(g::text)::uuid FROM generate_series(1, 50000) AS g;
+             CREATE INDEX tickets_author_id_idx ON {s}.tickets (author_id);
+             CREATE INDEX tickets_team_id_idx ON {s}.tickets (team_id);
+             ANALYZE {s}.tickets;",
+            login = n.login,
+        ),
+    )
+    .await;
+    let login = connect(&url, Some(&n.login)).await;
+    let who = Reader {
+        user_id: Some(7),
+        team: Some(uuid::Uuid::from_u128(7)),
+    };
+
+    // `(s IS NOT NULL AND col = s)`: the setting read is STABLE, so the
+    // planner compares the column with it through the index. A cast on the
+    // column (a `text` setting for a `uuid` column) would lose it.
+    let plan = plan_as::<OwnTickets>(&admin, &login, &n, &who).await;
+    assert!(plan.contains("Index Cond: (author_id = "), "{plan}");
+    assert!(plan.contains("tickets_author_id_idx"), "{plan}");
+    let plan = plan_as::<TeamTickets>(&admin, &login, &n, &who).await;
+    assert!(plan.contains("Index Cond: (team_id = "), "{plan}");
+    assert!(plan.contains("tickets_team_id_idx"), "{plan}");
+
     login.close().await;
     teardown(&admin, &n).await;
 }

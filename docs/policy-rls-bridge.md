@@ -3,7 +3,9 @@
 Written 12 November 2026. Status: **accepted 17 November 2026; phases 1
 and 2 built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
 `uuid` and `timestamptz` kinds; `policy!` `#[db]`, `update_check`,
-`exists`, `#[app_only]`, the decision 3 refusals).
+`exists`, `#[app_only]`, the decision 3 refusals). **Phase 5 built 18
+November 2026**: `brocanth_rls::agreement`, the `db { … }` clause, the
+`EXPLAIN` check (notes under decision 10).
 Phase 7 built: column grants for write masks with no guard (decision 9).
 Postgres only. §7 records the owner's answers.
 
@@ -108,6 +110,8 @@ A term with `never` drops out. A NULL guard setting makes the rule FALSE.
 Reason: a Rust `bool` has no third value; without the prefix, a missing
 `brocanth.banned` reads as "not banned". The form is boolean, not `CASE`,
 so the planner sees plain `AND`/`OR` (phase 5 checks the index is kept).
+Phase 5 found that a comparison keeps the index, and a guard chain does
+not: see the notes under decision 10.
 
 ### Decision 3: these shapes are refused, at compile time with `#[db]`, or at `rls make`.
 
@@ -385,6 +389,75 @@ obligation moves to CI, as PLAN.md §9 asks. Each test owns its schema.
 
 `brocanth-rls` runs it over fixed rules too, so this repo proves the
 translator.
+
+Built in phase 5 (18 November 2026). The API:
+
+```rust
+// brocanth-rls, feature `agreement`
+pub fn check<P: DbPolicy>(url: &str, subjects: &[P::Subject], cases: u32) -> Result<(), String>;
+pub fn run<P: DbPolicy>(url: Option<String>, subjects: &[P::Subject], cases: u32); // `db { … }` calls it
+pub fn test_database_url() -> Option<String>; // BROCANTH_TEST_DATABASE_URL
+```
+
+```rust
+db {
+    subjects: [Visitor::anonymous(), Visitor::user(1)],
+    cases: 64,                                   // optional, default 64
+    url: crate::plugins::rls::test_url(),        // optional: Option<String>
+}
+```
+
+`url` is the hook for an application: an expression of type
+`Option<String>`, `None` skips. Its default is `test_database_url()`. The
+scaffold (phase 6) points it at a function that reads `[db] url` through
+the settings layers. Reason: the macro cannot name the app's settings, and
+the compiler checks a path the scaffold writes.
+
+Changes to the sketch above, and what the harness found:
+
+- **The app side reads `rules()` resolved, not the `Policy` methods.**
+  With `#[db]` they are the same code (decision 2), and `update_check`
+  has no method. `create` uses `eval` on the candidate; a rule with
+  `exists` has no `eval`, so the harness asks the condition with the
+  candidate in the table.
+- **`UPDATE` has three outcomes**, not "rows affected": done, no row
+  (`USING`), or refused (`WITH CHECK`). The harness compares the outcome
+  with `update` on the stored row and `update_check` on the new row. The
+  new row is the next generated row's values.
+- **Postgres checks the new row of an `UPDATE` against the `SELECT`
+  policy too**, when the statement reads a column (`WHERE id = $1` does).
+  So `update_check` must stay inside `list OR view`, as `update` must. The
+  harness fails with a `help:` line on either.
+- **Bug found: an empty text attribute.** `identity()` sets an absent
+  value to `''`, and a transaction cannot unset a setting. So a subject
+  with `role: String::new()` was "absent" in the database and `""` in the
+  application: `who.role == "lead" => …` took the next arm in the app and
+  denied the whole rule in the database. Fixed in phase 1's
+  `Attributes::set`: an empty text is `None`, in both places. Reason:
+  `''` is the only absence marker a setting has; an encoding for text
+  settings would change every hand-written `Setting` reader.
+- **A link table needs `SELECT` for the role.** The `exists` subquery of
+  a policy runs as the request's role. `from_rules` grants the policy's
+  table only; grant the link table in `schema()` (its own policy, or a
+  plain grant). The harness grants it.
+- **The index is kept for a comparison with a setting** (`EXPLAIN` in
+  `brocanth-rls/tests/bridge_postgres.rs`, `bigint` and `uuid`): the
+  setting read is `STABLE`, so it is an index condition. **A guard chain
+  loses it.** `s(admin) IS NOT NULL AND (admin OR (NOT admin AND col =
+  s(x)))` plans as a sequential scan: the planner cannot know `admin` at
+  plan time, and the `admin` arm reads no column. Measured on Postgres 16
+  with 50 000 rows. A rule without guards keeps the index.
+- **Each case** creates its own schema; each run creates two roles,
+  `brocanth_agree_<pid>_<n>_member` and `…_login` (`NOINHERIT`), and drops
+  them. The URL's user must be a superuser: it creates roles and reads
+  around the policies.
+- **An `#[app_only]` command is left out**, with a note on stderr: it has
+  no database rule to compare. So is a write command whose unguarded mask
+  permits no column (phase 7): the application writes nothing.
+- **Write masks (phase 7).** An `UPDATE` sets only the columns of an
+  unguarded `writable` mask, as the application does. An `INSERT` writes
+  every column, so the harness grants `INSERT` on the whole table: it
+  compares rows, and `tests/masks.rs` tests the column grants.
 
 ## 5. Generated code, migrations, and what stays manual
 

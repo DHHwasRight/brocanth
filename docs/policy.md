@@ -19,6 +19,8 @@ brocanth-policy = { version = "0.1", features = ["macro"] }
 [dev-dependencies]
 # Only if a policy has an `eval { … }` clause.
 brocanth-policy = { version = "0.1", features = ["macro", "agreement-proptest"] }
+# Only if a policy has a `db { … }` clause.
+brocanth-rls = { version = "0.1", features = ["agreement"] }
 ```
 
 The macro emits `::brocanth_policy::…` paths, so the application depends on
@@ -338,7 +340,13 @@ It cannot run Rust. Each refusal is a compile error on your token, with a
 
 A guard reads a `bool` attribute or compares one with a literal. A
 `who.f` with no `else` must be a non-`Option` field: the database denies
-when its setting is missing. The types are checked as without `#[db]`:
+when its setting is missing.
+
+**An empty text is absent.** A setting cannot tell `''` from "not set",
+so `Attributes` stores an empty `String` attribute as absent, in the
+application too. A guard over an absent attribute denies the whole rule:
+with `role: String::new()`, `who.role == "lead" => …` denies, it does not
+take the next arm. Give a role a non-empty value, such as `"guest"`. The types are checked as without `#[db]`:
 `status == who.user_id` does not compile.
 
 ### `eval { … }`: the agreement test
@@ -367,6 +375,46 @@ from the values the rules compare against, so near-misses are common.
 `database` is the application's function: create the table, insert the rows,
 answer the query. The macro does not know your driver. See
 `crates/brocanth-policy-macros/tests/postgres/mod.rs` for one in fifty lines.
+
+### `db { … }`: the database agreement test
+
+docs/policy-rls-bridge.md, decision 10: with `#[db]`, the application's
+`condition()` and the database policy must admit the same rows. Opt in,
+and the macro emits the test:
+
+```rust
+#[db]
+pub policy PostPolicy(who: &Visitor) for Post {
+    list: …,
+    db {
+        subjects: [Visitor::anonymous(), Visitor::user(1), Visitor::admin()],
+        cases: 64,                          // optional, default 64
+        url: crate::tests::database_url(),  // optional: an Option<String>
+    }
+}
+```
+
+The emitted `#[cfg(test)]` test calls `brocanth_rls::agreement::run`. Per
+case, it creates a schema, the table from the entity's column types, the
+link tables of each `exists`, and the policies `rls make` writes. It
+inserts generated rows (with `NULL`s and near-misses) and, for each
+subject, compares `SELECT`, `INSERT`, `UPDATE` and `DELETE` as the
+application and as the database. On a difference, it prints the subject,
+the rows and both SQL texts. docs/rls.md §5 has the details.
+
+`url` is an expression of type `Option<String>`. With `None`, the test
+prints `!! SKIPPED` and passes. Without `url`, it reads
+`BROCANTH_TEST_DATABASE_URL`. In an application, point it at the
+`[db] url` of the settings. The URL's user must be a superuser: the test
+creates roles and reads around the policies.
+
+Keep `update`, `delete` and `update_check` inside `list` (or `view`).
+Postgres applies the `SELECT` policy to an `UPDATE` or `DELETE` that reads
+a column, and to the new row of the `UPDATE`. The test fails, with a
+`help:` line, when a rule reaches a row outside it.
+
+`db { … }` needs `#[db]`: without it, the macro refuses the clause. An
+`#[app_only]` command is left out of the test.
 
 ## Before and after
 
@@ -610,3 +658,9 @@ compiler's output.
   needs a `{ … }` block with `Membership`, and so is not `#[db]`.
 * **The `eval` test needs `agreement-proptest`.** Without the feature, the
   test fails to compile with "cannot find function `policy_agrees`".
+* **The `db` test needs `brocanth-rls` with `agreement`** in the
+  dev-dependencies. Without it, the test fails to compile on
+  `brocanth_rls::agreement`.
+* **A guard chain loses the column's index** in the database policy: the
+  planner cannot read a setting at plan time. A rule without guards keeps
+  it (docs/policy-rls-bridge.md, decision 10 notes).

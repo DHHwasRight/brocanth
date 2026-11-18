@@ -63,11 +63,18 @@ brocanth_policy::policy! {
             who.admin => except [id],
             { brocanth_policy::FieldMask::only([PostColumn::Status]) },
         }
+        // A test only: `#[cfg(test)]`, so `brocanth_rls` need not be here.
+        db {
+            subjects: [Visitor::default()],
+            cases: 8,
+            url: std::env::var("APP_DATABASE_URL").ok(),
+        }
     }
 
     #[db]
     pub policy Public(_: &Visitor) for Post {
         list: status == "published",
+        db { subjects: [Visitor::default()] }
     }
 }
 

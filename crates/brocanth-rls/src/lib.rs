@@ -16,12 +16,16 @@
 //! - [`catalog::drift`]: the live database against a snapshot.
 //! - [`identity()`]: a policy subject as the [`DbIdentity`] a request runs
 //!   as.
+//! - `agreement` (feature `agreement`): the test that a `DbPolicy`'s
+//!   database policies admit the rows its `condition()` admits.
 //!
 //! The design and its rejected alternatives are in `docs/rls.md`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "agreement")]
+pub mod agreement;
 #[cfg(feature = "runtime")]
 mod bridge;
 #[cfg(feature = "runtime")]

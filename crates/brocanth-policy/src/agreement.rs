@@ -158,7 +158,7 @@ where
 }
 
 #[cfg(feature = "agreement-proptest")]
-pub use policy_test::policy_agrees;
+pub use policy_test::{policy_agrees, pool};
 
 #[cfg(feature = "agreement-proptest")]
 mod policy_test;

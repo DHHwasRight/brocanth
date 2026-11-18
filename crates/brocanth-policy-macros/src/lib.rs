@@ -24,6 +24,10 @@
 //!   checks the type and returns the same `Bound` as `value.into()`.
 //! * `eval { … }` emits one `#[cfg(test)]` test that calls
 //!   `agreement::policy_agrees` (PLAN.md §9 obligation 1).
+//! * `db { … }`, on a `#[db]` policy, emits one `#[cfg(test)]` test that
+//!   calls `brocanth_rls::agreement::run` (docs/policy-rls-bridge.md,
+//!   decision 10). The application's tests need `brocanth-rls` with the
+//!   `agreement` feature.
 //! * `exists Link(fk == col, …)` emits the `Membership::new(…).filter_by(…)`
 //!   chain a person writes by hand.
 //! * `#[db]` on a policy (docs/policy-rls-bridge.md) also emits
@@ -179,6 +183,8 @@ struct PolicyDecl {
     rules: Vec<(Ident, Rule<PredExpr>)>,
     masks: Vec<(Ident, Rule<MaskExpr>)>,
     eval: Option<EvalClause>,
+    /// `db { … }`: the database agreement test (bridge decision 10).
+    db_test: Option<DbClause>,
 }
 
 /// Guards, then a fallback. `cond => then,` is `if cond { return then; }`.
@@ -250,12 +256,22 @@ struct EvalClause {
     cases: Option<LitInt>,
 }
 
+/// `db { subjects: […], cases: N, url: <expr> }`.
+struct DbClause {
+    span: Span,
+    subjects: Expr,
+    cases: Option<LitInt>,
+    /// `Option<String>`: the database URL. Default:
+    /// `brocanth_rls::agreement::test_database_url()`.
+    url: Option<Expr>,
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
 const RULES: &str =
-    "list, view, create, update, update_check, delete, writable, writable_on_create, eval";
+    "list, view, create, update, update_check, delete, writable, writable_on_create, eval, db";
 
 impl Parse for Input {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -464,6 +480,7 @@ fn parse_policy(
     let mut rules: Vec<(Ident, Rule<PredExpr>)> = Vec::new();
     let mut masks: Vec<(Ident, Rule<MaskExpr>)> = Vec::new();
     let mut eval = None;
+    let mut db_test = None;
     while !content.is_empty() {
         let attrs = content.call(Attribute::parse_outer)?;
         let (attrs, app_only) = take_app_only(attrs)?;
@@ -485,7 +502,8 @@ fn parse_policy(
         }
         let seen = rules.iter().any(|(r, _)| *r == rule)
             || masks.iter().any(|(r, _)| *r == rule)
-            || (label == "eval" && eval.is_some());
+            || (label == "eval" && eval.is_some())
+            || (label == "db" && db_test.is_some());
         if seen {
             return Err(syn::Error::new(
                 rule.span(),
@@ -510,6 +528,15 @@ fn parse_policy(
                     ));
                 }
                 eval = Some(parse_eval(&content, &rule)?);
+            }
+            "db" => {
+                if let Some(attr) = attrs.first() {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "`db` takes no attributes\nhelp: put the comment on the policy",
+                    ));
+                }
+                db_test = Some(parse_db_clause(&content, &rule)?);
             }
             _ => {
                 let help = if label == "read" {
@@ -536,6 +563,7 @@ fn parse_policy(
         rules,
         masks,
         eval,
+        db_test,
     })
 }
 
@@ -722,6 +750,44 @@ fn parse_eval(input: ParseStream, rule: &Ident) -> syn::Result<EvalClause> {
         })?,
         dialect: dialect.unwrap_or_else(|| Ident::new("Postgres", rule.span())),
         cases,
+    })
+}
+
+fn parse_db_clause(input: ParseStream, rule: &Ident) -> syn::Result<DbClause> {
+    let content;
+    braced!(content in input);
+    let mut subjects = None;
+    let mut cases = None;
+    let mut url = None;
+    while !content.is_empty() {
+        let field: Ident = content.parse()?;
+        content.parse::<Token![:]>()?;
+        let tokens = until_comma(&content)?;
+        if !content.is_empty() {
+            content.parse::<Token![,]>()?;
+        }
+        match field.to_string().as_str() {
+            "subjects" => subjects = Some(syn::parse2::<Expr>(tokens)?),
+            "cases" => cases = Some(syn::parse2::<LitInt>(tokens)?),
+            "url" => url = Some(syn::parse2::<Expr>(tokens)?),
+            other => {
+                return Err(syn::Error::new(
+                    field.span(),
+                    format!("`{other}` is not a `db` field\nhelp: use `subjects`, and optionally `cases` and `url`"),
+                ))
+            }
+        }
+    }
+    Ok(DbClause {
+        span: rule.span(),
+        subjects: subjects.ok_or_else(|| {
+            syn::Error::new(
+                rule.span(),
+                "`db` has no `subjects`\nhelp: list the subjects to test, for example `subjects: [Visitor::anonymous(), Visitor::admin()]`",
+            )
+        })?,
+        cases,
+        url,
     })
 }
 
@@ -1254,6 +1320,11 @@ fn expand_entity(entity: &EntityDecl) -> TokenStream2 {
         let ty = &c.ty;
         quote_spanned!(ty.span()=> Self::#variant => <#ty as ::brocanth_policy::typed::ColumnType>::key(n))
     });
+    let sql_types = columns.iter().map(|c| {
+        let variant = c.variant();
+        let ty = &c.ty;
+        quote_spanned!(ty.span()=> Self::#variant => <#ty as ::brocanth_policy::typed::ColumnType>::SQL_TYPE)
+    });
     let sorts = columns.iter().map(|c| {
         let variant = c.variant();
         let ty = &c.ty;
@@ -1320,6 +1391,12 @@ fn expand_entity(entity: &EntityDecl) -> TokenStream2 {
             fn key(&self, n: i64) -> ::brocanth_policy::Value {
                 match self {
                     #(#keys,)*
+                }
+            }
+
+            fn sql_type(&self) -> &'static str {
+                match self {
+                    #(#sql_types,)*
                 }
             }
         }
@@ -1439,6 +1516,7 @@ fn expand_policy(
         rules,
         masks,
         eval,
+        db_test,
         ..
     } = policy;
     let entity_name = &entity.name;
@@ -1450,6 +1528,15 @@ fn expand_policy(
     let column_enum = &columns.enum_name;
 
     let mut errors: Option<syn::Error> = None;
+    if let (None, Some(clause)) = (db, db_test) {
+        push_error(
+            &mut errors,
+            syn::Error::new(
+                clause.span,
+                "`db { … }` needs `#[db]`\nhelp: put `#[db]` on the policy: the `db` test compares its rules with the database policy, and only a `#[db]` policy has one",
+            ),
+        );
+    }
     if db.is_none() {
         for (action, rule) in rules {
             if action == "update_check" {
@@ -1600,6 +1687,9 @@ fn expand_policy(
     }
 
     let test = eval.as_ref().map(|eval| expand_eval(eval, name));
+    let db_test = db_test
+        .as_ref()
+        .map(|clause| expand_db_clause(clause, name));
 
     Ok(quote! {
         #doc
@@ -1616,6 +1706,8 @@ fn expand_policy(
         #db_impl
 
         #test
+
+        #db_test
     })
 }
 
@@ -2241,6 +2333,48 @@ fn expand_eval(eval: &EvalClause, policy: &Ident) -> TokenStream2 {
                 {
                     ::std::panic!("eval() and condition() disagree for `{}`:\n{}", ::std::stringify!(#policy), failure);
                 }
+            }
+        }
+    }
+}
+
+/// The `#[test]` of `db { … }`: docs/policy-rls-bridge.md, decision 10.
+fn expand_db_clause(clause: &DbClause, policy: &Ident) -> TokenStream2 {
+    let DbClause {
+        span,
+        subjects,
+        cases,
+        url,
+    } = clause;
+    let module = format_ident!(
+        "__brocanth_policy_db_{}",
+        policy.to_string().to_snake_case()
+    );
+    let cases = match cases {
+        Some(lit) => lit.to_token_stream(),
+        None => quote!(64),
+    };
+    let url = match url {
+        Some(url) => url.to_token_stream(),
+        None => quote!(::brocanth_rls::agreement::test_database_url()),
+    };
+    let test = Ident::new("database_agrees_with_the_policy", *span);
+    quote! {
+        #[cfg(test)]
+        mod #module {
+            #[allow(unused_imports)]
+            use super::*;
+
+            /// docs/policy-rls-bridge.md, decision 10: the database policy
+            /// admits the rows `condition()` admits, for each command.
+            #[test]
+            fn #test() {
+                let subjects = #subjects;
+                ::brocanth_rls::agreement::run::<super::#policy>(
+                    #url,
+                    ::std::convert::AsRef::<[_]>::as_ref(&subjects),
+                    #cases,
+                );
             }
         }
     }

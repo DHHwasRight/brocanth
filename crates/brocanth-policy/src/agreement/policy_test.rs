@@ -112,8 +112,13 @@ where
     result.map_err(|e| e.to_string())
 }
 
-/// The values a column takes in generated rows.
-fn pool<'a, C: TypedColumn + 'a>(
+/// The values a column takes in generated rows: a few of its type
+/// ([`TypedColumn::samples`]), and every value `rules` compare it against,
+/// so near-misses are common. No `NULL` for a `NOT NULL` column.
+///
+/// [`policy_agrees`] draws its cells from it, and so does the database
+/// agreement test of `brocanth-rls`.
+pub fn pool<'a, C: TypedColumn + 'a>(
     column: C,
     rules: impl Iterator<Item = &'a Pred<C>>,
 ) -> Vec<Value> {

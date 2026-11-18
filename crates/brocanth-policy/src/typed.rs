@@ -96,6 +96,10 @@ pub trait ColumnType {
     /// `true` for `Option<T>`: the column can hold `NULL`.
     const NULLABLE: bool;
 
+    /// The PostgreSQL type of the column, as `CREATE TABLE` writes it. The
+    /// agreement test of `brocanth-rls` creates the table from it.
+    const SQL_TYPE: &'static str;
+
     /// A few values of this type, for the agreement test of PLAN.md §9
     /// obligation 1. Includes [`Value::Null`] when the column is nullable.
     fn samples() -> Vec<Value>;
@@ -105,10 +109,11 @@ pub trait ColumnType {
 }
 
 macro_rules! column_types {
-    ($($ty:ty => $kind:ty, [$($sample:expr),*], |$n:ident| $key:expr;)*) => {$(
+    ($($ty:ty => $kind:ty, $sql:literal, [$($sample:expr),*], |$n:ident| $key:expr;)*) => {$(
         impl ColumnType for $ty {
             type Kind = $kind;
             const NULLABLE: bool = false;
+            const SQL_TYPE: &'static str = $sql;
             fn samples() -> Vec<Value> {
                 vec![$(Value::from($sample)),*]
             }
@@ -120,23 +125,23 @@ macro_rules! column_types {
 }
 
 column_types! {
-    i8 => Int, [0i8, 1i8, 2i8], |n| Value::Int(n);
-    i16 => Int, [0i16, 1i16, 2i16], |n| Value::Int(n);
-    i32 => Int, [0i32, 1i32, 2i32], |n| Value::Int(n);
-    i64 => Int, [0i64, 1i64, 2i64], |n| Value::Int(n);
-    u8 => Int, [0u8, 1u8, 2u8], |n| Value::Int(n);
-    u16 => Int, [0u16, 1u16, 2u16], |n| Value::Int(n);
-    u32 => Int, [0u32, 1u32, 2u32], |n| Value::Int(n);
-    f32 => Float, [0.0f32, 1.5f32], |n| Value::Float(n as f64);
-    f64 => Float, [0.0f64, 1.5f64], |n| Value::Float(n as f64);
-    bool => Bool, [false, true], |n| Value::Bool(n % 2 == 1);
-    String => Text, ["", "a"], |n| Value::Text(n.to_string());
-    Vec<u8> => Bytes, [Vec::<u8>::new(), vec![1u8]], |n| Value::Bytes(n.to_be_bytes().to_vec());
+    i8 => Int, "smallint", [0i8, 1i8, 2i8], |n| Value::Int(n);
+    i16 => Int, "smallint", [0i16, 1i16, 2i16], |n| Value::Int(n);
+    i32 => Int, "integer", [0i32, 1i32, 2i32], |n| Value::Int(n);
+    i64 => Int, "bigint", [0i64, 1i64, 2i64], |n| Value::Int(n);
+    u8 => Int, "smallint", [0u8, 1u8, 2u8], |n| Value::Int(n);
+    u16 => Int, "integer", [0u16, 1u16, 2u16], |n| Value::Int(n);
+    u32 => Int, "bigint", [0u32, 1u32, 2u32], |n| Value::Int(n);
+    f32 => Float, "real", [0.0f32, 1.5f32], |n| Value::Float(n as f64);
+    f64 => Float, "double precision", [0.0f64, 1.5f64], |n| Value::Float(n as f64);
+    bool => Bool, "boolean", [false, true], |n| Value::Bool(n % 2 == 1);
+    String => Text, "text", ["", "a"], |n| Value::Text(n.to_string());
+    Vec<u8> => Bytes, "bytea", [Vec::<u8>::new(), vec![1u8]], |n| Value::Bytes(n.to_be_bytes().to_vec());
 }
 
 #[cfg(feature = "uuid")]
 column_types! {
-    uuid::Uuid => Uuid,
+    uuid::Uuid => Uuid, "uuid",
         [uuid::Uuid::nil(), uuid::Uuid::from_u128(1), uuid::Uuid::max()],
         |n| Value::Uuid((n as u128).to_be_bytes());
 }
@@ -145,7 +150,7 @@ column_types! {
 // a near-miss on either side of a comparison is common.
 #[cfg(feature = "chrono")]
 column_types! {
-    chrono::DateTime<chrono::Utc> => Timestamptz,
+    chrono::DateTime<chrono::Utc> => Timestamptz, "timestamptz",
         [Value::Timestamptz(0), Value::Timestamptz(1), Value::Timestamptz(-1_000_000)],
         |n| Value::Timestamptz(n);
 }
@@ -153,6 +158,7 @@ column_types! {
 impl<T: ColumnType> ColumnType for Option<T> {
     type Kind = T::Kind;
     const NULLABLE: bool = true;
+    const SQL_TYPE: &'static str = T::SQL_TYPE;
     fn samples() -> Vec<Value> {
         let mut out = T::samples();
         out.push(Value::Null);
@@ -282,4 +288,7 @@ pub trait TypedColumn: Column {
 
     /// The `n`th value of this column when it is the primary key.
     fn key(&self, n: i64) -> Value;
+
+    /// The PostgreSQL type of the column: [`ColumnType::SQL_TYPE`].
+    fn sql_type(&self) -> &'static str;
 }

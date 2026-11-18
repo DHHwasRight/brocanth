@@ -21,6 +21,12 @@ thiserror = { version = "2", optional = true }
 # settings (decision 6). Under `runtime` only: the CLI builds `scaffold`
 # alone and links no policy algebra.
 brocanth-policy = { workspace = true, optional = true }
+# `agreement`: the test of docs/policy-rls-bridge.md decision 10. It draws
+# rows with the generator of `brocanth_policy::agreement` (proptest), and
+# runs its own runtime, so a plain `#[test]` can call it. Optional and off:
+# an application turns it on for its tests only.
+proptest = { version = "1", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 
 # `src/scaffold.rs` is the module `brocanth create` offers under the key
 # `rls`. Optional and off: only the CLI asks for `features = ["scaffold"]`.
@@ -29,7 +35,7 @@ brocanth-scaffold = { workspace = true, optional = true }
 # `tests/scaffold.rs`: the module, generated into a project by the CLI's own
 # generator. A cycle through dev-dependencies, which cargo allows.
 [dev-dependencies]
-brocanth-rls = { path = ".", features = ["scaffold"] }
+brocanth-rls = { path = ".", features = ["scaffold", "agreement"] }
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -51,6 +57,9 @@ default = ["runtime"]
 # alone, so `brocanth create` links no driver to write a project that has one.
 runtime = ["dep:brocanth-db", "dep:brocanth-policy", "dep:serde", "dep:serde_json", "dep:thiserror"]
 scaffold = ["dep:brocanth-scaffold"]
+# The agreement harness: `agreement::check` and what the `db { … }` clause
+# of `policy!` calls. For an application's dev-dependencies.
+agreement = ["runtime", "brocanth-policy/agreement-proptest", "dep:proptest", "dep:tokio"]
 
 [lints.rust]
 missing_docs = "warn"

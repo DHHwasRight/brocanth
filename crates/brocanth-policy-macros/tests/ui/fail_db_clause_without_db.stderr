@@ -1,0 +1,6 @@
+error: `db { … }` needs `#[db]`
+       help: put `#[db]` on the policy: the `db` test compares its rules with the database policy, and only a `#[db]` policy has one
+  --> tests/ui/fail_db_clause_without_db.rs:18:9
+   |
+18 |         db { subjects: [Visitor::default()] }
+   |         ^^
