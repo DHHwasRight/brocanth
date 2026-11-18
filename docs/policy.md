@@ -360,8 +360,10 @@ Schema::new()
 
 Then `rls make <name>` writes the migration, and `rls diff` (in CI) fails
 while a rule edit has no migration. `brocanth create` with `policy` and
-`rls` writes this: the example `PostPolicy` is `#[db]`, and its
-`update_check` lets an author publish a draft. See `docs/rls.md` §5.
+`rls` writes this: the example `PostPolicy` is `#[db]`, its
+`update_check` lets an author publish a draft, and its `db { … }` clause
+reads `[db] url` through `crate::plugins::rls::agreement_url()`. See
+`docs/rls.md` §5.
 
 ### `eval { … }`: the agreement test
 

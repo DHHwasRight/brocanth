@@ -51,8 +51,11 @@ Files:
   `.policies(Policy::from_rules::<PostPolicy>(&app_user()))`: the rules of
   the `#[db]` example policy, as database policies on `posts`
   (`docs/policy-rls-bridge.md`). The file also holds the `RowSecurity`
-  plugin and `identity(ctx)`; with [`admin-model`](admin-model.md) too,
-  `staff`.
+  plugin, `identity(ctx)`, and `agreement_url()`, the database of the
+  example's `db { … }` agreement test (`[db] url`; its user must be a
+  superuser; `None` when nothing answers there). With `policy`,
+  `brocanth-rls` takes its `agreement` feature. With
+  [`admin-model`](admin-model.md) too, `staff`.
 - `src/commands/rls.rs`: the `rls` command.
 
 Slots:

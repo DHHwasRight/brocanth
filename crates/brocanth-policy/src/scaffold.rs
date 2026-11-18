@@ -77,6 +77,10 @@ impl Module for Authorisation {
             "realtime",
             "the docs say where a rule joins a broadcast key",
         )
+        .adapts_to(
+            "rls",
+            "the example policy gets a `db { … }` clause: `cargo test` compares it with its database policies on `[db] url`",
+        )
         .asked_in(
             "doors",
             "Authorisation rules that compile into the WHERE clause",
@@ -114,10 +118,12 @@ impl Module for Authorisation {
     }
 }
 
-// Bridge phase 5 (the agreement harness): when `policy!` takes a
-// `db { … }` clause, put one on `PostPolicy` below, after `writable_on_create`
-// (docs/policy-rls-bridge.md, decisions 10 and 11).
 fn plugin_rs(project: &Project) -> String {
+    // With `rls`, the database enforces the rules too, so the example
+    // carries the agreement test (docs/policy-rls-bridge.md, decision 10).
+    // `rls` turns on `brocanth-rls`'s `agreement` feature, which the test
+    // calls, and writes `agreement_url`.
+    let agreement = if project.has("rls") { DB_CLAUSE } else { "" };
     // One extra paragraph when the broker is here, because this is the pair
     // §10 is about and a reader with both should be told where the join is.
     let realtime = if project.has("realtime") {
@@ -303,7 +309,7 @@ brocanth_policy::policy! {{
         writable_on_create {{
             who.admin => except [id],
             only [body, author_id],
-        }}
+        }}{agreement}
     }}
 }}
 
@@ -467,3 +473,22 @@ mod tests {{
 "##
     )
 }
+
+/// The `db { … }` clause of the example policy, with `rls`: the agreement
+/// test. Inside `policy!`, where rustfmt does not reach, so it is written
+/// in the shape a person would keep.
+const DB_CLAUSE: &str = r#"
+        // The agreement test, run by `cargo test`: on a real Postgres, the
+        // database policies `rls make` writes admit the rows `condition()`
+        // admits, for each subject below and each command. It reads `[db]
+        // url` through every settings layer, and its user must be a
+        // superuser: the test creates roles and reads around the policies.
+        // With no database there, it prints `!! SKIPPED` and passes.
+        db {
+            subjects: [
+                Visitor::anonymous(),
+                Visitor { account_id: Some(1), admin: false },
+                Visitor { account_id: None, admin: true },
+            ],
+            url: crate::plugins::rls::agreement_url(),
+        }"#;

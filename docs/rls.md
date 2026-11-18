@@ -475,6 +475,8 @@ Schema::new()
 `brocanth create` writes this for a project with `rls` and `policy`: the
 policy scaffold's `PostPolicy` is `#[db]`, with an `update_check` that lets
 an author publish a draft, and `src/plugins/rls/mod.rs` reads it by path.
+The example's `db { … }` clause runs the agreement test in `cargo test`, on
+`[db] url` (`agreement_url()`), and skips when nothing answers there.
 The first `rls make` alters `posts`, so the table must exist before
 `migrate up`.
 

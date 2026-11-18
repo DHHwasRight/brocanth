@@ -68,8 +68,14 @@ impl Module for Rls {
             "resource",
             "AGENTS.md says how a resource runs each operation as the request's identity",
         )
+        // `agreement`: with `policy`, the example policy's `db { … }`
+        // clause runs `brocanth_rls::agreement` in `cargo test`. A normal
+        // dependency feature, because a module cannot write a
+        // `[dev-dependencies]` line: the server compiles proptest and links
+        // none of it (the test is `#[cfg(test)]`).
         .krate(
             Dep::brocanth("brocanth-rls")
+                .feature_with("policy", "agreement")
                 .note("roles, grants and policies in Rust, diffed into migrations"),
         )
         .after("model")
@@ -143,6 +149,7 @@ fn schema_rs(project: &Project) -> String {
         .replace("@IDENTITY_DOC@", IDENTITY_DOC_POLICY)
         .replace("@SCHEMA@", SCHEMA_FN_POLICY);
     out.push_str(REQUEST_RS);
+    out.push_str(AGREEMENT_RS);
     if project.has("admin-model") {
         out.push_str(STAFF_RS);
     }
@@ -352,6 +359,47 @@ impl Plugin for RowSecurity {
         let who = state.get::<Visitor>().unwrap_or(&anonymous);
         cx.insert(Identity(brocanth_rls::identity(&app_user(), who)));
     }
+}
+"#;
+
+/// With `policy`: the database of the example policy's agreement test.
+const AGREEMENT_RS: &str = r#"
+/// The database the `db { … }` agreement test of a `#[db]` policy runs on
+/// (`src/plugins/policy/mod.rs`): `[db] url`, through every settings layer,
+/// as `rls check` reads it. Its user must be a superuser: the test creates
+/// roles and reads around the policies. CI's Postgres service is one.
+///
+/// `None`, and the test prints `!! SKIPPED`, when the URL is empty or
+/// nothing answers at its host and port within a second: `cargo test`
+/// passes on a machine with no Postgres running.
+#[cfg(test)]
+pub fn agreement_url() -> Option<String> {
+    use std::net::{TcpStream, ToSocketAddrs as _};
+    use std::str::FromStr as _;
+
+    let layers = crate::plugins::layers().unwrap_or_else(|e| panic!("{e}"));
+    let url = crate::plugins::db_settings(&layers)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .url;
+    if url.trim().is_empty() {
+        return None;
+    }
+    let options = brocanth_db::sqlx::postgres::PgConnectOptions::from_str(&url)
+        .unwrap_or_else(|e| panic!("[db] url: {e}\nhelp: write a postgres:// URL"));
+    let (host, port) = (options.get_host(), options.get_port());
+    // A Unix socket: no port to probe, so the test connects.
+    if host.starts_with('/') {
+        return Some(url);
+    }
+    let answers = (host, port)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .any(|addr| TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok());
+    if !answers {
+        eprintln!("note: nothing answers at {host}:{port}, the host of [db] url");
+    }
+    answers.then_some(url)
 }
 "#;
 
@@ -592,6 +640,13 @@ A field a database policy reads is an `#[attr]` field of `Visitor` in
 change a rule, run `brocanth rls make <name>`. `brocanth rls diff` fails
 while `schema()` differs from `migrations/rls.json`, with no database, so
 CI runs it. A new `#[db]` policy needs its own `.policies(…)` line.
+
+`PostPolicy` has a `db { … }` clause: `cargo test` checks, on Postgres,
+that the database policies admit the rows `condition()` admits. It reads
+`[db] url` (`agreement_url` in `src/plugins/rls/mod.rs`), and the URL's
+user must be a superuser, because the test creates roles. When nothing
+answers at that URL, the test prints `!! SKIPPED` and passes. Give a new
+`#[db]` policy a `db { … }` clause too.
 
 A new project has no migration for `PostPolicy` yet, so `rls diff` fails
 until the first `rls make`. That migration alters `posts`: create the table

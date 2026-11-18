@@ -495,7 +495,22 @@ Built in phase 6 (18 November 2026), with these changes to the sketch:
   admits the author's row as a draft or published, and `writable` holds
   `body` and `status`. So an author may publish a draft, and the database
   refuses a change of owner.
-- The `db { … }` clause waits for phase 5.
+- With `rls`, the example has a `db { … }` clause over three subjects
+  (anonymous, an author, an admin). Its `url` is
+  `crate::plugins::rls::agreement_url()`: `[db] url` through every
+  settings layer, as `rls check` reads it, or `None` (`!! SKIPPED`) when
+  the URL is empty or nothing answers at its host and port within a
+  second. Reason: a config project always has a `[db] url`, so "no URL"
+  alone would fail `cargo test` on a machine with no Postgres. The URL's
+  user must be a superuser; the generated docs say so.
+- `brocanth-rls` takes the `agreement` feature as a normal dependency
+  feature when the project has `policy`: a module cannot write
+  `[dev-dependencies]`. The server compiles proptest and links none of it.
+- The agreement test compares the rules as data on both sides, so it does
+  not see a missing `update_check` when the app's `writable` mask permits
+  the change: without `update_check`, both sides read `update` and agree.
+  The project's own unit test (`an_author_publishes_a_draft_…`) covers the
+  example's case.
 - The project's own test checks that `schema().snapshot()` succeeds and
   that `check_identity` accepts the anonymous identity: a rule the
   database cannot check, or a key no policy reads, fails `cargo test`.

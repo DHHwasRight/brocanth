@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/policy.rs`. A setting is read at 
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`realtime`](realtime.md): the docs say where a rule joins a broadcast key |
+| Adapts to | [`realtime`](realtime.md): the docs say where a rule joins a broadcast key; [`rls`](rls.md): the example policy gets a `db { … }` clause: `cargo test` compares it with its database policies on `[db] url` |
 | Contributes | none |
 | Collects | none |
 | Exports | none |
@@ -47,7 +47,8 @@ Files:
   `PostPolicy`, a `#[db]` policy. An author edits a draft and may publish
   it: `update` admits a draft row, and `update_check` admits the row the
   update leaves, a draft or a published post. With [`rls`](rls.md),
-  `schema()` writes these rules as database policies.
+  `schema()` writes these rules as database policies, and the policy has
+  a `db { … }` clause: `cargo test` compares it with the database.
 
 Slots:
 

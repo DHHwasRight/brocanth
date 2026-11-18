@@ -27,7 +27,7 @@ brocanth-audit = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-mail = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["smtp", "serde", "postgres"] }  # the `Outbox` in src/plugins/mail, and SMTP with rustls
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["reqwest-client", "policy", "postgres", "admin"] }  # the provider requests: a token exchange and a profile read
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["macro"] }
-brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git" }  # roles, grants and policies in Rust, diffed into migrations
+brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["agreement"] }  # roles, grants and policies in Rust, diffed into migrations
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants", "postgres"] }
 brocanth-input = { git = "https://github.com/DHHwasRight/brocanth.git" }
 zod = { git = "https://github.com/DHHwasRight/zod.git", branch = "main" }  # the rules a field carries, and `#[derive(Entry)]`
@@ -18849,6 +18849,20 @@ brocanth_policy::policy! {
             who.admin => except [id],
             only [body, author_id],
         }
+        // The agreement test, run by `cargo test`: on a real Postgres, the
+        // database policies `rls make` writes admit the rows `condition()`
+        // admits, for each subject below and each command. It reads `[db]
+        // url` through every settings layer, and its user must be a
+        // superuser: the test creates roles and reads around the policies.
+        // With no database there, it prints `!! SKIPPED` and passes.
+        db {
+            subjects: [
+                Visitor::anonymous(),
+                Visitor { account_id: Some(1), admin: false },
+                Visitor { account_id: None, admin: true },
+            ],
+            url: crate::plugins::rls::agreement_url(),
+        }
     }
 }
 
@@ -20141,6 +20155,44 @@ impl Plugin for RowSecurity {
         let who = state.get::<Visitor>().unwrap_or(&anonymous);
         cx.insert(Identity(brocanth_rls::identity(&app_user(), who)));
     }
+}
+
+/// The database the `db { … }` agreement test of a `#[db]` policy runs on
+/// (`src/plugins/policy/mod.rs`): `[db] url`, through every settings layer,
+/// as `rls check` reads it. Its user must be a superuser: the test creates
+/// roles and reads around the policies. CI's Postgres service is one.
+///
+/// `None`, and the test prints `!! SKIPPED`, when the URL is empty or
+/// nothing answers at its host and port within a second: `cargo test`
+/// passes on a machine with no Postgres running.
+#[cfg(test)]
+pub fn agreement_url() -> Option<String> {
+    use std::net::{TcpStream, ToSocketAddrs as _};
+    use std::str::FromStr as _;
+
+    let layers = crate::plugins::layers().unwrap_or_else(|e| panic!("{e}"));
+    let url = crate::plugins::db_settings(&layers)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .url;
+    if url.trim().is_empty() {
+        return None;
+    }
+    let options = brocanth_db::sqlx::postgres::PgConnectOptions::from_str(&url)
+        .unwrap_or_else(|e| panic!("[db] url: {e}\nhelp: write a postgres:// URL"));
+    let (host, port) = (options.get_host(), options.get_port());
+    // A Unix socket: no port to probe, so the test connects.
+    if host.starts_with('/') {
+        return Some(url);
+    }
+    let answers = (host, port)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .any(|addr| TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok());
+    if !answers {
+        eprintln!("note: nothing answers at {host}:{port}, the host of [db] url");
+    }
+    answers.then_some(url)
 }
 
 /// Who a backoffice request runs as in the database: the member of staff,
@@ -22785,6 +22837,13 @@ change a rule, run `brocanth rls make <name>`. `brocanth rls diff` fails
 while `schema()` differs from `migrations/rls.json`, with no database, so
 CI runs it. A new `#[db]` policy needs its own `.policies(…)` line.
 
+`PostPolicy` has a `db { … }` clause: `cargo test` checks, on Postgres,
+that the database policies admit the rows `condition()` admits. It reads
+`[db] url` (`agreement_url` in `src/plugins/rls/mod.rs`), and the URL's
+user must be a superuser, because the test creates roles. When nothing
+answers at that URL, the test prints `!! SKIPPED` and passes. Give a new
+`#[db]` policy a `db { … }` clause too.
+
 A new project has no migration for `PostPolicy` yet, so `rls diff` fails
 until the first `rls make`. That migration alters `posts`: create the table
 in a migration of its own first, or remove the `.policies(…)` line.
@@ -22912,7 +22971,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 595b498e32a677ee -->
+<!-- brocanth-digest: 1722acb8994c09d6 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -23123,7 +23182,7 @@ kind = ["middleware"]
 files = ["src/modules/policy.rs", "src/plugins/policy/"]
 config = []
 crates = ["brocanth-policy"]
-adapted_to = ["realtime"]
+adapted_to = ["realtime", "rls"]
 
 [modules.rls]
 version = "0.1.0"
@@ -23509,4 +23568,4 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: 0e46f7704ecb57de
+# brocanth-digest: 9523a1f7bd085b53
