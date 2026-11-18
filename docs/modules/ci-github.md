@@ -28,7 +28,7 @@ An option is set at build time in `src/modules/ci_github.rs`. A setting is read 
 | Provides | none |
 | Requires | none |
 | Uses | `PgPool` (a Postgres pool): CI starts a database for the tests |
-| Adapts to | [`static`](static.md): CI keeps the exported site as an artifact; [`docker`](docker.md): CI builds the image |
+| Adapts to | [`static`](static.md): CI keeps the exported site as an artifact; [`docker`](docker.md): CI builds the image; [`rls`](rls.md): CI runs `rls diff`, which fails when `schema()` has a change no migration holds |
 | Contributes | none |
 | Collects | none |
 | Exports | none |
@@ -41,7 +41,11 @@ An option is set at build time in `src/modules/ci_github.rs`. A setting is read 
 
 Files:
 
-- `.github/workflows/ci.yml`
+- `.github/workflows/ci.yml`: `cargo fmt --check`, clippy and
+  `cargo test`. With a database, a Postgres service. With
+  [`rls`](rls.md), `cargo run -- rls diff`: it fails when `schema()` has
+  a change that no migration holds. With [`static`](static.md), the
+  export as an artifact. With [`docker`](docker.md), an image job.
 
 ## Settings
 

@@ -11496,6 +11496,10 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Fails when `schema()` in src/plugins/rls/mod.rs has a change that
+      # migrations/rls.json does not hold: run `rls make <name>` and commit
+      # the migration with the snapshot.
+      - run: cargo run -- rls diff
 
   image:
     runs-on: ubuntu-latest
@@ -18757,15 +18761,22 @@ use brocanth_policy::{Dialect, Policy};
 // A subject, an entity, and the rules about them
 // ---------------------------------------------------------------------------
 
-/// Whoever is asking. `brocanth-policy` never looks inside it.
+/// Whoever is asking.
 ///
 /// An anonymous visitor is this application's own `None`, turned into a
 /// decision at the point a rule reads it.
-#[derive(Clone, Debug, Default)]
+///
+/// A rule reads only the `#[attr]` fields. Each one is also a database
+/// setting, `brocanth.<field>`, of the field's type: `Subject` lists them
+/// for the row-level security of `PostPolicy`. A field without `#[attr]`
+/// never reaches the database.
+#[derive(Clone, Debug, Default, brocanth_policy::Subject)]
 pub struct Visitor {
     /// The signed-in account, when there is one.
+    #[attr]
     pub account_id: Option<i64>,
     /// Whether this one may see everything.
+    #[attr]
     pub admin: bool,
 }
 
@@ -18795,6 +18806,13 @@ brocanth_policy::policy! {
     /// cannot be done per object: a paginator that filters after reading lies
     /// about its totals. Every rule left out denies, which is what makes
     /// shipping this file as it stands safe rather than lucky.
+    ///
+    /// `#[db]`: the macro also emits the rules as data
+    /// (`brocanth_policy::DbPolicy`), so the database can enforce the same
+    /// rules as row-level security. The methods of `Policy` read that same
+    /// data, so the two cannot drift. A `#[db]` rule holds no Rust: a
+    /// `{ … }` block in a rule does not compile.
+    #[db]
     pub policy PostPolicy(who: &Visitor) for Post {
         // `else deny` is the word that says what an anonymous visitor's
         // missing id means: they own nothing.
@@ -18803,17 +18821,27 @@ brocanth_policy::policy! {
             status == "published" || author_id == who.account_id else deny,
         }
         create: author_id == who.account_id else deny,
+        // An author edits a draft, never a published post.
         update {
             who.admin => always,
-            author_id == who.account_id else deny,
+            author_id == who.account_id else deny && status == "draft",
+        }
+        // The row an update leaves: still the author's, as a draft or
+        // published. So an author may publish their draft. The database
+        // checks it (`UPDATE … WITH CHECK`); here, `writable` does that job.
+        // Without it, the check is `update`, and the database would refuse
+        // the publish that `writable` permits.
+        update_check {
+            who.admin => always,
+            author_id == who.account_id else deny && status in ["draft", "published"],
         }
         // Which columns an update may change. `update` says which rows; this
-        // says which columns. The author edits the body. Never the status,
-        // and never the owner: `update` reads the row as stored, so
-        // `author_id` here would let an author give a post to somebody else.
+        // says which columns. The author edits the body and the status.
+        // Never the owner: `update` reads the row as stored, so `author_id`
+        // here would let an author give a post to somebody else.
         writable {
             who.admin => except [id],
-            only [body],
+            only [body, status],
         }
         // Which columns a create may set. A create names its owner, and
         // `create` above admits only the author's own id.
@@ -18952,6 +18980,33 @@ mod tests {
             .expect("the update compiles");
         assert!(write.query().sql().contains("\"author_id\""));
         assert!(write.applied(0).is_err(), "zero rows is a lost race");
+    }
+
+    #[test]
+    fn an_author_publishes_a_draft_and_then_edits_it_no_more() {
+        use brocanth_policy::{DbPolicy, MapRow, Subject};
+
+        let ada = author(7);
+        let row = |status: &str| {
+            MapRow::new()
+                .with(PostColumn::AuthorId, 7_i64)
+                .with(PostColumn::Status, status)
+        };
+        // The stored row: `update` admits a draft, not a published post.
+        let update = PostPolicy.update(&ada);
+        assert!(update.admits(&row("draft")).expect("decided in memory"));
+        assert!(!update.admits(&row("published")).expect("decided in memory"));
+        // The status is a column the author may write.
+        assert_eq!(PostPolicy.writable(&ada).check(["status"]), Ok(()));
+
+        // The row the update leaves, as the database checks it: published
+        // is allowed, another author is not.
+        let check = PostPolicy::rules()
+            .update_check()
+            .resolve(&ada.attributes());
+        assert!(check.admits(&row("published")).expect("decided in memory"));
+        let given = row("published").with(PostColumn::AuthorId, 8_i64);
+        assert!(!check.admits(&given).expect("decided in memory"));
     }
 }
 ===== src/plugins/realtime/authorise.rs =====
@@ -19978,11 +20033,27 @@ impl PageError for Error {
 //! let posts: Vec<(i64, String)> = ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
 //! ```
 
-use brocanth_rls::Schema;
+use brocanth_rls::{Policy, Schema};
 
 /// Every role, table, function and policy row-level security needs.
+///
+/// `PostPolicy` is `#[db]`, so its rules are data. `Policy::from_rules`
+/// writes them as the policies of `posts` for [`app_user`]: `SELECT` from
+/// `list`, `INSERT` from `create`, `UPDATE` from `update` and
+/// `update_check`, and no `DELETE` (the rule denies). It grants each command
+/// that has a policy and forces row-level security on the table. The path
+/// is code: rename the policy, and this line does not compile.
+///
+/// A new `#[db]` policy needs one more `.policies(…)` line. The table must
+/// exist before `migrate up` applies the migration `rls make` writes.
 pub fn schema() -> Schema {
-    Schema::new().role(app_user())
+    Schema::new().role(app_user()).policies(
+        Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
+            // `posts.id` is a `bigserial`: an insert calls `nextval`, so
+            // `app_user` needs `USAGE` on the sequence. Remove the line when
+            // the key has no sequence.
+            .sequence("posts_id_seq"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -19992,7 +20063,6 @@ pub fn schema() -> Schema {
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::plugin_hooks::{Request, RequestState};
-use brocanth_policy::{Attr, AttrKind, AttrType, Attributes, Subject};
 use brocanth_rls::{DbIdentity, Role};
 
 use crate::plugins::policy::Visitor;
@@ -20006,33 +20076,6 @@ use crate::plugins::policy::Visitor;
 /// when the application does not connect as a superuser.
 pub fn app_user() -> Role {
     Role::new("app_user")
-}
-
-/// The attributes of `Visitor` a database policy may read: one setting
-/// each, `brocanth.<field>`, of the field's type.
-///
-/// Keep it in step with `Visitor` in `src/plugins/policy/mod.rs`: one entry
-/// per field a rule reads, in `ATTRS` and in `attributes`. A field that is
-/// not here never reaches the database.
-impl Subject for Visitor {
-    const ATTRS: &'static [Attr] = &[
-        Attr {
-            key: "account_id",
-            kind: AttrKind::BigInt,
-            optional: true,
-        },
-        Attr {
-            key: "admin",
-            kind: AttrKind::Boolean,
-            optional: false,
-        },
-    ];
-
-    fn attributes(&self) -> Attributes {
-        Attributes::new()
-            .with("account_id", self.account_id.attr_value())
-            .with("admin", self.admin.attr_value())
-    }
 }
 
 /// The request's database identity, on its typed context.
@@ -20129,6 +20172,21 @@ mod tests {
         assert_eq!(keys, ["account_id", "admin"]);
         assert_eq!(me.settings()[0].1, "");
         me.statements().expect("the identity is one Postgres takes");
+    }
+
+    /// `rls make` can write the schema: every rule of a `#[db]` policy
+    /// translates, and the identity sets only keys a policy reads, with the
+    /// role the schema creates. Without this, a typo reads as `NULL`.
+    #[test]
+    fn the_schema_translates_and_matches_the_identity() {
+        let schema = schema();
+        if let Err(e) = schema.snapshot() {
+            panic!("{e}");
+        }
+        let me = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
+        if let Err(e) = schema.check_identity(&me) {
+            panic!("{e}");
+        }
     }
 }
 ===== src/plugins/robots/mod.rs =====
@@ -22718,8 +22776,18 @@ let me = crate::plugins::rls::identity(ctx).expect("dispatched");
 ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
 ```
 
-A field a database policy reads is an entry in `impl Subject for Visitor`
-in that file: add it there when you add it to `Visitor`.
+A field a database policy reads is an `#[attr]` field of `Visitor` in
+`src/plugins/policy/mod.rs`. Each one is a setting, `brocanth.<field>`.
+
+`schema()` reads each `#[db]` policy by its path:
+`.policies(Policy::from_rules::<PostPolicy>(&app_user()))`. After you
+change a rule, run `brocanth rls make <name>`. `brocanth rls diff` fails
+while `schema()` differs from `migrations/rls.json`, with no database, so
+CI runs it. A new `#[db]` policy needs its own `.policies(…)` line.
+
+A new project has no migration for `PostPolicy` yet, so `rls diff` fails
+until the first `rls make`. That migration alters `posts`: create the table
+in a migration of its own first, or remove the `.policies(…)` line.
 
 The role and the values end with the transaction, so they never reach the
 next request on the same connection. A statement on `ctx.db()` outside
@@ -22844,7 +22912,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 1d2fe11ade07041d -->
+<!-- brocanth-digest: 595b498e32a677ee -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -23439,6 +23507,6 @@ kind = ["external"]
 files = ["src/modules/ci_github.rs", ".github/workflows/ci.yml"]
 config = []
 crates = []
-adapted_to = ["docker", "db"]
+adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: cc93a1bb114bf8ef
+# brocanth-digest: 0e46f7704ecb57de

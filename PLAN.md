@@ -864,3 +864,53 @@ request hook, in reverse declared order, whatever stopped the chain.
 off. Required means "may not be turned off"; the phase means "when it
 runs". Generated code stays explicit (ADR 1): each generated plugin writes
 its phase as a literal argument.
+
+### ADR 11 — One rule, two enforcers: a `#[db]` policy drives the `WHERE` and the database policy.
+
+**Status:** accepted (2026-11-17), built phases 1 to 4 and 6 (2026-11-18).
+**Touches:** `brocanth-policy` (`Subject`, `Rules`, `policy!` `#[db]`),
+`brocanth-rls` (`Policy::from_rules`, `identity`, `rls diff`),
+`brocanth-resource`, `brocanth-admin-model`, the `policy`, `rls` and
+`ci-github` scaffolds. **Design:** `docs/policy-rls-bridge.md`.
+
+The author writes a rule once, in `policy!`. With `#[db]`, the macro emits
+the rule as data (`Rules<E>`). The application resolves that data with the
+subject's values into `condition()` and `Verified`. `brocanth-rls`
+translates the same data into `CREATE POLICY`, with one setting per
+`#[attr]` field of the subject. `schema()` names each policy by its path:
+`.policies(Policy::from_rules::<PostPolicy>(&app_user()))`.
+
+**Why the macro and not the trait:** a hand-written `impl Policy` is Rust
+that must run with a concrete subject. A guard is an `if`, and a subject
+value folds into a literal. Only the macro still has the rule as syntax.
+A hand-written policy writes its database rule with `SqlExpr`.
+
+**Why one tree with two readers:** two expansions can drift through a
+macro bug. One tree drifts only where the readers differ, and the
+agreement test (phase 5) runs both readers on Postgres.
+
+**Decisions, each with its reason:**
+
+- A shape the database cannot check (a Rust block, `else allow` on an
+  attribute, `is` against an attribute, a list attribute) is a compile
+  error. `#[app_only("reason")]` keeps one rule in Rust, and `rls make`
+  refuses it until `.manual(…)` gives a database floor. Reason: an open or
+  closed default is wrong in one direction or the other, silently.
+- One role, `app_user`. "Admin" is a guard on a setting. Reason: a role per
+  kind of user costs a grant and a migration per kind, and the app sets
+  both the role and the setting, so neither is more trusted.
+- The identity sets every attribute, and `''` reads as `NULL`. A missing
+  value fails closed. Reason: "absent" means "anonymous" in both places.
+- `UPDATE … WITH CHECK` reads `update_check`, which defaults to `update`.
+  Reason: the database checks the new row, where the app has the
+  `writable` mask; a status change (draft to published) needs its own
+  check, and the scaffold's example shows it.
+- Write masks stay in the app (one role cannot hold a per-subject mask).
+- The resource and admin paths run each operation as the request's
+  identity. Reason: without it, the first forced table hides every row
+  from the backoffice.
+- `rls diff` fails when `schema()` differs from `migrations/rls.json`, and
+  the generated CI runs it. Reason: a rule edit without a migration moves
+  the app's `WHERE` and leaves the database on the old rule.
+- No registry of `#[db]` policies: one `.policies(…)` line each (ADR 1). A
+  forgotten line on a forced table fails closed.

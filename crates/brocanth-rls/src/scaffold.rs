@@ -16,13 +16,15 @@
 //! - A section in `AGENTS.md`: a request that reads tenant data runs in
 //!   `transact_as`.
 //!
-//! With `policy`, the file also builds the request's identity
-//! (docs/policy-rls-bridge.md, decision 6 and "How a request sets it"):
-//! `app_user()`, the one role every request runs as (decision 7), and the
-//! `RowSecurity` plugin, which puts `brocanth_rls::identity(&app_user(),
-//! &visitor)` on the typed context of each request. With `admin-model` too,
-//! `staff` is the identity the admin's data source runs each request as
-//! (decision 13).
+//! With `policy`, `schema()` reads the example policy by code reference
+//! (docs/policy-rls-bridge.md, decision 11): `Policy::from_rules` writes the
+//! rules of the `#[db]` `PostPolicy` as the database policies of `posts`.
+//! The file also builds the request's identity (decision 6 and "How a
+//! request sets it"): `app_user()`, the one role every request runs as
+//! (decision 7), and the `RowSecurity` plugin, which puts
+//! `brocanth_rls::identity(&app_user(), &visitor)` on the typed context of
+//! each request. With `admin-model` too, `staff` is the identity the admin's
+//! data source runs each request as (decision 13).
 //!
 //! Compiled only under the `scaffold` feature, which is off.
 
@@ -60,7 +62,7 @@ impl Module for Rls {
         )
         .adapts_to(
             "policy",
-            "the `RowSecurity` plugin puts the request's `DbIdentity`, built from the policy's `Visitor`, on the context",
+            "`schema()` writes the rules of the `#[db]` `PostPolicy` as database policies, and the `RowSecurity` plugin puts the request's `DbIdentity`, built from the policy's `Visitor`, on the context",
         )
         .adapts_to(
             "resource",
@@ -132,12 +134,14 @@ fn agents(project: &Project) -> String {
 fn schema_rs(project: &Project) -> String {
     if !project.has("policy") {
         return SCHEMA_RS
-            .replace("@ROLE@", "")
-            .replace("@IDENTITY_DOC@", IDENTITY_DOC);
+            .replace("@IDENTITY_DOC@", IDENTITY_DOC)
+            .replace("@SCHEMA@", SCHEMA_FN);
     }
+    // Bridge phase 7 (column grants for unguarded masks) changes what
+    // `Policy::from_rules` writes, not this line: re-bless the goldens.
     let mut out = SCHEMA_RS
-        .replace("@ROLE@", ".role(app_user())")
-        .replace("@IDENTITY_DOC@", IDENTITY_DOC_POLICY);
+        .replace("@IDENTITY_DOC@", IDENTITY_DOC_POLICY)
+        .replace("@SCHEMA@", SCHEMA_FN_POLICY);
     out.push_str(REQUEST_RS);
     if project.has("admin-model") {
         out.push_str(STAFF_RS);
@@ -197,12 +201,42 @@ const SCHEMA_RS: &str = r#"//! Row-level security: the roles, tables and policie
 //!     .policy(Policy::new("posts_tenant", &posts).to(&member).using(mine.clone()).with_check(mine))
 //! ```
 //!
-@IDENTITY_DOC@
+@IDENTITY_DOC@@SCHEMA@"#;
+
+/// `schema()` without `policy`: empty, for the first table.
+const SCHEMA_FN: &str = r#"
 use brocanth_rls::Schema;
 
 /// Every role, table, function and policy row-level security needs.
 pub fn schema() -> Schema {
-    Schema::new()@ROLE@
+    Schema::new()
+}
+"#;
+
+/// `schema()` with `policy`: the role, and the rules of the example policy
+/// as database policies (docs/policy-rls-bridge.md, decision 11).
+const SCHEMA_FN_POLICY: &str = r#"
+use brocanth_rls::{Policy, Schema};
+
+/// Every role, table, function and policy row-level security needs.
+///
+/// `PostPolicy` is `#[db]`, so its rules are data. `Policy::from_rules`
+/// writes them as the policies of `posts` for [`app_user`]: `SELECT` from
+/// `list`, `INSERT` from `create`, `UPDATE` from `update` and
+/// `update_check`, and no `DELETE` (the rule denies). It grants each command
+/// that has a policy and forces row-level security on the table. The path
+/// is code: rename the policy, and this line does not compile.
+///
+/// A new `#[db]` policy needs one more `.policies(…)` line. The table must
+/// exist before `migrate up` applies the migration `rls make` writes.
+pub fn schema() -> Schema {
+    Schema::new().role(app_user()).policies(
+        Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
+            // `posts.id` is a `bigserial`: an insert calls `nextval`, so
+            // `app_user` needs `USAGE` on the sequence. Remove the line when
+            // the key has no sequence.
+            .sequence("posts_id_seq"),
+    )
 }
 "#;
 
@@ -240,7 +274,6 @@ const REQUEST_RS: &str = r#"
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 use brocanth::plugin_hooks::{Request, RequestState};
-use brocanth_policy::{Attr, AttrKind, AttrType, Attributes, Subject};
 use brocanth_rls::{DbIdentity, Role};
 
 use crate::plugins::policy::Visitor;
@@ -254,33 +287,6 @@ use crate::plugins::policy::Visitor;
 /// when the application does not connect as a superuser.
 pub fn app_user() -> Role {
     Role::new("app_user")
-}
-
-/// The attributes of `Visitor` a database policy may read: one setting
-/// each, `brocanth.<field>`, of the field's type.
-///
-/// Keep it in step with `Visitor` in `src/plugins/policy/mod.rs`: one entry
-/// per field a rule reads, in `ATTRS` and in `attributes`. A field that is
-/// not here never reaches the database.
-impl Subject for Visitor {
-    const ATTRS: &'static [Attr] = &[
-        Attr {
-            key: "account_id",
-            kind: AttrKind::BigInt,
-            optional: true,
-        },
-        Attr {
-            key: "admin",
-            kind: AttrKind::Boolean,
-            optional: false,
-        },
-    ];
-
-    fn attributes(&self) -> Attributes {
-        Attributes::new()
-            .with("account_id", self.account_id.attr_value())
-            .with("admin", self.admin.attr_value())
-    }
 }
 
 /// The request's database identity, on its typed context.
@@ -365,6 +371,21 @@ mod tests {
         assert_eq!(keys, ["account_id", "admin"]);
         assert_eq!(me.settings()[0].1, "");
         me.statements().expect("the identity is one Postgres takes");
+    }
+
+    /// `rls make` can write the schema: every rule of a `#[db]` policy
+    /// translates, and the identity sets only keys a policy reads, with the
+    /// role the schema creates. Without this, a typo reads as `NULL`.
+    #[test]
+    fn the_schema_translates_and_matches_the_identity() {
+        let schema = schema();
+        if let Err(e) = schema.snapshot() {
+            panic!("{e}");
+        }
+        let me = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
+        if let Err(e) = schema.check_identity(&me) {
+            panic!("{e}");
+        }
     }
 }
 "#;
@@ -563,8 +584,18 @@ let me = crate::plugins::rls::identity(ctx).expect("dispatched");
 ctx.db().transact_as(me, async |tx| tx.all(&q).await).await?;
 ```
 
-A field a database policy reads is an entry in `impl Subject for Visitor`
-in that file: add it there when you add it to `Visitor`.
+A field a database policy reads is an `#[attr]` field of `Visitor` in
+`src/plugins/policy/mod.rs`. Each one is a setting, `brocanth.<field>`.
+
+`schema()` reads each `#[db]` policy by its path:
+`.policies(Policy::from_rules::<PostPolicy>(&app_user()))`. After you
+change a rule, run `brocanth rls make <name>`. `brocanth rls diff` fails
+while `schema()` differs from `migrations/rls.json`, with no database, so
+CI runs it. A new `#[db]` policy needs its own `.policies(…)` line.
+
+A new project has no migration for `PostPolicy` yet, so `rls diff` fails
+until the first `rls make`. That migration alters `posts`: create the table
+in a migration of its own first, or remove the `.policies(…)` line.
 "#;
 
 const MODEL_AGENTS: &str = r#"

@@ -1,12 +1,12 @@
 # One rule, two enforcers: the policy-RLS bridge
 
 Written 12 November 2026. Status: **accepted 17 November 2026; phases 1
-and 2 built** (`Attr`, `Attributes`, `#[derive(Subject)]`, `Rules<E>`, the
-`uuid` and `timestamptz` kinds; `policy!` `#[db]`, `update_check`,
-`exists`, `#[app_only]`, the decision 3 refusals). **Phase 5 built 18
-November 2026**: `brocanth_rls::agreement`, the `db { … }` clause, the
-`EXPLAIN` check (notes under decision 10).
-Phase 7 built: column grants for write masks with no guard (decision 9).
+to 7 built** (18 November 2026): the rule tree and `#[derive(Subject)]`,
+`policy!` `#[db]`, `Policy::from_rules`, the request identity on the
+resource and admin paths, the agreement test (`brocanth_rls::agreement`,
+the `db { … }` clause, the `EXPLAIN` check; notes under decision 10), the
+scaffold with `rls diff` in CI, and column grants for write masks with no
+guard (decision 9). PLAN.md §13 ADR 11 records the decision.
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -252,9 +252,8 @@ above:
   a per-request source (`AdminData::for_request`), so `admin_source!` gained
   `as_identity` and the admin gained `AdminData::check`, run at build.
 
-Until the policy scaffold derives `Subject` (phase 6), the generated
-`src/plugins/rls/mod.rs` implements `Subject` for the scaffold's `Visitor`
-by hand.
+Phase 6 removed the hand-written `impl Subject for Visitor` from the
+generated `src/plugins/rls/mod.rs`: the policy scaffold derives `Subject`.
 
 ## 3. Commands
 
@@ -485,6 +484,27 @@ A new policy needs one `.policies(…)` line: no registry (ADR 1). A
 forgotten line on a declared, forced table fails closed (no rows, tests
 fail). If the table is forgotten too, it has no RLS, as today.
 
+Built in phase 6 (18 November 2026), with these changes to the sketch:
+
+- The role is `app_user()`, a function (phase 4), and it has no
+  `.member(…)`: the login is the project's choice. The file says to add
+  it.
+- The example key is a `bigserial`, so the line ends with
+  `.sequence("posts_id_seq")`.
+- The example policy: `update` admits the author's draft, `update_check`
+  admits the author's row as a draft or published, and `writable` holds
+  `body` and `status`. So an author may publish a draft, and the database
+  refuses a change of owner.
+- The `db { … }` clause waits for phase 5.
+- The project's own test checks that `schema().snapshot()` succeeds and
+  that `check_identity` accepts the anonymous identity: a rule the
+  database cannot check, or a key no policy reads, fails `cargo test`.
+- The scaffold writes no migration. The first `rls make` alters `posts`,
+  which the developer creates, so a new project fails `rls diff` until that
+  first `rls make`. Reason: a snapshot with no migration would say the
+  database has policies it does not have, and a migration that creates
+  `posts` is the application's schema, not the `rls` module's.
+
 ### Migration flow
 
 Edit the rule, `rls make <name>` (snapshot diff, rls.md §3, unchanged),
@@ -512,12 +532,12 @@ Sizes are focused hours for one person, with tests.
 | Phase | Work | Hours |
 |---|---|---|
 | 0 | `feat/rls` lands the target API. Done (54db8067). | — |
-| 1 | `brocanth-policy`: `Attr`, `Attributes`, `#[derive(Subject)]` (in `brocanth-policy-macros`), the `Rules<E>` tree (guards + `Operand::{Value, Attr}`) and `resolve`; `Uuid` and `Timestamptz` kinds. No change to `Pred` or `condition()`. | 9 |
-| 2 | `policy!` `#[db]`: emit `rules()` and `impl Policy` via `resolve`; `update_check`; `exists` syntax; the refusals of decision 3 with `help:` lines; strip `#[db]`/`#[app_only]` from the emitted struct; trybuild tests. | 14 |
-| 3 | `brocanth-rls` (depends on `brocanth-policy` under `runtime` only): `SqlExpr::from_rule`, guard chains, `Policy::from_rules`, grants with sequence `USAGE`, `.manual(…)`, the `#[app_only]` refusal at `rls make`, the owned-`no_force` report in `rls check`. Goldens. | 8 |
-| 4 | `brocanth_rls::identity`, the request provider, the sqlx and SeaORM call sites in the scaffold; `ResourceData` and the admin data source run as the identity (decision 13). | 10 |
+| 1 | `brocanth-policy`: `Attr`, `Attributes`, `#[derive(Subject)]` (in `brocanth-policy-macros`), the `Rules<E>` tree (guards + `Operand::{Value, Attr}`) and `resolve`; `Uuid` and `Timestamptz` kinds. No change to `Pred` or `condition()`. Done. | 9 |
+| 2 | `policy!` `#[db]`: emit `rules()` and `impl Policy` via `resolve`; `update_check`; `exists` syntax; the refusals of decision 3 with `help:` lines; strip `#[db]`/`#[app_only]` from the emitted struct; trybuild tests. Done. | 14 |
+| 3 | `brocanth-rls` (depends on `brocanth-policy` under `runtime` only): `SqlExpr::from_rule`, guard chains, `Policy::from_rules`, grants with sequence `USAGE`, `.manual(…)`, the `#[app_only]` refusal at `rls make`, the owned-`no_force` report in `rls check`. Goldens. Done. | 8 |
+| 4 | `brocanth_rls::identity`, the request provider, the sqlx and SeaORM call sites in the scaffold; `ResourceData` and the admin data source run as the identity (decision 13). Done. | 10 |
 | 5 | Agreement on Postgres: the harness in `brocanth-rls`, the `db { … }` clause, `EXPLAIN` check on the example (index kept). | 9 |
-| 6 | Scaffold: `rls` reads `policy`, `rls diff` in CI, goldens re-blessed, docs/rls.md §5 and docs/policy.md updated, ADR in PLAN.md §13. | 6 |
+| 6 | Scaffold: `rls` reads `policy`, `rls diff` in CI, goldens re-blessed, docs/rls.md §5 and docs/policy.md updated, ADR in PLAN.md §13. Done. | 6 |
 | 7 | Optional: column grants for unguarded masks. Done. | 4 |
 
 Total: about 56 hours (60 with phase 7). Phase 5 lands before any

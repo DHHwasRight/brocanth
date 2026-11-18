@@ -37,6 +37,10 @@ impl Module for GitHub {
         .category(Category::External)
         .adapts_to("static", "CI keeps the exported site as an artifact")
         .adapts_to("docker", "CI builds the image")
+        .adapts_to(
+            "rls",
+            "CI runs `rls diff`, which fails when `schema()` has a change no migration holds",
+        )
         // A queue or a cache in Postgres requires the pool, so the pool is
         // the one question: no key list to keep in step.
         .uses::<PgPool>("CI starts a database for the tests")
@@ -122,6 +126,18 @@ jobs:
       - run: cargo test
 "#,
     );
+    if project.has("rls") {
+        // Bridge decision 12: a rule edit without its migration moves the
+        // application's `WHERE` and leaves the database on the old rule.
+        // `rls diff` reads no database.
+        out.push_str(
+            r#"      # Fails when `schema()` in src/plugins/rls/mod.rs has a change that
+      # migrations/rls.json does not hold: run `rls make <name>` and commit
+      # the migration with the snapshot.
+      - run: cargo run -- rls diff
+"#,
+        );
+    }
     if project.has("static") {
         // The site is the build output, so CI keeps it. A deploy step to
         // a host reads this artifact.
@@ -169,6 +185,13 @@ mod tests {
     #[test]
     fn the_workflow_token_is_read_only() {
         assert!(written(&[]).contains("permissions:\n  contents: read\n"));
+    }
+
+    #[test]
+    fn a_project_with_rls_checks_its_snapshot() {
+        let out = written(&["db", "commands", "rls"]);
+        assert!(out.contains("- run: cargo run -- rls diff\n"), "{out}");
+        assert!(!written(&["db", "commands"]).contains("rls diff"));
     }
 
     #[test]

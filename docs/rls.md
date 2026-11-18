@@ -371,7 +371,9 @@ has:
 - `app_user()`: the one role every request runs as (decision 7).
   `schema()` creates it. The login needs `.member(<login>)` unless it is a
   superuser.
-- `impl Subject for Visitor`: the attributes of the policy's subject.
+- `schema()`, with `.policies(Policy::from_rules::<PostPolicy>(&app_user()))`
+  (§5). The subject's attributes come from `#[derive(Subject)]` on
+  `Visitor`, in `src/plugins/policy/mod.rs`.
 - `RowSecurity`: a plugin that puts `Identity(identity(&app_user(),
   &visitor))` on each request's typed context. The visitor is the one a
   request hook put in the request state; without one, the request is
@@ -418,41 +420,31 @@ application that connected as the owner saw every row.)
 
 ## 5. The bridge to `brocanth-policy`
 
-Goal: one rule, written once, drives the application's `WHERE` and the
-database policy. The design is `docs/policy-rls-bridge.md`. Built: the
-rule tree (`brocanth_policy::Rules`, phase 1), `policy!` with `#[db]`,
-which emits it (phase 2), its translation here (phase 3), and column
-grants for write masks with no guard (phase 7).
+One rule, written once in `policy!`, drives the application's `WHERE` and
+the database policy. The design, its decisions and their reasons are in
+[`docs/policy-rls-bridge.md`](policy-rls-bridge.md). This section says how
+to use it.
 
-An earlier sketch here walked the `Pred` that a rule returns for a
-symbolic subject. It fails on the first guard: `who.admin => always` is a
-Rust `if`, so the walk sees one branch only, and `who.user_id` is folded
-into a literal before the walk sees it. The bridge reads the rule as data
-instead.
+Mark the policy `#[db]`, derive `Subject` on its subject, and give the
+policy to the schema:
 
 ```rust
-let app_user = Role::new("app_user").member("app_login");
 Schema::new()
-    .role(app_user.clone())
+    .role(app_user())
     .policies(
-        Policy::from_rules::<PostPolicy>(&app_user)
+        Policy::from_rules::<PostPolicy>(&app_user())
             .sequence("posts_id_seq")
             // An `#[app_only]` rule needs its database floor by hand.
             .manual(Command::Update, SqlExpr::column(post::Column::Status).eq(SqlExpr::val("draft"))),
     )
 ```
 
-- `SqlExpr::from_rule(&rule, &table, Visitor::ATTRS)` writes one rule by
-  the translation table of the bridge doc §1. Each subject attribute is a
-  `Setting` of its kind. `else deny` (and a field that is not an
-  `Option`) is `(s IS NOT NULL AND col = s)`: FALSE, not NULL, when the
-  setting is missing. A guard chain is boolean, with an `s(g) IS NOT NULL`
-  test per guard key in front, not a `CASE`.
 - `Policy::from_rules::<P>(&role)` writes `<table>_<role>_select`
   (`list OR view`), `_insert` (`create`), `_update` (`USING update WITH
   CHECK update_check`) and `_delete`. A rule that admits no row writes no
   policy and no grant. The table is forced, and the role gets each command
-  that has a policy.
+  that has a policy. `.sequence(…)` grants `USAGE` on the table's serial
+  sequence when the role may insert.
 - Write masks (bridge decision 9). A `writable` mask with no guard
   (`writable: only [title]`) grants `UPDATE ("title")` instead of `UPDATE`
   on the table; `writable_on_create`, or `writable` when there is none,
@@ -467,11 +459,24 @@ Schema::new()
   path must write only the columns it changes: an `UPDATE` that sets a
   column outside the mask, even to its old value, fails with `permission
   denied for table`.
-- Refused, with a `help:` line, when `Schema::snapshot` (so `rls make`)
-  runs: `else allow` on an attribute, `is` against an attribute, a guard on
-  an attribute that is not a `bool`, an attribute the subject does not
-  declare, and an app-only rule (`Rule::app_only`). `.manual(command,
-  expr)` replaces that command's expression.
+- `SqlExpr::from_rule(&rule, &table, Visitor::ATTRS)` writes one rule, by
+  the translation table of the bridge doc §1. Each subject attribute is a
+  `Setting` of its kind, read as `NULL` when it is empty. `else deny` is
+  FALSE, not NULL, when the setting is missing, and a guard chain is
+  boolean, not a `CASE`.
+- `Schema::snapshot`, and so `rls make`, refuses with a `help:` line a
+  rule the database cannot check: an app-only rule (`#[app_only]`) or a
+  shape decision 3 refuses. `.manual(command, expr)` replaces that
+  command's expression.
+- `rls diff` fails when `schema()` differs from `migrations/rls.json`. It
+  reads no database. The generated CI runs it, so a rule edit cannot ship
+  without its migration.
+
+`brocanth create` writes this for a project with `rls` and `policy`: the
+policy scaffold's `PostPolicy` is `#[db]`, with an `update_check` that lets
+an author publish a draft, and `src/plugins/rls/mod.rs` reads it by path.
+The first `rls make` alters `posts`, so the table must exist before
+`migrate up`.
 
 A hand-written `impl Policy` has no rule tree: write its database rule
 with `SqlExpr` and `crud`. The database rule is the floor: a missing
@@ -550,8 +555,6 @@ time.
 
 ## 7. What is not done
 
-- The rest of the `brocanth-policy` bridge: the scaffold and column
-  grants (`docs/policy-rls-bridge.md` §6, phases 6 and 7).
 - Expression drift in `rls check`. It compares structure only.
 - `USAGE` on a schema other than `public`, and default privileges. Grant
   them in a SQL migration.

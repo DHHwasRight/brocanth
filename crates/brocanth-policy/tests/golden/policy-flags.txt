@@ -2280,15 +2280,22 @@ use brocanth_policy::{Dialect, Policy};
 // A subject, an entity, and the rules about them
 // ---------------------------------------------------------------------------
 
-/// Whoever is asking. `brocanth-policy` never looks inside it.
+/// Whoever is asking.
 ///
 /// An anonymous visitor is this application's own `None`, turned into a
 /// decision at the point a rule reads it.
-#[derive(Clone, Debug, Default)]
+///
+/// A rule reads only the `#[attr]` fields. Each one is also a database
+/// setting, `brocanth.<field>`, of the field's type: `Subject` lists them
+/// for the row-level security of `PostPolicy`. A field without `#[attr]`
+/// never reaches the database.
+#[derive(Clone, Debug, Default, brocanth_policy::Subject)]
 pub struct Visitor {
     /// The signed-in account, when there is one.
+    #[attr]
     pub account_id: Option<i64>,
     /// Whether this one may see everything.
+    #[attr]
     pub admin: bool,
 }
 
@@ -2318,6 +2325,13 @@ brocanth_policy::policy! {
     /// cannot be done per object: a paginator that filters after reading lies
     /// about its totals. Every rule left out denies, which is what makes
     /// shipping this file as it stands safe rather than lucky.
+    ///
+    /// `#[db]`: the macro also emits the rules as data
+    /// (`brocanth_policy::DbPolicy`), so the database can enforce the same
+    /// rules as row-level security. The methods of `Policy` read that same
+    /// data, so the two cannot drift. A `#[db]` rule holds no Rust: a
+    /// `{ … }` block in a rule does not compile.
+    #[db]
     pub policy PostPolicy(who: &Visitor) for Post {
         // `else deny` is the word that says what an anonymous visitor's
         // missing id means: they own nothing.
@@ -2326,17 +2340,27 @@ brocanth_policy::policy! {
             status == "published" || author_id == who.account_id else deny,
         }
         create: author_id == who.account_id else deny,
+        // An author edits a draft, never a published post.
         update {
             who.admin => always,
-            author_id == who.account_id else deny,
+            author_id == who.account_id else deny && status == "draft",
+        }
+        // The row an update leaves: still the author's, as a draft or
+        // published. So an author may publish their draft. The database
+        // checks it (`UPDATE … WITH CHECK`); here, `writable` does that job.
+        // Without it, the check is `update`, and the database would refuse
+        // the publish that `writable` permits.
+        update_check {
+            who.admin => always,
+            author_id == who.account_id else deny && status in ["draft", "published"],
         }
         // Which columns an update may change. `update` says which rows; this
-        // says which columns. The author edits the body. Never the status,
-        // and never the owner: `update` reads the row as stored, so
-        // `author_id` here would let an author give a post to somebody else.
+        // says which columns. The author edits the body and the status.
+        // Never the owner: `update` reads the row as stored, so `author_id`
+        // here would let an author give a post to somebody else.
         writable {
             who.admin => except [id],
-            only [body],
+            only [body, status],
         }
         // Which columns a create may set. A create names its owner, and
         // `create` above admits only the author's own id.
@@ -2475,6 +2499,33 @@ mod tests {
             .expect("the update compiles");
         assert!(write.query().sql().contains("\"author_id\""));
         assert!(write.applied(0).is_err(), "zero rows is a lost race");
+    }
+
+    #[test]
+    fn an_author_publishes_a_draft_and_then_edits_it_no_more() {
+        use brocanth_policy::{DbPolicy, MapRow, Subject};
+
+        let ada = author(7);
+        let row = |status: &str| {
+            MapRow::new()
+                .with(PostColumn::AuthorId, 7_i64)
+                .with(PostColumn::Status, status)
+        };
+        // The stored row: `update` admits a draft, not a published post.
+        let update = PostPolicy.update(&ada);
+        assert!(update.admits(&row("draft")).expect("decided in memory"));
+        assert!(!update.admits(&row("published")).expect("decided in memory"));
+        // The status is a column the author may write.
+        assert_eq!(PostPolicy.writable(&ada).check(["status"]), Ok(()));
+
+        // The row the update leaves, as the database checks it: published
+        // is allowed, another author is not.
+        let check = PostPolicy::rules()
+            .update_check()
+            .resolve(&ada.attributes());
+        assert!(check.admits(&row("published")).expect("decided in memory"));
+        let given = row("published").with(PostColumn::AuthorId, 8_i64);
+        assert!(!check.admits(&given).expect("decided in memory"));
     }
 }
 ===== AGENTS.md =====

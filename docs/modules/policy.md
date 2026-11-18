@@ -42,7 +42,12 @@ An option is set at build time in `src/modules/policy.rs`. A setting is read at 
 
 Files:
 
-- `src/plugins/policy/mod.rs`
+- `src/plugins/policy/mod.rs`: the `Visitor` subject
+  (`#[derive(Subject)]`, two `#[attr]` fields), and the example
+  `PostPolicy`, a `#[db]` policy. An author edits a draft and may publish
+  it: `update` admits a draft row, and `update_check` admits the row the
+  update leaves, a draft or a published post. With [`rls`](rls.md),
+  `schema()` writes these rules as database policies.
 
 Slots:
 

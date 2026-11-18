@@ -349,6 +349,20 @@ with `role: String::new()`, `who.role == "lead" => …` denies, it does not
 take the next arm. Give a role a non-empty value, such as `"guest"`. The types are checked as without `#[db]`:
 `status == who.user_id` does not compile.
 
+**The database side.** `brocanth-rls` reads the rules by the policy's
+path, in `schema()`:
+
+```rust
+Schema::new()
+    .role(app_user())
+    .policies(Policy::from_rules::<PostPolicy>(&app_user()).sequence("posts_id_seq"))
+```
+
+Then `rls make <name>` writes the migration, and `rls diff` (in CI) fails
+while a rule edit has no migration. `brocanth create` with `policy` and
+`rls` writes this: the example `PostPolicy` is `#[db]`, and its
+`update_check` lets an author publish a draft. See `docs/rls.md` §5.
+
 ### `eval { … }`: the agreement test
 
 PLAN.md §9 obligation 1: when you call `eval()`, the two interpretations must
