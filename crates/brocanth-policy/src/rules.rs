@@ -621,6 +621,14 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_text_attribute_is_absent() {
+        let a = Attributes::new().with("role", Some(Value::from("")));
+        assert_eq!(a.get("role"), None);
+        // So a guard over it has no answer, as in the database.
+        assert_eq!(Guard::Eq("role", Value::from("admin")).holds(&a), None);
+    }
+
+    #[test]
     fn attributes_replace_a_key_set_twice() {
         let a = Attributes::new()
             .with("k", Some(Value::Int(1)))

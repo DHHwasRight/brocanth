@@ -40,14 +40,17 @@ fn visitors() -> Vec<Visitor> {
         team,
         display_name: "x".to_owned(),
     };
+    // No empty role: an empty text attribute is absent with `#[db]`, and
+    // the Rust expansion reads `""` as a value. See
+    // `an_empty_text_attribute_is_absent_with_db`.
     vec![
-        v(None, false, false, "", None),
+        v(None, false, false, "guest", None),
         v(Some(1), false, false, "editor", None),
-        v(Some(2), false, false, "", Some(Uuid::from_u128(9))),
-        v(Some(0), true, false, "", None),
+        v(Some(2), false, false, "guest", Some(Uuid::from_u128(9))),
+        v(Some(0), true, false, "guest", None),
         v(None, true, false, "editor", None),
         v(Some(7), false, true, "editor", None),
-        v(Some(7), true, true, "", Some(Uuid::from_u128(1))),
+        v(Some(7), true, true, "guest", Some(Uuid::from_u128(1))),
     ]
 }
 
@@ -409,6 +412,21 @@ fn an_absent_guard_attribute_denies_the_whole_rule() {
         .with("admin", Some(Value::Bool(false)));
     assert!(rules.list.resolve(&attrs).is_never());
     assert_eq!(rules.list.guard_keys(), ["banned", "admin"]);
+}
+
+#[test]
+fn an_empty_text_attribute_is_absent_with_db() {
+    // The database cannot tell `''` from an unset setting, so `""` is
+    // absent in `Attributes`. A guard over it denies the whole rule, where
+    // the Rust expansion takes the next arm. The agreement test of
+    // docs/policy-rls-bridge.md decision 10 found the difference.
+    let who = Visitor {
+        user_id: Some(1),
+        ..Visitor::default()
+    };
+    assert_eq!(who.attributes().get("role"), None);
+    assert!(guards_rules().list.resolve(&who.attributes()).is_never());
+    assert!(!Guards.list(&who).is_never());
 }
 
 #[test]

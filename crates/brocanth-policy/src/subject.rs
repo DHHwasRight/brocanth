@@ -72,6 +72,15 @@ pub struct Attr {
 /// is not here at all reads the same way. A rule then applies its absence
 /// mode (`else deny`, `else null`), as the database does with an empty
 /// setting.
+///
+/// An empty text is absent too: [`Attributes::set`] stores
+/// `Some(Value::Text(""))` as `None`. Reason: the database cannot tell them
+/// apart. A transaction cannot unset a setting, so an absent value is set
+/// to `''`, and a policy reads `''` as `NULL`. Without this rule, a subject
+/// with `role: String::new()` passes `who.role != "admin"` in the
+/// application and fails it in the database (the agreement test of
+/// docs/policy-rls-bridge.md decision 10 found it). Use a non-empty value,
+/// such as `"guest"`, for a role that a rule must see.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Attributes {
     values: Vec<(&'static str, Option<Value>)>,
@@ -90,8 +99,9 @@ impl Attributes {
         self
     }
 
-    /// Set `key` to `value`, in place.
+    /// Set `key` to `value`, in place. An empty text is `None`.
     pub fn set(&mut self, key: &'static str, value: Option<Value>) {
+        let value = value.filter(|v| !matches!(v, Value::Text(t) if t.is_empty()));
         match self.values.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = value,
             None => self.values.push((key, value)),
