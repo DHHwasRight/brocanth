@@ -258,3 +258,148 @@ useful; the numbers need a `stats()` the trait does not have.
 
 Actions over selected rows (J3) and inlines (J5) are `brocanth-admin`'s own
 work and belong with the four screens rather than with a panel.
+
+## 7. The backoffice as a service of its own
+
+Designed 2026-11-21. The owner fixed the frame
+(`docs/module-capabilities.md` §5): the backoffice is a second service,
+embedded first and split later; RBAC per tab (`read`, `edit`, `owner`)
+from the start; settings CLI first; Postgres only, with the staff
+member's database identity on every read and write
+(`docs/policy-rls-bridge.md`, decision 13). This section says how a tab
+reaches its data so that it can move, and how a project builds the
+second binary. v1 keeps the data in-process: the second binary links the
+application's crates.
+
+### 7.1 The tab data contract
+
+Crate `brocanth-backoffice`. The admin's four model screens reach their
+rows through it.
+
+**D1. A contract per kind of tab, the model screens first.**
+`TabData` has `registry`, `check`, `call` and `begin`. Reason: the model
+screens are the only tabs whose data is generic. A panel's data belongs
+to its crate (jobs, cache, roles), so each panel gets its own trait in
+that crate, later.
+
+**D2. One envelope of owned serde types.** `Call { caller, op }`, where
+`op` is a read (`Count`, `List`, `Fetch`, `FetchMany`) or a write
+(`Insert`, `Update`, `Delete`). The answer is `Count`, `Rows`, `Row`,
+`Key` or `Changed`. Nothing borrows. Reason: a wire adds a transport and
+a codec, not a type. A JSON loopback in the crate encodes every call and
+every answer, and the screen tests run the admin through it.
+
+**D3. A call names its model by key.** The data side finds the model in
+its own registry. Reason: the caller never names a table or a column set
+for the data side to run.
+
+**D4. The row scope travels compiled.** `Scope::Where` carries the
+`brocanth_policy::Condition`: SQL text, typed binds, dialect. The admin
+compiles it from the row policy, as it does today. Reason: the
+`AdminResource` is part of the admin's configuration, and a copy on the
+data side would drift. Consequence: the data side runs the condition as
+its own code. The binds are parameters, never text, but a wire server
+must accept a call only from an authenticated backoffice service.
+
+**D5. The identity travels as a `Claim`, on each call.** `Caller` holds
+the tab (the RBAC resource), the level the call needs (`read` for a
+read, `edit` for a write) and the `Claim`: subject, superuser, grants.
+The admin side builds the claim from the request's `Principal` with a
+function. A project with `superuser` reads `brocanth_auth::Staff`. The
+data side gives `Principal::new(&claim)` to `AdminData::for_request`, so
+a source with `as_identity` runs the call as the staff member's database
+identity. Reason: a `Principal` is an opaque `&dyn Any` and cannot cross
+a process. The claim is the part that RBAC and RLS read. Consequence: an
+identity function on the data side reads `is_anonymous()` or
+`downcast::<Claim>()`, not the session type. The generated
+`rls::staff` reads `is_anonymous()` only.
+
+**D6. The data side checks the grant when it is told to.**
+`InProcess::enforcing_grants()` refuses a call whose claim does not hold
+`<tab>.<level>` (a higher level holds the lower ones; a superuser holds
+every level). The admin's `Policy` still gates every screen first. In
+one process the second check repeats the first, so it is off by
+default. A wire server must turn it on. Reason: a server must not trust
+the caller's RBAC decision.
+
+**D7. Errors are data, with a `help:` line.** `TabError` has a kind
+(`UnknownModel`, `Invalid` with the field errors, `Refused`, `Backend`,
+`Protocol`), a message and a help line. It converts to `DataError` and
+back, so a form still shows each message beside its field.
+
+**D8. A transaction is owned.** `TabData::begin` returns a
+`Box<dyn TabTransaction>` that borrows nothing. The in-process side
+keeps the source and the transaction that borrows it inside one pinned
+async block. Reason: a wire server keeps a transaction open between two
+requests, so it cannot borrow from the stack of one call. The pinned
+block gives that to every `AdminData`, with no change to the trait.
+
+**D9. One configuration line puts the admin on the contract.**
+`AdminConfig::data_through(f)` maps the data source before
+`Admin::try_new` uses it, for the start-time check and for every
+request. The `backoffice` module writes the line into
+`plugins::admin_panels`, a generated file:
+`config.data_through(crate::plugins::backoffice::contract)`. Reason: an
+existing admin file needs no edit, and the embedded and the separate
+modes serve through the same contract. `brocanth-admin` gains no serde
+dependency: an off-by-default `serde` feature derives the types.
+
+### 7.2 The second binary
+
+**B1. `src/bin/backoffice.rs`, written by the `backoffice` module.** It
+includes the application's own modules with `#[path]` (`app`, `pages`,
+`plugins`, `modules`, and `commands` when there is one) and serves.
+Reason: it links the models, the policies and every plugin (the pool,
+auth, sessions) with no library split. The cost is a second compile of
+the application crate. Not a subcommand: a project without `commands`
+has none, and a binary of its own is its own container. Its tests do
+not run a second time (`test = false`).
+
+**B2. One code path, two roles.** Both binaries call `app::build` and
+`app::serve`: one plugin chain, one route table, one admin. A server
+wrap, `plugins::backoffice::Gate`, answers 404 outside `mount_at` when
+the process runs as the backoffice, and 404 inside `mount_at` when the
+application runs with `embedded = false`. The second binary sets its
+role before it serves. Reason: a second router would drift, and the
+mount role `Backoffice` (§5.4) is already the boundary. The role is a
+process-wide value, set once by `main`: it says which binary this is,
+and it carries no data, so §5.1 does not apply to it.
+
+**B3. It shares by linking.** Models, policies, the `db` pool, auth and
+sessions come from the same `register!` chain. The two processes read
+one database, so staff and grants are one set (§5.3, points 3 and 5).
+`backoffice` does not require `db`: it adds no database of its own.
+
+**B4. Two run-time settings in `[backoffice]`.** `addr`: where the
+second binary listens (`127.0.0.1:3001`). `embedded`: whether the
+application binary serves `mount_at` (`true`). Each has a flag
+(`--backoffice.addr`, `--backoffice.embedded`), a variable and a file
+key. Both binaries take every flag of the project, so one configuration
+serves both. `mount_at` stays a build-time choice in
+`src/modules/admin.rs`.
+
+**B5. A bad configuration fails at start.** The plugin refuses an
+`addr` that is not a socket address in `configure`, in both binaries.
+The contract's `check` runs in `Admin::try_new`, which
+`AdminSettings::configure` calls: it runs the source's own check (the
+identity of decision 13) through the contract.
+
+**B6. To split:** run the application with
+`--backoffice.embedded=false`, run `backoffice` beside it, and route
+`mount_at` to it at the proxy. One host keeps one session cookie for
+both.
+
+### 7.3 Deferred
+
+- The wire: an HTTP transport with the JSON codec, a service secret
+  (`_file`/`_env`) on both sides, a transaction held by the server
+  between requests, the registry read once at connect.
+- Data traits for the panels: jobs, cache, roles, flags, analytics.
+  Each panel still reads its crate's handle through a late cell.
+- A backoffice binary that links only the admin and a contract client.
+  It needs the wire.
+- Sign-in pages in the second binary. It serves only `mount_at`; staff
+  sign in on the application, on the same host.
+- An image and a deployment for the second binary (`docker`,
+  `kubernetes`).
+- A conditional create rule (§2a, "Open") is unchanged by the contract.
