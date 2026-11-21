@@ -50,6 +50,10 @@ pub fn kind(path: &str) -> Kind {
         // command line. It varies with the module set and with nothing
         // else.
         "src/main.rs" => Kind::Owned,
+        // The `backoffice` module's second binary holds `src/main.rs`'s
+        // `mod` lines (`Scaffold::app_binary`), so it follows from the
+        // module list in the same way.
+        "src/bin/backoffice.rs" => Kind::Owned,
         // Every `mod.rs` the generator writes under a directory the
         // generator fills. `src/pages/mod.rs` is not one of them: it holds
         // `Response`, `Ctx` and the error contract, which are the

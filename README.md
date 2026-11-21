@@ -200,6 +200,7 @@ puts the crate in a new project.
 | [`brocanth-oauth-client`](crates/brocanth-oauth-client/README.md) | An OAuth 2.0 client for third-party APIs, over the `oauth2` crate: connect pages, sealed tokens, one refresh per key, a bearer HTTP client | `oauth`, `oauth-client`, `oauth-client-memory` |
 | [`brocanth-admin`](crates/brocanth-admin/README.md) | A Django-shaped backoffice at `/admin`; actions over selected rows | `admin`, `admin-actions` |
 | [`brocanth-admin-model`](crates/brocanth-admin-model/README.md) | The admin's data source over SeaORM, one line per entity | `admin-model` (blocked) |
+| [`brocanth-backoffice`](crates/brocanth-backoffice/README.md) | The admin as a service of its own: the tab data contract, and a second binary that serves only the admin | `backoffice` |
 | [`brocanth-observe`](crates/brocanth-observe/README.md) | Logs on stdout, a request id, `/up` and `/readyz`, Prometheus metrics, OTLP traces | `observability` and its children |
 | [`brocanth-analytics`](crates/brocanth-analytics/README.md) | Page views counted on the server: a daily visitor hash, no cookie, no third party; a beacon for static sites | `analytics`, `beacon` |
 | [`brocanth-audit`](crates/brocanth-audit/README.md) | Change history: the model layer's changes and the admin's writes, with retention | `audit` |
@@ -293,6 +294,14 @@ to keep in step with new versions:
 levels, with Django's way beside each.
 [`docs/backoffice.md`](docs/backoffice.md) says what the admin contains and
 what is missing.
+
+**The admin as a service of its own.** `backoffice` writes a second
+binary, `src/bin/backoffice.rs`, that runs the same application and
+serves only the admin (`cargo run --bin backoffice`, at
+`[backoffice] addr`). `--backoffice.embedded=false` takes the admin out of
+the application binary. The admin reads its rows through a tab data
+contract of serde types, so a later step can move the data behind a wire
+without a redesign. See §7 of [`docs/backoffice.md`](docs/backoffice.md).
 
 ## Postgres first, then out
 

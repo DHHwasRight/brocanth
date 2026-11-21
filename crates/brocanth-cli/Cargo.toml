@@ -89,6 +89,11 @@ brocanth-oauth-client = { path = "../brocanth-oauth-client", version = "0.1.0", 
 brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", default-features = false, features = [
     "scaffold",
 ] }
+# The admin as a service of its own: the second binary. The `scaffold`
+# side alone, so the CLI links no admin and no serde.
+brocanth-backoffice = { path = "../brocanth-backoffice", version = "0.1.0", default-features = false, features = [
+    "scaffold",
+] }
 brocanth-realtime = { workspace = true, features = ["scaffold"] }
 # Logs, probes and metrics. The default instead of `logging`, and never
 # beside it: `create` refuses the pair.

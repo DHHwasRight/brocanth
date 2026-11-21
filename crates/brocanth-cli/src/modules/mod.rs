@@ -190,6 +190,9 @@ pub const ALL: &[&dyn Module] = &[
     &brocanth_admin::scaffold::Backoffice,
     &brocanth_admin::scaffold::BackofficeModels,
     &brocanth_admin::scaffold::BackofficeActions,
+    // The admin as a second service: a binary of its own that serves only
+    // the admin, and the tab data contract its rows go through.
+    &brocanth_backoffice::scaffold::BackofficeService,
     // Webhooks in both directions, from one crate: the incoming half is a
     // hook ahead of the CSRF check, the outgoing half a job per delivery.
     // After the admin, whose deliveries tab is an integration of the

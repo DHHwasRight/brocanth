@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 75 modules. Each name links to its own page
+what to build next. There are 76 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,7 +23,7 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (23)
+### Middleware (24)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
@@ -50,6 +50,7 @@ nothing holds this page.
 | [`storage-routes`](modules/storage-routes.md) | Upload and download routes: uploads your guard allows, downloads behind a file token, `?thumb=WxH` |  |  | part of `storage`, off until you tick it |  |
 | [`validation`](modules/validation.md) | A zod-shaped vocabulary; a handler takes Valid<T> or does not compile |  |  |  |  |
 | [`webhooks-in`](modules/webhooks-in.md) | `POST /webhooks/{source}`: signature, replay window, idempotency key, then a typed handler; before the CSRF check |  |  | part of `webhooks`, ticked with its parent | with `db`: the idempotency keys are rows |
+| [`backoffice`](modules/backoffice.md) | The admin as a service of its own: a second binary that serves only the admin | External |  | needs `admin`: it serves the admin from a second binary, so there is nothing to serve without it |  |
 
 ### Renderer (8)
 

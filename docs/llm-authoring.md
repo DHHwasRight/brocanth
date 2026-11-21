@@ -349,6 +349,7 @@ chain it already knows. A handler never reads the header.
 | `brocanth-model` | the model layer: SeaORM, validations, migrations |
 | `brocanth-command` | the `#[cmd]` attribute and the command runner |
 | `brocanth-admin` | a Django-shaped backoffice over the schema |
+| `brocanth-backoffice` | the admin as a service of its own: the tab data contract and the second binary |
 | `brocanth-schema` | zod-shaped validation, feeding OpenAPI |
 | `brocanth-server` | the HTTP server, and its bridge to the core |
 | `brocanth-pages` | `pages!` and `html!`: the route table and the layouts, read off `src/pages` |

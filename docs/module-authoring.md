@@ -122,6 +122,7 @@ filesystem, edit a file another module wrote, or invent a slot.
 pub fn file(&mut self, path: impl Into<String>, contents: impl Into<String>)
 pub fn at(&mut self, slot: Slot) -> Writer<'_>
 pub fn binary(&mut self, name: impl Into<String>, path: impl Into<String>)
+pub fn app_binary(&mut self, name: impl Into<String>, path: impl Into<String>, contents: impl Into<String>)
 pub fn refuse(&mut self, why: impl Into<String>)
 ```
 
@@ -1031,6 +1032,16 @@ list of records, such as rate-limit rules. Declare
 
 A second `[[bin]]`. Write the source with `s.file`, then
 `s.binary("admin", "src/bin/admin.rs")`.
+
+#### `Scaffold::app_binary`
+
+A second binary that runs the application itself, as `src/main.rs`
+does. Put the line `brocanth_scaffold::APP_MODS` once in `contents`: the
+generator writes `src/main.rs`'s `mod` lines there, each with the
+`#[path]` that reaches it from the binary's directory, because only the
+finished build knows them. The manifest lists the binary with
+`test = false`, so the application's tests run once. `backoffice` writes
+`src/bin/backoffice.rs` with it (`docs/backoffice.md` §7.2).
 
 ### 3.5 External: does not touch the code
 

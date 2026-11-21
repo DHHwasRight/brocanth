@@ -39,6 +39,7 @@ brocanth-schema = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-resource = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["pages"], default-features = false }
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-admin-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-backoffice = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-webhooks = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["out", "postgres", "config", "admin"] }
 serde_json = { version = "1" }  # an outgoing event's payload is JSON
 brocanth-oauth-client = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["admin"] }
@@ -63,6 +64,11 @@ serde = { version = "1", features = ["derive"] }  # the config plugin reads type
 
 [build-dependencies]
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
+
+[[bin]]
+name = "backoffice"
+path = "src/bin/backoffice.rs"
+test = false
 ===== .gitignore =====
 /target
 /tmp/postgres
@@ -87,6 +93,10 @@ run = "cargo run -- serve"
 
 [tasks.test]
 run = "cargo test"
+
+[tasks.backoffice]
+description = "the admin alone, as its own service, at [backoffice] addr"
+run = "cargo run --bin backoffice"
 
 [tasks.css]
 description = "build assets/css/site.css from _tailwind.css"
@@ -2037,6 +2047,7 @@ pub mod auth;
 pub mod auth_lockout;
 pub mod auth_oauth;
 pub mod auth_screens;
+pub mod backoffice;
 pub mod cache;
 pub mod db;
 pub mod db_embedded;
@@ -2359,6 +2370,11 @@ macro_rules! register {
             crate::modules::middleware_rate_limit::MODULE.hooks.off(),
         );
         let builder = builder.plugin(
+            <crate::plugins::backoffice::Backoffice as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::backoffice_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
             <crate::plugins::robots::Robots as brocanth::plugin_api::Plugin>::new(
                 crate::plugins::robots_settings(&layers)?,
             ),
@@ -2542,7 +2558,8 @@ type WithMeta = After<crate::plugins::meta::Meta, WithI18n>;
 type WithDb = After<crate::plugins::db::Database, WithMeta>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithCache>;
-type WithRobots = After<crate::plugins::robots::Robots, WithMiddlewareRateLimit>;
+type WithBackoffice = After<crate::plugins::backoffice::Backoffice, WithMiddlewareRateLimit>;
+type WithRobots = After<crate::plugins::robots::Robots, WithBackoffice>;
 type WithSitemap = After<crate::plugins::sitemap::Sitemap, WithRobots>;
 type WithAnalytics = After<brocanth_analytics::Analytics, WithSitemap>;
 type WithModel = After<crate::plugins::model::Model, WithAnalytics>;
@@ -2755,6 +2772,10 @@ pub fn admin_panels(
     // confirmation page. A model leaves it off with
     // `m.without_action("delete_selected")` in src/plugins/admin/mod.rs.
     config = config.action(brocanth_admin::actions::BulkAction::delete_selected());
+    // The admin reads and writes its rows through the backoffice's tab data
+    // contract, in this binary and in `src/bin/backoffice.rs`. Each call
+    // carries the staff member's claim (docs/backoffice.md §7.1).
+    config = config.data_through(crate::plugins::backoffice::contract);
     // The page views the analytics plugin counts, as a tab.
     if crate::modules::analytics::MODULE.integrate.admin {
         let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
@@ -3840,6 +3861,26 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "backoffice.addr",
+        help: "Where `src/bin/backoffice.rs` listens: an address and a port.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "backoffice.embedded",
+        help: "Serve the admin from the application binary too. False when the backoffice runs as its own service.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "robots.index",
         help: "Let crawlers read this site. False answers `Disallow: /` and nothing else.",
         flag: true,
@@ -4907,6 +4948,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::admin::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::backoffice::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::webhooks_in::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -5023,6 +5067,9 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     }
     for (key, value) in crate::modules::admin::MODULE.set {
         code.push((key.path(), *value, "src/modules/admin.rs"));
+    }
+    for (key, value) in crate::modules::backoffice::MODULE.set {
+        code.push((key.path(), *value, "src/modules/backoffice.rs"));
     }
     for (key, value) in crate::modules::webhooks_in::MODULE.set {
         code.push((key.path(), *value, "src/modules/webhooks_in.rs"));
@@ -5235,6 +5282,48 @@ pub fn flag_args(
     Ok(command)
 }
 
+/// Refuses anything on the command line that is not a flag, and answers
+/// `--help` and `--settings`. `true` when it printed one of those, so `main`
+/// stops there.
+///
+/// For the binaries that run the application with no command line, such as
+/// `src/bin/backoffice.rs`. The command line reads its flags with `clap`.
+#[allow(dead_code)]
+pub fn read_line() -> Result<bool, String> {
+    refuse_off_flags()?;
+    let names = flag_names()?;
+    let mut rest = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = rest.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("Flags:");
+            for name in &names {
+                let (help, value) = name.help();
+                println!("  --{} <{value}>  {help}", name.name);
+            }
+            println!("  --settings  every settings layer, then the merged values");
+            return Ok(true);
+        }
+        if arg == "--settings" {
+            print!("{}", settings_report()?);
+            return Ok(true);
+        }
+        let written = arg.strip_prefix("--").unwrap_or_default();
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        if name.is_empty() || !names.iter().any(|known| known.name == name) {
+            return Err(format!(
+                "unknown argument `{arg}`\nhelp: `--help` lists the flags"
+            ));
+        }
+        // `--name VALUE`: the next argument is the value, not a flag.
+        if !written.contains('=') {
+            rest.next();
+        }
+    }
+    Ok(false)
+}
+
 /// Each setting as the plugin's `Default` says, before any layer.
 fn defaults() -> Vec<(&'static str, String)> {
     let observability = crate::plugins::observability::Settings::default();
@@ -5255,6 +5344,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
+    let backoffice = crate::plugins::backoffice::Settings::default();
     let robots = crate::plugins::robots::Settings::default();
     let sitemap = crate::plugins::sitemap::Settings::default();
     let analytics = brocanth_analytics::AnalyticsConfig::default();
@@ -5479,6 +5569,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             "rate_limit.fail_open",
             format!("{:?}", rate_limit.fail_open),
         ),
+        ("backoffice.addr", format!("{:?}", backoffice.addr)),
+        ("backoffice.embedded", format!("{:?}", backoffice.embedded)),
         ("robots.index", format!("{:?}", robots.index)),
         ("robots.disallow", format!("{:?}", robots.disallow)),
         ("robots.allow", format!("{:?}", robots.allow)),
@@ -5814,6 +5906,13 @@ pub fn rate_limit_settings(
     layers.section("rate_limit").map_err(|e| e.to_string())
 }
 
+/// `[backoffice]`, from every settings layer.
+pub fn backoffice_settings(
+    layers: &Layers,
+) -> Result<crate::plugins::backoffice::Settings, String> {
+    layers.section("backoffice").map_err(|e| e.to_string())
+}
+
 /// `[robots]`, from every settings layer.
 pub fn robots_settings(layers: &Layers) -> Result<crate::plugins::robots::Settings, String> {
     layers.section("robots").map_err(|e| e.to_string())
@@ -6069,6 +6168,7 @@ pub trait ServerWrap {
 /// last.
 ///
 /// - `observability::serving::Serving`
+/// - `backoffice::Door`
 /// - `static_files::StaticFiles`
 pub fn wrap<F, Fut>(
     app: &std::sync::Arc<crate::app::App>,
@@ -6080,6 +6180,7 @@ where
 {
     let next: Handler = std::sync::Arc::new(move |request| -> Answer { Box::pin(next(request)) });
     let next = <static_files::StaticFiles as ServerWrap>::wrap(app, next);
+    let next = <backoffice::Door as ServerWrap>::wrap(app, next);
     let next = <observability::serving::Serving as ServerWrap>::wrap(app, next);
     move |request| next(request)
 }
@@ -6087,6 +6188,7 @@ where
 /// Each wrap's own listeners, in order.
 pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
     <observability::serving::Serving as ServerWrap>::side_listeners(app).await?;
+    <backoffice::Door as ServerWrap>::side_listeners(app).await?;
     <static_files::StaticFiles as ServerWrap>::side_listeners(app).await?;
     Ok(())
 }
@@ -6095,6 +6197,7 @@ pub async fn side_listeners(app: &crate::app::App) -> Result<(), String> {
 /// listener closes.
 pub async fn stop_accepting(app: &crate::app::App, stopper: brocanth_server::Stopper) {
     <observability::serving::Serving as ServerWrap>::before_stop(app).await;
+    <backoffice::Door as ServerWrap>::before_stop(app).await;
     <static_files::StaticFiles as ServerWrap>::before_stop(app).await;
     stopper.stop();
 }
@@ -6111,7 +6214,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 6f4d78831515bf98
+// brocanth-digest: b68738f701cc80b0
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -7911,6 +8014,49 @@ pub mod admin_actions {
     }
 }
 
+/// The shape of src/modules/backoffice.rs.
+pub mod backoffice {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[backoffice]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Addr,
+        Embedded,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Addr => "backoffice.addr",
+                Key::Embedded => "backoffice.embedded",
+            }
+        }
+    }
+
+    /// What src/modules/backoffice.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/webhooks.rs.
 pub mod webhooks {
     /// What src/modules/webhooks.rs holds.
@@ -8647,7 +8793,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 82f413c37808f7a1
+// brocanth-digest: eb36afbb68068a6d
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -8674,6 +8820,7 @@ pub mod auth;
 pub mod auth_lockout;
 pub mod auth_oauth;
 pub mod auth_screens;
+pub mod backoffice;
 pub mod cache;
 pub mod cache_redis;
 pub mod ci;
@@ -8785,6 +8932,7 @@ pub const ALL: &[&str] = &[
     "admin",
     "admin-model",
     "admin-actions",
+    "backoffice",
     "webhooks",
     "webhooks-in",
     "webhooks-out",
@@ -8815,7 +8963,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 528fcb97ee211512
+// brocanth-digest: cd0c04b3f73602e2
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -10125,6 +10273,41 @@ use crate::plugins::shape::admin_actions::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/backoffice.rs =====
+//! `backoffice`: the admin as a service of its own: a second binary that serves
+//! only the admin.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [backoffice]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::backoffice::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [backoffice]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Addr, Flag::As("addr")),
+    //   (Key::Addr, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Addr, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
 ===== src/modules/webhooks.rs =====
 //! `webhooks`: signed webhooks: verified deliveries in, signed events out; pick
 //! a direction below.
@@ -11080,6 +11263,12 @@ methods = ["POST"]
 limit = 5
 window_secs = 60
 
+[backoffice]
+# Where `src/bin/backoffice.rs` listens: an address and a port.
+addr = "127.0.0.1:3001"
+# Serve the admin from the application binary too. False when the backoffice runs as its own service.
+embedded = true
+
 [robots]
 # Let crawlers read this site. False answers `Disallow: /` and nothing else.
 # False here because this file is the development one. Production reads
@@ -11850,6 +12039,63 @@ dpswap.configure({fragmentMode:"header"});
 //! referenced it yet.
 
 brocanth_assets::assets!("assets", "public");
+===== src/bin/backoffice.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! The backoffice as a service of its own: this application, serving only
+//! the admin at `mount_at` in `src/modules/admin.rs` (docs/backoffice.md
+//! §7.2).
+//!
+//! ```text
+//! cargo run --bin backoffice                                  # at [backoffice] addr
+//! cargo run --bin backoffice -- --backoffice.addr=0.0.0.0:3001
+//! ```
+//!
+//! It compiles the application's own modules, below, so it links the same
+//! models, policies and plugins, and opens the same pool. Run the
+//! application with `--backoffice.embedded=false` to serve the admin from
+//! here alone.
+
+// The application's modules, compiled a second time. Some of what they
+// hold serves only the application binary.
+#![allow(dead_code)]
+
+#[path = "../app.rs"]
+mod app;
+#[path = "../assets.rs"]
+mod assets;
+#[path = "../commands/mod.rs"]
+mod commands;
+#[path = "../../migrations/mod.rs"]
+mod migrations;
+#[path = "../modules/mod.rs"]
+mod modules;
+#[path = "../pages/mod.rs"]
+mod pages;
+#[path = "../plugins/mod.rs"]
+mod plugins;
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let served = plugins::read_line().and_then(|helped| {
+        if helped {
+            Ok(())
+        } else {
+            plugins::backoffice::serve()
+        }
+    });
+    match served {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            plugins::say!(error, "error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// brocanth-digest: 26a7291eb876a2a6
 ===== src/bin/migrate.rs =====
 //! The `migrate` tool: write migrations from the models in `src/models/`.
 //!
@@ -15860,6 +16106,194 @@ pub async fn mail_locked(
         lock_for / 60
     );
     mail(ctx, email.as_str(), "Your account is locked", text).await
+}
+===== src/plugins/backoffice/mod.rs =====
+//! The backoffice as a service of its own (docs/backoffice.md §7).
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! - [`contract`] puts the admin's data source on the tab data contract:
+//!   `plugins::admin_panels` hands it to the admin. Each call carries the
+//!   staff member's [`Claim`].
+//! - [`Backoffice`] checks `[backoffice]` at start, in both binaries.
+//! - [`Door`] keeps each binary to its own paths: `src/bin/backoffice.rs`
+//!   answers only the admin's mount, and this binary answers it only while
+//!   `embedded` is true.
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth_admin::policy::Principal;
+use brocanth_admin::SharedData;
+use brocanth_backoffice::{Claim, Contracted, Gate, InProcess, Role};
+
+use crate::plugins::{Answer, Handler, ServerWrap};
+
+/// Where the backoffice binary listens, and whether this binary serves the
+/// admin too: `[backoffice]` in the config file, `$<APP>_BACKOFFICE__<KEY>`,
+/// or `--backoffice.<key>`. Both binaries read it.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[backoffice]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Where `src/bin/backoffice.rs` listens: an address and a port.
+    pub addr: String,
+    /// Whether the application binary serves the admin at `mount_at` too.
+    /// False when the backoffice runs as its own service.
+    pub embedded: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:3001".to_string(),
+            embedded: true,
+        }
+    }
+}
+
+/// The gate [`Door`] reads, from the checked settings.
+struct Chosen(Gate);
+
+/// Checks `[backoffice]` when the application is built, in both binaries,
+/// so a bad address stops the start and not the first request.
+pub struct Backoffice {
+    settings: Settings,
+}
+
+impl Plugin for Backoffice {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "backoffice";
+
+    fn new(settings: Settings) -> Self {
+        Self { settings }
+    }
+
+    fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        brocanth_backoffice::check_addr(&self.settings.addr).map_err(PluginError::new)?;
+        lc.services_mut().insert(Chosen(Gate::new(
+            brocanth_backoffice::role(),
+            crate::modules::admin::MODULE.mount_at,
+            self.settings.embedded,
+        )));
+        Ok(())
+    }
+}
+
+/// The admin's data source, on the tab data contract: the admin's end
+/// ([`Contracted`]) over the data side in this process ([`InProcess`]).
+/// `plugins::admin_panels` passes it to `AdminConfig::data_through`.
+pub fn contract(data: SharedData) -> SharedData {
+    Contracted::new(InProcess::new(data)).claim(claim).shared()
+}
+
+/// Who a call is for, as the contract carries it: the signed-in member of
+/// staff, whether they are a superuser, and their permission strings
+/// (`post.edit`, `jobs.read`).
+fn claim(principal: &Principal<'_>) -> Claim {
+    match principal.downcast::<brocanth_auth::Staff>() {
+        Some(staff) => Claim::staff(
+            staff.account().id.to_string(),
+            staff.is_superuser(),
+            staff.permissions().iter().cloned(),
+        ),
+        None => Claim::from_principal(principal),
+    }
+}
+
+/// Serves the admin alone, at `[backoffice] addr`. `src/bin/backoffice.rs`
+/// calls it; the application binary does not.
+#[allow(dead_code)]
+pub fn serve() -> Result<(), String> {
+    brocanth_backoffice::serve_as(Role::Backoffice);
+    let settings = crate::plugins::backoffice_settings(&crate::plugins::layers()?)?;
+    let addr = brocanth_backoffice::check_addr(&settings.addr)?;
+    crate::app::serve(&addr.to_string())
+}
+
+/// A server wrap: a path this binary does not serve answers 404.
+pub struct Door;
+
+impl ServerWrap for Door {
+    fn wrap(app: &Arc<crate::app::App>, next: Handler) -> Handler {
+        let gate = app
+            .core
+            .services()
+            .get::<Chosen>()
+            .map(|chosen| chosen.0.clone())
+            .expect("`backoffice` is registered in `register!`");
+        Arc::new(move |request: brocanth_server::Request| -> Answer {
+            if gate.admits(&request.path) {
+                next(request)
+            } else {
+                Box::pin(async { brocanth_server::Response::text(404, "Not Found") })
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use brocanth::routing::Verb;
+    use brocanth_admin::policy::AllowAllUnsafeForDevelopment;
+    use brocanth_admin::{Admin, AdminConfig, Fixture, LateCells, ListQuery, Principal};
+    use brocanth_backoffice::{Gate, Role};
+
+    /// The application binary serves the admin while it is embedded: the
+    /// admin answers, locked, and so do the pages.
+    #[tokio::test]
+    async fn the_application_serves_the_admin_while_it_is_embedded() {
+        let app = crate::app::build().expect("the application builds");
+        let at = crate::modules::admin::MODULE.mount_at;
+        let admin = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, at)).await;
+        assert_eq!(admin.status, 403);
+        let home = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, "/")).await;
+        assert_eq!(home.status, 200);
+    }
+
+    /// The backoffice binary answers the admin's mount and nothing else;
+    /// the application hands the mount over when it is not embedded.
+    #[test]
+    fn each_binary_answers_its_own_paths() {
+        let at = crate::modules::admin::MODULE.mount_at;
+        let backoffice = Gate::new(Role::Backoffice, at, true);
+        assert!(backoffice.admits(at));
+        assert!(!backoffice.admits("/"));
+        let split = Gate::new(Role::App, at, false);
+        assert!(!split.admits(at));
+        assert!(split.admits("/"));
+    }
+
+    /// The admin reads its rows through the contract: the line in
+    /// `plugins::admin_panels` maps its source.
+    #[tokio::test]
+    async fn the_admin_reads_its_rows_through_the_contract() {
+        let mut late = LateCells::new();
+        let config = crate::plugins::admin_panels(AdminConfig::new(), &mut late)
+            .unscoped_rows_unsafe_for_development()
+            .with_policy(AllowAllUnsafeForDevelopment);
+        let admin = Admin::try_new(Arc::new(Fixture::blog()), config).expect("the admin builds");
+        let page = admin
+            .list(Principal::anonymous(), "post", ListQuery::new())
+            .await
+            .expect("a page");
+        assert_eq!(page.status(), 200);
+        assert!(page.html().is_some_and(|html| html.contains("Compilers")));
+    }
+
+    /// The default address passes the check the plugin runs at start.
+    #[test]
+    fn the_default_address_is_an_address() {
+        let settings = super::Settings::default();
+        assert!(brocanth_backoffice::check_addr(&settings.addr).is_ok());
+    }
 }
 ===== src/plugins/cache/mod.rs =====
 //! The cache, as this application registers it.
@@ -22022,6 +22456,7 @@ request.
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `admin-model`  the admin's rows over SeaORM, one line per entity
 - `admin-actions`  "Delete selected" on every admin list, with a confirmation page
+- `backoffice`  the admin as a service of its own: a second binary that serves only the admin
 - `webhooks`  signed webhooks: verified deliveries in, signed events out; pick a direction below
 - `webhooks-in`  POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler
 - `webhooks-out`  signed outgoing webhooks: endpoints and a delivery log in Postgres, retries on a Postgres queue
@@ -22538,6 +22973,21 @@ the address comes from `ProxyHeaders` or from `ip_header`. Never set
 balancer with neither, every client has the balancer's address and
 shares one bucket: register `ProxyHeaders` trusting the balancer.
 
+## The backoffice binary
+
+`src/bin/backoffice.rs` runs this application and serves only the admin,
+at `[backoffice] addr` (`mise run backoffice`). The application binary
+serves the admin too while `[backoffice] embedded` is true; set it false
+when the backoffice runs as its own service. Both binaries take the same
+flags and the same config file.
+
+The admin reads its rows through the tab data contract
+(`brocanth_backoffice::TabData`), so a call carries the staff member's
+`Claim`. An identity function of the admin's data source reads the
+`Claim` (`principal.downcast::<brocanth_backoffice::Claim>()`), not the
+session type. Do not reach application state from a tab by any other
+path: a tab must be able to move to the backoffice service.
+
 ## Views
 
 The markup for a route is a `.rsx` file **next to the page that renders it**:
@@ -22979,7 +23429,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: fbbb75e890758c45 -->
+<!-- brocanth-digest: 361caa7b3526f8f1 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -22991,7 +23441,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
@@ -23352,6 +23802,14 @@ config = []
 crates = []
 adapted_to = []
 
+[modules.backoffice]
+version = "0.1.0"
+kind = ["middleware", "external"]
+files = ["src/modules/backoffice.rs", "src/bin/backoffice.rs", "src/plugins/backoffice/"]
+config = ["backoffice"]
+crates = ["brocanth-backoffice"]
+adapted_to = ["superuser"]
+
 [modules.webhooks]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -23576,4 +24034,4 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: 9523a1f7bd085b53
+# brocanth-digest: 5645d6a41f62926c

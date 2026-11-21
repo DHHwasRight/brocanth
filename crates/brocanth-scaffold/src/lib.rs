@@ -1994,7 +1994,17 @@ pub struct Binary {
     pub name: String,
     /// The source file, relative to the project root.
     pub path: String,
+    /// Whether it compiles the application's own modules, as
+    /// [`Scaffold::app_binary`] declares it. The generator writes their
+    /// `mod` lines in its file and does not run its tests a second time.
+    pub shares_app: bool,
 }
+
+/// The line a file declared with [`Scaffold::app_binary`] holds where the
+/// generator writes the application's own `mod` lines: `app`, `pages`,
+/// `plugins`, and each one `src/main.rs` declares, each with the `#[path]`
+/// that reaches it from the binary's directory.
+pub const APP_MODS: &str = "// @app-mods@";
 
 // -- what a module writes ---------------------------------------------------
 
@@ -2094,10 +2104,54 @@ impl Scaffold {
 
     /// Declare a second compile target.
     pub fn binary(&mut self, name: impl Into<String>, path: impl Into<String>) {
-        let bin = Binary {
+        self.add_binary(Binary {
             name: name.into(),
             path: path.into(),
-        };
+            shares_app: false,
+        });
+    }
+
+    /// Declare a second compile target that runs the application itself,
+    /// and write its file.
+    ///
+    /// The binary compiles the application's own modules, so it links the
+    /// same plugins and pages as `src/main.rs`. `contents` holds the line
+    /// [`APP_MODS`] once, where the generator writes their `mod` lines: the
+    /// list follows from the module set, which the module cannot see whole.
+    /// The `backoffice` module writes `src/bin/backoffice.rs` with it
+    /// (`docs/backoffice.md` §7.2). Its tests are the application's, so
+    /// they run once, in `src/main.rs`'s binary.
+    pub fn app_binary(
+        &mut self,
+        name: impl Into<String>,
+        path: impl Into<String>,
+        contents: impl Into<String>,
+    ) {
+        let path = path.into();
+        let contents = contents.into();
+        if contents
+            .lines()
+            .filter(|line| line.trim() == APP_MODS)
+            .count()
+            != 1
+        {
+            self.problems.push(format!(
+                "`{}` writes the binary {path} without the line `{APP_MODS}` exactly once\n\
+                 help: put `brocanth_scaffold::APP_MODS` on a line of its own where the \
+                 application's `mod` lines go",
+                self.writing
+            ));
+            return;
+        }
+        self.add_binary(Binary {
+            name: name.into(),
+            path: path.clone(),
+            shares_app: true,
+        });
+        self.file(path, contents);
+    }
+
+    fn add_binary(&mut self, bin: Binary) {
         if let Some((by, other)) = self.bins.iter().find(|(_, b)| b.name == bin.name) {
             self.problems.push(format!(
                 "`{}` and `{}` both want a binary called `{}`",
@@ -2388,6 +2442,30 @@ pub fn order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_binary_holds_the_mods_line_once_or_is_a_problem() {
+        let mut s = Scaffold::new();
+        s.now_writing("backoffice");
+        s.app_binary("backoffice", "src/bin/backoffice.rs", "fn main() {}\n");
+        assert!(
+            s.binaries().next().is_none(),
+            "no binary without its mods line"
+        );
+        assert!(s.problems()[0].contains(APP_MODS), "{:?}", s.problems());
+
+        let mut s = Scaffold::new();
+        s.now_writing("backoffice");
+        s.app_binary(
+            "backoffice",
+            "src/bin/backoffice.rs",
+            format!("{APP_MODS}\nfn main() {{}}\n"),
+        );
+        assert!(s.problems().is_empty(), "{:?}", s.problems());
+        let bin = s.binaries().next().expect("the binary");
+        assert!(bin.shares_app);
+        assert!(s.files().any(|(path, _)| path == "src/bin/backoffice.rs"));
+    }
 
     #[test]
     fn an_export_is_read_only_from_a_chosen_module_and_counts_as_asking() {

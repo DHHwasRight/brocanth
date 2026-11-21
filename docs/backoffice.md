@@ -28,6 +28,9 @@ installed version. The brand and the user links are blocks of their own
 (`Views::with_brand`, `Views::with_userlinks`), so a logo or a "Log out"
 link needs no copy of the layout.
 
+The backoffice as a service of its own, with the tab data contract and
+the second binary, is §7.
+
 Measured by reading each crate's public surface at `54ff827`. Where this
 says a tab cannot be built, somebody read the trait.
 
@@ -357,7 +360,8 @@ not run a second time (`test = false`).
 
 **B2. One code path, two roles.** Both binaries call `app::build` and
 `app::serve`: one plugin chain, one route table, one admin. A server
-wrap, `plugins::backoffice::Gate`, answers 404 outside `mount_at` when
+wrap, `plugins::backoffice::Door`, asks a `brocanth_backoffice::Gate`
+and answers 404 outside `mount_at` when
 the process runs as the backoffice, and 404 inside `mount_at` when the
 application runs with `embedded = false`. The second binary sets its
 role before it serves. Reason: a second router would drift, and the
@@ -379,7 +383,7 @@ serves both. `mount_at` stays a build-time choice in
 `src/modules/admin.rs`.
 
 **B5. A bad configuration fails at start.** The plugin refuses an
-`addr` that is not a socket address in `configure`, in both binaries.
+`addr` that is not a socket address in `register`, in both binaries.
 The contract's `check` runs in `Admin::try_new`, which
 `AdminSettings::configure` calls: it runs the source's own check (the
 identity of decision 13) through the contract.
@@ -389,7 +393,34 @@ identity of decision 13) through the contract.
 `mount_at` to it at the proxy. One host keeps one session cookie for
 both.
 
-### 7.3 Deferred
+### 7.3 Built (v1, 2026-11-21)
+
+- `crates/brocanth-backoffice`: `contract` (the types and `TabData`),
+  `client` (`Contracted`), `server` (`InProcess`, with the owned
+  transaction of D8), `json` (the loopback), `gate` (`Gate`, `Role`,
+  `check_addr`), `scaffold` (the `backoffice` module).
+- `brocanth-admin` and `brocanth-policy` gained an off-by-default `serde`
+  feature, and `AdminConfig::data_through`.
+- `brocanth-scaffold` gained `Scaffold::app_binary` and `APP_MODS`. The
+  generator writes `src/main.rs`'s `mod` lines into the binary, lists it
+  in `Cargo.toml` with `test = false`, and keeps it as an owned file.
+  `testing::build` builds such a binary with `cargo build --bins`,
+  because `cargo test` does not.
+- Tests: `tests/contract.rs` (each type survives JSON; the contract
+  answers as the source; transactions; the claim reaches the source;
+  grants; the source's check at build), `tests/screens.rs` (`TestClient`:
+  RBAC per tab through the contract and the codec; the data side refuses
+  a write a lax policy let through), `tests/identity.rs` (Postgres, a
+  forced table: each call, each transaction and each list runs as the
+  identity of the claim), `tests/scaffold.rs` (three shapes, built with
+  `BROCANTH_BUILD=1`).
+
+Found while building: the transaction borrow (D8). `AdminData::begin`
+borrows its source, and the source bound to a claim is a new `Arc`. So
+no `TabData` could return a transaction without a change to the trait,
+or the pinned block that D8 describes.
+
+### 7.4 Deferred
 
 - The wire: an HTTP transport with the JSON codec, a service secret
   (`_file`/`_env`) on both sides, a transaction held by the server

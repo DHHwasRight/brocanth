@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 75. For all
+One page per module that `brocanth create` offers. There are 76. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -105,6 +105,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`admin`](admin.md) | a Django-shaped backoffice at /admin, locked until you say who may in | Routes |  |
 | [`admin-model`](admin-model.md) | the admin's rows over SeaORM, one line per entity | Routes | admin |
 | [`admin-actions`](admin-actions.md) | "Delete selected" on every admin list, with a confirmation page | Enhancer | admin |
+| [`backoffice`](backoffice.md) | the admin as a service of its own: a second binary that serves only the admin | Middleware, External |  |
 | [`webhooks`](webhooks.md) | signed webhooks: verified deliveries in, signed events out; pick a direction below | Enhancer |  |
 | [`webhooks-in`](webhooks-in.md) | POST /webhooks/{source}: signature, replay window and idempotency key, then your typed handler | Middleware | webhooks |
 | [`webhooks-out`](webhooks-out.md) | signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs | Enhancer | webhooks |

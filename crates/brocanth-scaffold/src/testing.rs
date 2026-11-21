@@ -618,15 +618,27 @@ pub fn build(files: &Files) -> Result<(), String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     // Not the target directory of the test that runs it, so the build does
     // not wait on that lock: the project's own, or `BROCANTH_BUILD_TARGET`.
-    let mut command = Command::new(cargo);
-    command
-        .args(["test", "--quiet"])
-        .current_dir(&dir)
-        .env_remove("CARGO_TARGET_DIR");
-    if let Some(target) = shared {
-        command.env("CARGO_TARGET_DIR", target);
+    let run = |args: &[&str]| {
+        let mut command = Command::new(&cargo);
+        command
+            .args(args)
+            .current_dir(&dir)
+            .env_remove("CARGO_TARGET_DIR");
+        if let Some(target) = &shared {
+            command.env("CARGO_TARGET_DIR", target);
+        }
+        command.output().map_err(|e| format!("cargo: {e}"))
+    };
+    let mut out = run(&["test", "--quiet"])?;
+    // `cargo test` builds no binary whose tests it does not run: a second
+    // binary that runs the application (`Scaffold::app_binary`) has
+    // `test = false`. Built here, so it compiles at least once.
+    let untested = files
+        .iter()
+        .any(|(path, text)| path == "Cargo.toml" && text.contains("\ntest = false\n"));
+    if out.status.success() && untested {
+        out = run(&["build", "--bins", "--quiet"])?;
     }
-    let out = command.output().map_err(|e| format!("cargo: {e}"))?;
     if out.status.success() {
         // A target directory of a few gigabytes per project.
         let _ = std::fs::remove_dir_all(&dir);

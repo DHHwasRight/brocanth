@@ -741,6 +741,7 @@ dependencies = [
  "brocanth-test",
  "http",
  "rsx",
+ "serde",
  "thiserror 2.0.21",
  "trybuild",
 ]
@@ -847,6 +848,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "brocanth-backoffice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-admin",
+ "brocanth-admin-model",
+ "brocanth-backoffice",
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-model",
+ "brocanth-policy",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "brocanth-bundle"
 version = "0.1.0"
 dependencies = [
@@ -911,6 +934,7 @@ dependencies = [
  "brocanth-analytics",
  "brocanth-audit",
  "brocanth-auth",
+ "brocanth-backoffice",
  "brocanth-cache",
  "brocanth-cache-redis",
  "brocanth-client",
@@ -1341,6 +1365,7 @@ dependencies = [
  "brocanth-scaffold",
  "chrono",
  "proptest",
+ "serde",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",

@@ -1,0 +1,78 @@
+[package]
+name = "brocanth-backoffice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The backoffice as a service of its own: the tab data contract the admin reaches its rows through, and the `backoffice` module that builds a second binary serving only the admin."
+readme = "README.md"
+
+# Two halves, and a project links one of them at most.
+#
+# `runtime` (default): the contract (`TabData`, its serde types), the two
+# ends of it in one process (`Contracted`, `InProcess`), a JSON loopback
+# that proves each call crosses a wire, and the `Gate` that keeps each
+# binary to its own paths. docs/backoffice.md §7.
+#
+# `scaffold`: the module `brocanth create` offers under the key
+# `backoffice`. Only the CLI asks for it, with `default-features = false`,
+# so it links no admin and no serde.
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:brocanth-admin",
+    "dep:brocanth-policy",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:async-trait",
+    "dep:thiserror",
+]
+scaffold = ["dep:brocanth-scaffold"]
+
+[dependencies]
+# The admin's data seam and its plain types, with serde derived on them.
+# No plugin half: a generated project mounts the admin itself.
+brocanth-admin = { path = "../brocanth-admin", version = "0.1.0", optional = true, default-features = false, features = [
+    "runtime",
+    "serde",
+] }
+# The compiled row scope, which a call carries (D4).
+brocanth-policy = { workspace = true, optional = true, features = ["serde"] }
+serde = { version = "1", features = ["derive"], optional = true }
+# The loopback codec. JSON because a later HTTP transport will speak it,
+# and the loopback is the proof that every call and answer survives it.
+serde_json = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+thiserror = { version = "2", optional = true }
+
+# Optional, and off. See the `scaffold` feature.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Screens through the contract: the admin and its in-memory fixture, an
+# application with the admin's plugin half, and a client that sends
+# requests to it.
+brocanth = { workspace = true }
+brocanth-admin = { workspace = true, features = ["serde"] }
+brocanth-test = { workspace = true }
+# The identity path on Postgres: the SeaORM source with `as_identity`,
+# behind the contract, over a table under forced row-level security.
+brocanth-admin-model = { workspace = true }
+brocanth-model = { workspace = true, features = ["postgres"] }
+brocanth-db = { workspace = true }
+# The entity derive names `sea_orm` by path, so the test links it by that
+# name, at the version `brocanth-admin-model` pins.
+sea-orm = { version = "=2.0.4", default-features = false, features = [
+    "with-json",
+    "with-uuid",
+    "macros",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+# The module, generated into a project by the CLI's generator, and its
+# goldens. A cycle through dev-dependencies, which cargo allows.
+brocanth-backoffice = { path = ".", features = ["scaffold"] }
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[lints.rust]
+missing_docs = "warn"

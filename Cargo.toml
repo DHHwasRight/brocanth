@@ -4,6 +4,7 @@ members = [
     "crates/brocanth",
     "crates/brocanth-admin",
     "crates/brocanth-admin-model",
+    "crates/brocanth-backoffice",
     "crates/brocanth-gtag",
     "crates/brocanth-analytics",
     "crates/brocanth-audit",
@@ -93,6 +94,7 @@ brocanth-schema = { path = "crates/brocanth-schema", version = "0.1.0", default-
 brocanth-model = { path = "crates/brocanth-model", version = "0.1.0" }
 brocanth-observe = { path = "crates/brocanth-observe", version = "0.1.0", default-features = false }
 brocanth-admin-model = { path = "crates/brocanth-admin-model", version = "0.1.0" }
+brocanth-backoffice = { path = "crates/brocanth-backoffice", version = "0.1.0", default-features = false }
 brocanth-jobs = { path = "crates/brocanth-jobs", version = "0.1.0" }
 brocanth-policy = { path = "crates/brocanth-policy", version = "0.1.0" }
 brocanth-policy-macros = { path = "crates/brocanth-policy-macros", version = "0.1.0" }

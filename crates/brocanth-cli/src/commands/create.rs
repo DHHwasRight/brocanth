@@ -1285,6 +1285,25 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         }
         files.push((path.to_string(), contents.to_string()));
     }
+    // A binary that runs the application itself gets `src/main.rs`'s
+    // `mod` lines, which only the finished build knows.
+    for bin in built.binaries().filter(|bin| bin.shares_app) {
+        let mods = app_binary_mods(a, &built, &bin.path, &files);
+        if let Some((_, text)) = files.iter_mut().find(|(path, _)| *path == bin.path) {
+            *text = text
+                .lines()
+                .map(|line| {
+                    if line.trim() == brocanth_scaffold::APP_MODS {
+                        mods.trim_end().to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+        }
+    }
 
     // The node packages the modules asked for, in one file, so a second
     // module that needs node adds a line and does not clash on the file.
@@ -2055,7 +2074,19 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // invisible to cargo and gets a section, which is also the only form a
     // reader can see from the manifest alone.
     let mut bins = String::new();
+    //
+    // A binary that runs the application itself always gets one, with
+    // `test = false`: it compiles the application's modules, so its tests
+    // are `src/main.rs`'s, and they run once. Cargo takes a `[[bin]]` for
+    // a file it found on its own when the name and the path agree.
     for bin in built.binaries() {
+        if bin.shares_app {
+            bins.push_str(&format!(
+                "\n[[bin]]\nname = {:?}\npath = {:?}\ntest = false\n",
+                bin.name, bin.path
+            ));
+            continue;
+        }
         if bin.path == format!("src/bin/{}.rs", bin.name) {
             continue;
         }
@@ -2775,6 +2806,69 @@ impl Signals {
 /// is `(name, text)`, because a module with an attribute sorts by its
 /// name and not by the `#`.
 fn crate_mods(own: &[(&str, &str)], built: &Built) -> String {
+    crate_mod_entries(own, built)
+        .into_iter()
+        .map(|(_, text)| text + "\n")
+        .collect()
+}
+
+/// The generator's own `mod` lines of `src/main.rs`, before the modules'.
+/// `flags` is whether any module declared a setting.
+fn main_own_mods(a: &Answers, flags: bool) -> Vec<(&'static str, &'static str)> {
+    if !a.has("commands") {
+        let mut own = vec![("app", "mod app;")];
+        if flags {
+            own.push(("modules", "mod modules;"));
+        }
+        own.extend([("pages", "mod pages;"), ("plugins", "mod plugins;")]);
+        return own;
+    }
+    let mut own = vec![
+        ("app", "mod app;"),
+        ("commands", "mod commands;"),
+        ("pages", "mod pages;"),
+        ("plugins", "mod plugins;"),
+    ];
+    if flags {
+        own.push(("modules", "mod modules;"));
+    }
+    // Outside `src/`, where `migrate make` writes, so the path is
+    // spelled. Only with a command line: `migrate` is what reads it.
+    if a.has("model") {
+        own.push((
+            "migrations",
+            "#[path = \"../migrations/mod.rs\"]\nmod migrations;",
+        ));
+    }
+    own
+}
+
+/// The `mod` lines of a binary that runs the application itself
+/// (`Scaffold::app_binary`): the lines of `src/main.rs`, each with the
+/// `#[path]` that reaches its file from the binary's directory. `files`
+/// is every file of the project, to tell `src/x.rs` from `src/x/mod.rs`.
+fn app_binary_mods(a: &Answers, built: &Built, bin: &str, files: &[(String, String)]) -> String {
+    // `src/bin/backoffice.rs` is one directory below `src/`.
+    let up = "../".repeat(bin.matches('/').count().saturating_sub(1));
+    crate_mod_entries(&main_own_mods(a, has_settings(built)), built)
+        .into_iter()
+        .map(|(name, text)| {
+            if let Some(rest) = text.strip_prefix("#[path = \"") {
+                return format!("#[path = \"{up}{rest}\n");
+            }
+            let dir = format!("src/{name}/mod.rs");
+            let file = if files.iter().any(|(path, _)| *path == dir) {
+                format!("{name}/mod.rs")
+            } else {
+                format!("{name}.rs")
+            };
+            format!("#[path = \"{up}{file}\"]\n{text}\n")
+        })
+        .collect()
+}
+
+/// [`crate_mods`] as `(name, text)` pairs, sorted.
+fn crate_mod_entries(own: &[(&str, &str)], built: &Built) -> Vec<(String, String)> {
     let theirs: Vec<(String, String)> = built
         .slot(Slot::MainMods)
         .map(|line| {
@@ -2793,7 +2887,7 @@ fn crate_mods(own: &[(&str, &str)], built: &Built) -> String {
         .collect();
     all.sort();
     all.dedup();
-    all.into_iter().map(|(_, text)| text + "\n").collect()
+    all
 }
 
 fn main_serve_only_rs(a: &Answers, built: &Built, flags: bool) -> String {
@@ -2823,14 +2917,7 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
-        mods = crate_mods(
-            &[
-                ("app", "mod app;"),
-                ("pages", "mod pages;"),
-                ("plugins", "mod plugins;")
-            ],
-            built
-        ),
+        mods = crate_mods(&main_own_mods(a, false), built),
     )
 }
 
@@ -2869,37 +2956,13 @@ fn main() -> ExitCode {{
 }}
 "##,
         title = a.title,
-        mods = crate_mods(
-            &[
-                ("app", "mod app;"),
-                ("modules", "mod modules;"),
-                ("pages", "mod pages;"),
-                ("plugins", "mod plugins;")
-            ],
-            built
-        ),
+        mods = crate_mods(&main_own_mods(a, true), built),
     )
 }
 
 /// `src/main.rs` when the project has a command line: it is the command line.
 fn main_with_commands_rs(a: &Answers, built: &Built, flags: bool) -> String {
-    let mut own = vec![
-        ("app", "mod app;"),
-        ("commands", "mod commands;"),
-        ("pages", "mod pages;"),
-        ("plugins", "mod plugins;"),
-    ];
-    if flags {
-        own.push(("modules", "mod modules;"));
-    }
-    // Outside `src/`, where `migrate make` writes, so the path is
-    // spelled. Only with a command line: `migrate` is what reads it.
-    if a.has("model") {
-        own.push((
-            "migrations",
-            "#[path = \"../migrations/mod.rs\"]\nmod migrations;",
-        ));
-    }
+    let own = main_own_mods(a, flags);
     format!(
         r##"//! {title} -- a brocanth application.
 //!
@@ -4998,6 +5061,14 @@ fn flags_rs(a: &Answers, built: &Built) -> String {
     }
     if a.has("commands") {
         out.push_str(FLAG_ARGS);
+        // A binary that runs the application itself has no `clap`: it
+        // reads the flags as a project with no command line does.
+        if built.binaries().any(|bin| bin.shares_app) {
+            out.push_str(&READ_LINE.replace(
+                "///\n/// This binary has no command line of its own: `brocanth add commands` gives\n/// it one, and `clap` does this.\npub fn read_line",
+                "///\n/// For the binaries that run the application with no command line, such as\n/// `src/bin/backoffice.rs`. The command line reads its flags with `clap`.\n#[allow(dead_code)]\npub fn read_line",
+            ));
+        }
     } else {
         out.push_str(READ_LINE);
     }

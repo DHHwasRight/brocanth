@@ -731,7 +731,11 @@ What was built, and the choices made on the way:
 
 Left for later: tab data traits with serde types (`AdminData` and
 `AccountDirectory` are async, the other tabs read a crate handle), and a
-second binary.
+second binary. **Built for the model screens (2026-11-21):**
+`brocanth-backoffice` has the tab data contract (`TabData`, serde types,
+a `Claim` on each call) and the `backoffice` module writes
+`src/bin/backoffice.rs`. See `docs/backoffice.md` §7. The panels' data
+traits are still to do.
 
 **Stage 3 — settings layers and `ConfigSource` (3-4 days).** One
 registration form; secret pointer flags (`_file`, `_env`). Exit:

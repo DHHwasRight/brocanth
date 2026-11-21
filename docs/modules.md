@@ -135,6 +135,7 @@ asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
 | `brocanth-resource` | bundle | `RouterMounts`, `PluginsMod` | `pages::mount` into the one table; `RouteSource` for other hosts |
 | `brocanth-admin` | bundle | `RouterMounts`, `PagesRoutes`, `AgentsSections` | a page-shaped `mount` the project owns; `RouteSource` for other hosts |
 | `brocanth-admin-model` | service | a file, `src/plugins/admin/models.rs`; `admin` adapts | `AdminData` over SeaORM, on the `Orm` from the context |
+| `brocanth-backoffice` | edge + tooling | `backoffice`: `Scaffold::app_binary` (`src/bin/backoffice.rs`), a file, `PluginsMod`, `AppPlugins`, `ServerWrap`, `AdminPanels`, `MiseTasks`, `AgentsSections` | `Plugin`, `Services` (the `Gate`), `TabData` between the admin and its source |
 | `brocanth-events` | service | — | `RowChange` carrier: the `ChangeSink` trait and `FanOut` |
 | `brocanth-assets` | **renderer-like** | written by hand in `create.rs` | — |
 | `rsx` | **renderer** | `PagesRenderers`, five template files | — |
