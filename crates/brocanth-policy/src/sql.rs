@@ -81,6 +81,7 @@ use crate::value::Value;
 /// entry point still takes a `Dialect` argument, so the call site names the
 /// database it compiles for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Dialect {
     /// PostgreSQL: numbered placeholders, real booleans, and
     /// `IS DISTINCT FROM` for the null-safe comparisons PLAN.md §9 is about.
@@ -119,7 +120,13 @@ impl Dialect {
 ///
 /// `Debug` prints the SQL and the number of binds, never their values: a
 /// `?condition` in a log line must not carry an id or a token.
+///
+/// With the `serde` feature it serialises, and a deserialised condition is
+/// run as the admin compiled it. Accept one only from a caller you trust
+/// with your SQL, such as an authenticated backoffice service: it is SQL
+/// text, and nothing here can check where it came from.
 #[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Condition {
     sql: String,
     binds: Vec<Value>,

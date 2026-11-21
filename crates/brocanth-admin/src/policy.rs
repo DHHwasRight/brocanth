@@ -124,6 +124,8 @@ impl Action {
 /// `jobs.read`, `post.edit`, `cache.owner`. Each level includes the ones
 /// below it. See `docs/module-capabilities.md` §5.2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
 pub enum Level {
     /// See the tab or the model's screens.
     Read,

@@ -9,6 +9,7 @@ use crate::model::ModelDescriptor;
 
 /// Which way a column is sorted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Direction {
     /// Smallest first.
     #[default]
@@ -46,6 +47,7 @@ impl Direction {
 
 /// A sort: a column and a direction.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Sort {
     /// The column sorted on.
     pub column: String,

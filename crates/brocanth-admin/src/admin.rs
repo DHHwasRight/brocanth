@@ -315,6 +315,12 @@ impl Admin {
     /// [`AdminError::Config`], with a `help:` line.
     pub fn try_new(data: SharedData, mut config: AdminConfig) -> Result<Admin, AdminError> {
         let invalid = |message: String| Err(AdminError::Config(message));
+        // A contract the source is reached through, such as the
+        // backoffice's: the check below and every request use it.
+        let data = match config.take_data_through() {
+            Some(through) => through(data),
+            None => data,
+        };
         // The source's own configuration, such as the database identity
         // it runs each request as: refused here, at start, and not by the
         // first request.

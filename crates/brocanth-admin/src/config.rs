@@ -837,7 +837,13 @@ pub struct AdminConfig {
     pub(crate) actions: Vec<crate::actions::BulkAction>,
     pub(crate) journal: Option<std::sync::Arc<dyn crate::journal::Journal>>,
     pub(crate) record_links: Vec<(String, crate::journal::RecordLinkFn)>,
+    data_through: Option<DataThrough>,
 }
+
+/// What [`AdminConfig::data_through`] keeps: a map from the data source the
+/// admin is given to the one it uses.
+pub type DataThrough =
+    std::sync::Arc<dyn Fn(crate::data::SharedData) -> crate::data::SharedData + Send + Sync>;
 
 impl std::fmt::Debug for AdminConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -851,6 +857,7 @@ impl std::fmt::Debug for AdminConfig {
                 &self.resources.iter().map(|r| r.model()).collect::<Vec<_>>(),
             )
             .field("unscoped_rows", &self.unscoped_rows)
+            .field("data_through", &self.data_through.is_some())
             .field(
                 "panels",
                 &self.panels.iter().map(|p| p.key()).collect::<Vec<_>>(),
@@ -887,7 +894,31 @@ impl AdminConfig {
             actions: Vec::new(),
             journal: None,
             record_links: Vec::new(),
+            data_through: None,
         }
+    }
+
+    /// Sends every read and write through `through(data)` instead of
+    /// `data`, the source the admin is given.
+    ///
+    /// [`Admin::try_new`](crate::Admin::try_new) applies it first, so the
+    /// start-time check and every request use the mapped source. The
+    /// `backoffice` module puts the admin on its tab data contract with
+    /// it (docs/backoffice.md §7.1, D9): one line in a generated file,
+    /// and no edit to the admin's own file. A second call replaces the
+    /// first.
+    pub fn data_through(
+        mut self,
+        through: impl Fn(crate::data::SharedData) -> crate::data::SharedData + Send + Sync + 'static,
+    ) -> Self {
+        self.data_through = Some(std::sync::Arc::new(through));
+        self
+    }
+
+    /// Takes the map [`AdminConfig::data_through`] set out.
+    /// [`Admin::try_new`](crate::Admin::try_new) calls this once.
+    pub(crate) fn take_data_through(&mut self) -> Option<DataThrough> {
+        self.data_through.take()
     }
 
     /// Puts one model's rows under its entity's policy.

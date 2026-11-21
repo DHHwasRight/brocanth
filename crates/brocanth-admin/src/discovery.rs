@@ -43,6 +43,7 @@ pub fn is_migration_table(table: &str) -> bool {
 /// adapter in [`crate::adapter`] can fill it from SeaORM without this crate
 /// depending on SeaORM.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegistryEntry {
     /// Rust module path, as `inventory` reports it: `my_app::models::user`.
     pub module_path: String,

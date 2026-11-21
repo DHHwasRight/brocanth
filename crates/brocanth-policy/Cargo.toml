@@ -55,6 +55,13 @@ brocanth-policy-macros = { workspace = true, optional = true }
 uuid = { version = "1", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, optional = true }
 
+# `Serialize` and `Deserialize` on `Value`, `Dialect` and `Condition`, so a
+# compiled condition can cross a process: `brocanth-backoffice` carries the
+# admin's row scope in its tab data contract (docs/backoffice.md §7.1, D4).
+# Optional and off: an application that keeps its rules in one process
+# links no serde for them.
+serde = { version = "1", features = ["derive"], optional = true }
+
 [dependencies.proptest]
 # Optional, and off. PLAN.md §9 obligation 1 says opting into `eval()`
 # generates a property test asserting `eval(row) == (row in query(condition))`.
@@ -116,6 +123,9 @@ uuid = ["dep:uuid"]
 # `chrono::DateTime<Utc>` as a column type, a value and a subject attribute
 # (`timestamptz`).
 chrono = ["dep:chrono"]
+
+# `Serialize` and `Deserialize` on a compiled condition. See the dependency.
+serde = ["dep:serde"]
 
 # The scaffold module, for `brocanth create`. Off by default: see the
 # dependency line above for why the generator is not an application's

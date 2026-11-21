@@ -14,6 +14,7 @@ use std::fmt;
 /// unrecognised lands on [`ColumnKind::Unknown`] and gets a text input, which
 /// is the safe answer rather than a wrong one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColumnKind {
     /// A short string: `char`, `string`, `var_char`.
     Text,
@@ -115,6 +116,7 @@ impl ColumnKind {
 /// source, or declared on the model's configuration with
 /// [`crate::config::ModelAdmin::foreign_key`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Relation {
     /// The key of the model this column points at.
     pub target: String,
@@ -134,6 +136,7 @@ impl Relation {
 
 /// One column, as the admin needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ColumnDescriptor {
     /// Column name as the database spells it.
     pub name: String,
@@ -230,6 +233,7 @@ impl ColumnDescriptor {
 
 /// One model, as the admin needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModelDescriptor {
     /// The slug this model is addressed by in a URL, and the key every other
     /// part of the admin refers to it with.
@@ -290,6 +294,7 @@ impl ModelDescriptor {
 /// type here would mean choosing a date library, and §8 says the core of a
 /// thing ships nothing it was not asked for.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Value {
     /// `NULL`.
     Null,
@@ -384,6 +389,7 @@ impl From<bool> for Value {
 
 /// One record: column names to values, in column order.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Row {
     values: Vec<(String, Value)>,
 }
@@ -436,6 +442,7 @@ impl Row {
 /// Composite keys are supported: the parts keep their column names, and the
 /// URL form joins the values with a comma.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PrimaryKey {
     parts: Vec<(String, String)>,
 }

@@ -37,6 +37,12 @@ runtime = [
 # text and reads nothing from this crate, so it needs neither `runtime`,
 # `plugin` nor the core.
 scaffold = ["dep:brocanth-scaffold"]
+# `Serialize` and `Deserialize` on the plain data a data source trades in:
+# a model, its columns, a row, a value, a key, field errors, a sort, a
+# level. `brocanth-backoffice` turns it on to carry the admin's calls in a
+# tab data contract that can cross a process (docs/backoffice.md §7.1).
+# Off by default, so the admin alone still links no serde.
+serde = ["runtime", "dep:serde", "brocanth-policy/serde"]
 
 [dependencies]
 brocanth = { workspace = true, optional = true }
@@ -63,6 +69,9 @@ brocanth-pagination = { workspace = true, optional = true, features = ["runtime"
 
 # Optional, and off. See the `scaffold` feature.
 brocanth-scaffold = { workspace = true, optional = true }
+
+# Optional, and off. See the `serde` feature.
+serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 # This crate with its `scaffold` side, so `cargo test -p brocanth-admin` runs

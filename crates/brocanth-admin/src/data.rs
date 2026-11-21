@@ -54,6 +54,7 @@ use crate::query::Sort;
 /// a record is invalid by trying. Returning them in this shape is what lets
 /// the form re-render with the message beside the field that caused it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FieldErrors {
     entries: Vec<(String, String)>,
     base: Vec<String>,
@@ -227,6 +228,7 @@ pub struct ListRequest<'a> {
 /// that reads no row returns `None`, and the admin then journals the row it
 /// read before the write, which another write may have changed meanwhile.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Locked {
     /// Rows changed. Zero means what it means for [`AdminData::update`].

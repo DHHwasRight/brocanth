@@ -55,6 +55,7 @@ use std::fmt;
 /// this enum is the same with every feature set. The conversions from those
 /// types are behind the `uuid` and `chrono` features.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Value {
     /// SQL `NULL`. Absence, not a value: see [`crate::Truth`].
     Null,
