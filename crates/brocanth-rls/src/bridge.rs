@@ -486,10 +486,12 @@ impl SqlExpr {
 enum Slot {
     /// The rule admits no row: no policy, no grant.
     Never,
-    /// `USING` and `WITH CHECK`, as the command takes them.
+    /// `USING` and `WITH CHECK`, as the command takes them, and the link
+    /// tables their `exists` terms read.
     Rule {
         using: Option<SqlExpr>,
         check: Option<SqlExpr>,
+        links: Vec<String>,
     },
     /// The database cannot enforce it; `.manual(…)` can replace it.
     Refused(Refusal),
@@ -562,6 +564,12 @@ impl Policy {
     /// command that has a policy. With [`RulePolicies::sequence`], the role
     /// also gets `USAGE` on the table's sequence when it may insert.
     ///
+    /// The role also gets `SELECT` on each link table an `exists` reads
+    /// ([`RulePolicies::link_tables`], bridge decision 15): the subquery
+    /// runs as the role. If the link table has row-level security, its own
+    /// policies filter the subquery, so with no `SELECT` policy there for
+    /// the role the `exists` admits no row.
+    ///
     /// The write masks (decision 9): a `writable` mask with no guard grants
     /// `UPDATE` on its columns instead of the table, and
     /// `writable_on_create` (or `writable`) does the same for `INSERT`. A
@@ -632,6 +640,12 @@ fn command_slot<C: Column>(
     rules: &[&Rule<C>],
     translate: impl FnOnce() -> Result<(Option<Folded>, Option<Folded>), Refusal>,
 ) -> Slot {
+    // The link tables of the rules the command reads. `update_check` is read
+    // only when `update` admits a row; when it does not, the slot is `Never`.
+    let mut links = Vec::new();
+    for rule in rules {
+        link_tables(rule, table, &mut links);
+    }
     if let Some(reason) = rules.iter().find_map(|r| r.app_only) {
         return Slot::Refused(Refusal::new(
             format!("the rule for {table} {command} is app-only ({reason}), so the database has no rule for it"),
@@ -647,9 +661,32 @@ fn command_slot<C: Column>(
             Slot::Rule {
                 using: using.map(Folded::into_expr),
                 check: check.map(Folded::into_expr),
+                links,
             }
         }
     }
+}
+
+/// The link tables each `exists` of `rule` reads, but `own`, the policy's
+/// table: its grant is the policy's own. In first-seen order, once each.
+fn link_tables<C: Column>(rule: &Rule<C>, own: &str, out: &mut Vec<String>) {
+    fn walk<C: Column>(term: &Term<C>, own: &str, out: &mut Vec<String>) {
+        match term {
+            Term::Exists(e) => {
+                let table = e.table.as_str();
+                if table != own && !out.iter().any(|t| t == table) {
+                    out.push(table.to_string());
+                }
+            }
+            Term::All(parts) | Term::Any(parts) => parts.iter().for_each(|t| walk(t, own, out)),
+            Term::Not(inner) => walk(inner, own, out),
+            Term::Always | Term::Never | Term::Cmp { .. } | Term::In { .. } => {}
+        }
+    }
+    for (_, term) in &rule.arms {
+        walk(term, own, out);
+    }
+    walk(&rule.fallback, own, out);
 }
 
 fn rule_refusal(table: &str, command: Command, r: Refusal) -> Refusal {
@@ -682,7 +719,13 @@ impl RulePolicies {
         };
         for (c, slot) in &mut self.slots {
             if *c == command {
-                *slot = Slot::Rule { using, check };
+                // A hand-written expression reads what it names: grant its
+                // tables in `schema()`.
+                *slot = Slot::Rule {
+                    using,
+                    check,
+                    links: Vec::new(),
+                };
                 break;
             }
         }
@@ -713,7 +756,7 @@ impl RulePolicies {
             let (using, check) = match slot {
                 Slot::Never => continue,
                 Slot::Refused(r) => return Err(r.into_error()),
-                Slot::Rule { using, check } => (using, check),
+                Slot::Rule { using, check, .. } => (using, check),
             };
             let (suffix, privilege, write) = match command {
                 Command::Select => ("select", Privilege::Select, &Write::Table),
@@ -743,6 +786,34 @@ impl RulePolicies {
             table = table.grant_columns(&self.role, privilege, names);
         }
         Ok((table, policies))
+    }
+
+    /// The link tables the policies read through `exists`, each once: the
+    /// role needs `SELECT` on each, or the subquery fails with `permission
+    /// denied`. [`Schema::policies`] grants it. A command with no policy
+    /// (its rule admits no row, or its mask permits no column) reads none,
+    /// and nor does a [`RulePolicies::manual`] expression.
+    pub fn link_tables(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (command, slot) in &self.slots {
+            let Slot::Rule { links, .. } = slot else {
+                continue;
+            };
+            let write = match command {
+                Command::Insert => &self.insert,
+                Command::Update => &self.update,
+                _ => &Write::Table,
+            };
+            if matches!(write, Write::Columns(names) if names.is_empty()) {
+                continue;
+            }
+            for link in links {
+                if !out.contains(link) {
+                    out.push(link.clone());
+                }
+            }
+        }
+        out
     }
 
     /// One line when a write mask with a guard leaves a granted command
@@ -788,10 +859,13 @@ impl<I: IntoIterator<Item = Policy>> IntoPolicies for I {
 
 impl IntoPolicies for RulePolicies {
     fn add_to(self, schema: Schema) -> Schema {
-        let schema = match self.warning() {
+        let mut schema = match self.warning() {
             Some(line) => schema.warn(line),
             None => schema,
         };
+        for link in self.link_tables() {
+            schema = schema.link_grant(link, &self.role);
+        }
         match self.build() {
             Ok((table, policies)) => schema.table(table).extend_policies(policies),
             Err(e) => schema.refuse(e),

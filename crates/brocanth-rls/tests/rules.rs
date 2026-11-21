@@ -460,3 +460,139 @@ fn attrs_is_the_derives_list() {
     let keys: Vec<&str> = Visitor::ATTRS.iter().map(|a: &Attr| a.key).collect();
     assert_eq!(keys, ["user_id", "tenant_id", "admin", "banned", "role"]);
 }
+
+/// A policy whose `list` reads `post_members` through `exists`, or not.
+fn members_list(reads: bool) -> Rules<common::policy::Post> {
+    let mut rules = Rules::deny_all();
+    rules.list = Rule::new(if reads {
+        Term::Any(vec![
+            membership(false, Missing::Deny),
+            cmp(Status, Op::Eq, lit("published")),
+        ])
+    } else {
+        cmp(Status, Op::Eq, lit("published"))
+    });
+    rules
+}
+
+#[test]
+fn from_rules_grants_select_on_the_link_table_an_exists_reads() {
+    pub struct Reads;
+    db_policy!(Reads, members_list(true));
+    pub struct Plain;
+    db_policy!(Plain, members_list(false));
+
+    let with = schema(Policy::from_rules::<Reads>(&app_user()));
+    let sql = with.create_sql().unwrap();
+    assert!(
+        sql.contains(
+            "-- create grant SELECT on link table post_members to app_user\nGRANT SELECT ON \"post_members\" TO \"app_user\";"
+        ),
+        "{sql}"
+    );
+    // The link table gets no row-level security from the grant.
+    assert!(!sql.contains(r#"ALTER TABLE "post_members""#), "{sql}");
+    let with = with.snapshot().unwrap();
+    assert_eq!(
+        with.link_grants["post_members"].iter().collect::<Vec<_>>(),
+        ["app_user"]
+    );
+    assert!(!with.tables.contains_key("post_members"));
+    // In `rls.json`, and an older file without the field reads as none.
+    let json = with.to_json();
+    assert!(json.contains("\"link_grants\""), "{json}");
+    let without = schema(Policy::from_rules::<Plain>(&app_user()))
+        .snapshot()
+        .unwrap();
+    assert!(!without.to_json().contains("link_grants"));
+    assert!(without.link_grants.is_empty());
+
+    // The rule stops reading it: the diff revokes it, and the way back
+    // grants it again.
+    let plan = brocanth_rls::diff(&with, &without).unwrap();
+    assert!(
+        plan.sql()
+            .contains(r#"REVOKE SELECT ON "post_members" FROM "app_user";"#),
+        "{}",
+        plan.sql()
+    );
+    let back = brocanth_rls::diff(&without, &with).unwrap();
+    assert_eq!(
+        back.describe(),
+        [
+            "alter policy posts_app_user_select on posts",
+            "create grant SELECT on link table post_members to app_user"
+        ]
+    );
+    assert!(brocanth_rls::diff(&with, &with).unwrap().is_empty());
+}
+
+#[test]
+fn a_link_table_the_schema_adds_takes_the_select_on_its_own_grants() {
+    pub struct Reads;
+    db_policy!(Reads, members_list(true));
+    let role = app_user();
+    let snapshot = schema(Policy::from_rules::<Reads>(&role))
+        .table(Table::named("post_members").grant(&role, [brocanth_rls::Privilege::Insert]))
+        .snapshot()
+        .unwrap();
+    assert!(snapshot.link_grants.is_empty());
+    let members = &snapshot.tables["post_members"];
+    assert_eq!(
+        members.grants["app_user"]
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [
+            brocanth_rls::Privilege::Select,
+            brocanth_rls::Privilege::Insert
+        ]
+    );
+
+    // A column `SELECT` the developer chose stays as it is.
+    let snapshot = schema(Policy::from_rules::<Reads>(&role))
+        .table(Table::named("post_members").grant_columns(
+            &role,
+            brocanth_rls::Privilege::Select,
+            ["post_id", "user_id", "kind"],
+        ))
+        .snapshot()
+        .unwrap();
+    let members = &snapshot.tables["post_members"];
+    assert!(members.grants.is_empty());
+    assert!(snapshot.link_grants.is_empty());
+}
+
+#[test]
+fn a_command_with_no_policy_or_a_manual_expression_reads_no_link_table() {
+    // Only `update` reads the link table, and `.manual` replaces it.
+    pub struct UpdateReads;
+    db_policy!(UpdateReads, {
+        let mut rules = Rules::deny_all();
+        rules.list = Rule::new(Term::Always);
+        rules.update = Rule::new(membership(false, Missing::Deny));
+        rules
+    });
+    let policies = Policy::from_rules::<UpdateReads>(&app_user());
+    assert_eq!(policies.link_tables(), ["post_members"]);
+    let manual = policies.manual(Command::Update, SqlExpr::always());
+    assert!(manual.link_tables().is_empty());
+    assert!(schema(manual).snapshot().unwrap().link_grants.is_empty());
+
+    // A link to the policy's own table is the table's own grant.
+    pub struct SelfLink;
+    db_policy!(SelfLink, {
+        let mut rules = Rules::deny_all();
+        rules.list = Rule::new(Term::Exists(Box::new(Exists {
+            local: AuthorId,
+            table: Ident::must("posts"),
+            foreign: Ident::must("author_id"),
+            filter: vec![],
+            negated: false,
+        })));
+        rules
+    });
+    assert!(Policy::from_rules::<SelfLink>(&app_user())
+        .link_tables()
+        .is_empty());
+}

@@ -234,6 +234,8 @@ fn same(a: &Node<'_>, b: &Node<'_>) -> bool {
         // The key holds the sequence and the grantee: nothing else to compare.
         (Node::SequenceUsage(..), Node::SequenceUsage(..)) => true,
         (Node::ColumnGrant(_, _, _, a), Node::ColumnGrant(_, _, _, b)) => a == b,
+        // The key holds the table and the grantee.
+        (Node::LinkGrant(..), Node::LinkGrant(..)) => true,
         _ => a == b,
     }
 }
@@ -470,6 +472,11 @@ fn create_sql(node: &Node<'_>) -> Vec<String> {
             table_sql(t),
             grantee_sql(grantee)
         )],
+        Node::LinkGrant(table, grantee) => vec![format!(
+            "GRANT SELECT ON {} TO {}",
+            quote(table),
+            grantee_sql(grantee)
+        )],
     }
 }
 
@@ -576,6 +583,11 @@ fn drop_sql(node: &Node<'_>) -> Vec<String> {
             "REVOKE {} ON {} FROM {}",
             columns_sql(*privilege, columns.iter()),
             table_sql(t),
+            grantee_sql(grantee)
+        )],
+        Node::LinkGrant(table, grantee) => vec![format!(
+            "REVOKE SELECT ON {} FROM {}",
+            quote(table),
             grantee_sql(grantee)
         )],
     }

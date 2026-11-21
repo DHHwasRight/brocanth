@@ -412,7 +412,9 @@ pub policy PostPolicy(who: &Visitor) for Post {
 
 The emitted `#[cfg(test)]` test calls `brocanth_rls::agreement::run`. Per
 case, it creates a schema, the table from the entity's column types, the
-link tables of each `exists`, and the policies `rls make` writes. It
+link tables of each `exists`, and the policies `rls make` writes. Those
+policies grant the role `SELECT` on each link table (bridge decision 15),
+so `schema()` needs no grant by hand. It
 inserts generated rows (with `NULL`s and near-misses) and, for each
 subject, compares `SELECT`, `INSERT`, `UPDATE` and `DELETE` as the
 application and as the database. On a difference, it prints the subject,

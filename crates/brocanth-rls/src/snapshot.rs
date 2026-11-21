@@ -30,6 +30,12 @@ pub struct Snapshot {
     /// Tables by key, with their grants and policies.
     #[serde(default)]
     pub tables: BTreeMap<String, TableSpec>,
+    /// `SELECT` on tables that are not in [`Snapshot::tables`], by table,
+    /// with the grantees: the link tables an `exists` rule reads
+    /// (docs/policy-rls-bridge.md §3). Absent from the file when there is
+    /// none, so an older `rls.json` reads the same.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub link_grants: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Default for Snapshot {
@@ -39,6 +45,7 @@ impl Default for Snapshot {
             roles: BTreeMap::new(),
             functions: BTreeMap::new(),
             tables: BTreeMap::new(),
+            link_grants: BTreeMap::new(),
         }
     }
 }

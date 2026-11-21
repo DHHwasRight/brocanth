@@ -2,8 +2,8 @@
 //!
 //! It compares structure only: roles and their attributes and members,
 //! `relrowsecurity` and `relforcerowsecurity`, policy names, `permissive`,
-//! `cmd`, `roles`, table and column privileges, sequence `USAGE`, and that each
-//! function exists. [`owned_unforced`] answers another question for
+//! `cmd`, `roles`, table and column privileges, sequence `USAGE`, `SELECT`
+//! on each link table, and that each function exists. [`owned_unforced`] answers another question for
 //! `rls check`: which unforced tables the login owns. It
 //! reports what the database lacks and what it has beyond the snapshot: an
 //! extra policy, an extra privilege on a managed table (`PUBLIC` included),
@@ -277,6 +277,27 @@ pub async fn drift(db: &Db, snapshot: &Snapshot) -> Result<Vec<String>, RlsError
         }
         for extra in live.iter().filter(|p| !t.policies.contains_key(**p)) {
             out.push(format!("policy {extra} on {key}: not in the schema"));
+        }
+    }
+
+    // A link table is not managed: only the `SELECT` the schema grants is
+    // compared, not the table's other privileges.
+    for (table, grantees) in &snapshot.link_grants {
+        let row: Option<(Vec<String>,)> = sqlx::query_as(
+            "SELECT ARRAY(SELECT CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END \
+             FROM aclexplode(c.relacl) a WHERE a.privilege_type = 'SELECT' AND a.grantee <> c.relowner) \
+             FROM pg_catalog.pg_class c WHERE c.oid = to_regclass($1)",
+        )
+        .bind(qualified(None, table))
+        .fetch_optional(pool)
+        .await
+        .map_err(q)?;
+        let Some((live,)) = row else {
+            out.push(format!("link table {table}: missing"));
+            continue;
+        };
+        for grantee in grantees.iter().filter(|g| !live.contains(g)) {
+            out.push(format!("link table {table}: {grantee} lacks SELECT"));
         }
     }
     Ok(out)

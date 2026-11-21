@@ -20,9 +20,11 @@ use std::str::FromStr;
 use brocanth_db::sea_query::{Expr, ExprTrait, Order, Query};
 use brocanth_db::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use brocanth_db::{Db, DbError, DbIdentity, Exec};
-use brocanth_policy::{FieldMask, MaskRule, Subject, Value};
+use brocanth_policy::{
+    Exists, FieldMask, Ident, MaskRule, Missing, Op, Rule, Rules, Subject, Term, Value,
+};
 use brocanth_rls::{catalog, Policy, Role, Schema};
-use common::policy::{db_policy, post_rules, PostColumn, PostDb, Visitor};
+use common::policy::{attr, db_policy, post_rules, PostColumn, PostDb, Visitor};
 use common::{apply, connect, example, setup, teardown, url, Names};
 
 macro_rules! require_db {
@@ -235,6 +237,133 @@ async fn the_rules_hold_in_the_database_for_each_subject() {
             n.member
         )]
     );
+
+    scoped.close().await;
+    login.close().await;
+    teardown(&admin, &n).await;
+}
+
+/// `list` reads the link table `post_members` through `exists`: a post
+/// shows to its members.
+pub struct MemberList;
+db_policy!(MemberList, {
+    let mut rules = Rules::deny_all();
+    rules.list = Rule::new(Term::Exists(Box::new(Exists {
+        local: PostColumn::Id,
+        table: Ident::must("post_members"),
+        foreign: Ident::must("post_id"),
+        filter: vec![(
+            Ident::must("user_id"),
+            Op::Eq,
+            attr("user_id", Missing::Deny),
+        )],
+        negated: false,
+    })));
+    rules
+});
+
+#[tokio::test]
+async fn from_rules_grants_the_link_table_and_its_own_policy_filters_the_exists() {
+    let url = require_db!();
+    let n = Names::unique("rls_link");
+    let admin = connect(&url, None).await;
+    teardown(&admin, &n).await;
+    let s = &n.schema;
+    apply(
+        &admin,
+        &format!(
+            "CREATE ROLE {login} LOGIN PASSWORD 'pw' NOINHERIT;
+             CREATE SCHEMA {s};
+             CREATE TABLE {s}.posts (id bigint PRIMARY KEY, author_id bigint, tenant_id bigint NOT NULL, status text NOT NULL, title text NOT NULL);
+             CREATE TABLE {s}.post_members (post_id bigint NOT NULL, user_id bigint NOT NULL);
+             INSERT INTO {s}.posts VALUES (1, NULL, 1, 'draft', 'one'), (2, NULL, 1, 'draft', 'two');
+             INSERT INTO {s}.post_members VALUES (1, 7);",
+            login = n.login,
+        ),
+    )
+    .await;
+    let member = Role::new(&n.member).member(&n.login);
+    let schema = Schema::new()
+        .role(member.clone())
+        .role(Role::existing(&n.login))
+        .policies(Policy::from_rules::<MemberList>(&member));
+    let sql = schema.create_sql().unwrap();
+    assert!(
+        sql.contains(&format!(
+            r#"GRANT SELECT ON "post_members" TO "{}""#,
+            n.member
+        )),
+        "{sql}"
+    );
+    apply(&admin, &format!("SET LOCAL search_path = {s};\n{sql}")).await;
+    apply(
+        &admin,
+        &format!("GRANT USAGE ON SCHEMA {s} TO {}", n.member),
+    )
+    .await;
+    let snapshot = schema.snapshot().unwrap();
+    let scoped = admin_in(&url, s).await;
+    let drift = catalog::drift(&scoped, &snapshot).await.unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
+
+    // No grant by hand: the member reads the link table.
+    let login = connect(&url, Some(&n.login)).await;
+    let (seven, eight) = (
+        identity(&n, &visitor(Some(7), false, false)),
+        identity(&n, &visitor(Some(8), false, false)),
+    );
+    assert_eq!(ids(&login, &n, &seven).await, [1]);
+    assert!(ids(&login, &n, &eight).await.is_empty());
+
+    // The catalog check sees a revoked link grant, and the subquery fails.
+    apply(
+        &admin,
+        &format!("REVOKE SELECT ON {s}.post_members FROM {}", n.member),
+    )
+    .await;
+    let drift = catalog::drift(&scoped, &snapshot).await.unwrap();
+    assert_eq!(
+        drift,
+        [format!(
+            "link table post_members: {} lacks SELECT",
+            n.member
+        )]
+    );
+    let q = Query::select()
+        .column("id")
+        .from((n.schema.clone(), "posts".to_string()))
+        .to_owned();
+    let denied: Result<Vec<(i64,)>, DbError> =
+        login.transact_as(&seven, async |tx| tx.all(&q).await).await;
+    let e = denied.unwrap_err();
+    assert_refused(&e, "42501", "permission denied for table post_members");
+    apply(
+        &admin,
+        &format!("GRANT SELECT ON {s}.post_members TO {}", n.member),
+    )
+    .await;
+
+    // Row-level security on the link table, and no policy there for the
+    // role: the subquery sees no row, so the `exists` rule denies.
+    apply(
+        &admin,
+        &format!(
+            "ALTER TABLE {s}.post_members ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE {s}.post_members FORCE ROW LEVEL SECURITY;"
+        ),
+    )
+    .await;
+    assert!(ids(&login, &n, &seven).await.is_empty());
+    // A policy that shows the reader their own memberships admits it again.
+    apply(
+        &admin,
+        &format!(
+            "CREATE POLICY own ON {s}.post_members FOR SELECT TO {} USING (user_id = CAST(NULLIF(current_setting('brocanth.user_id', TRUE), '') AS bigint))",
+            n.member
+        ),
+    )
+    .await;
+    assert_eq!(ids(&login, &n, &seven).await, [1]);
 
     scoped.close().await;
     login.close().await;

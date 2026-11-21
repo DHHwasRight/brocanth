@@ -30,6 +30,8 @@ pub struct Schema {
     /// Gaps the database leaves to the application, one line per table:
     /// [`Schema::warnings`].
     warnings: Vec<String>,
+    /// `SELECT` on a link table an `exists` rule reads: table, role.
+    link_grants: Vec<(String, String)>,
 }
 
 impl Schema {
@@ -84,6 +86,19 @@ impl Schema {
             other => (other.to_string(), String::new()),
         };
         self.refused.push((message, help));
+        self
+    }
+
+    /// Grants `role` `SELECT` on `table`, a link table that an `exists` rule
+    /// of [`Policy::from_rules`](crate::Policy::from_rules) reads. When the
+    /// schema adds the table too, the grant joins its grants; else it is a
+    /// grant on a table without row-level security from this schema
+    /// ([`Snapshot::link_grants`]).
+    pub(crate) fn link_grant(mut self, table: String, role: &Role) -> Schema {
+        let grant = (table, role.name.clone());
+        if !self.link_grants.contains(&grant) {
+            self.link_grants.push(grant);
+        }
         self
     }
 
@@ -345,6 +360,41 @@ impl Schema {
                     format!("the table `{key}` is added twice"),
                     "add each table once, with all its grants",
                 ));
+            }
+        }
+
+        // A link table's `SELECT`: on the table's own grants when the schema
+        // adds it, so `rls check` does not report it as extra; else on its
+        // own. A role with a column `SELECT` there keeps it: the table grant
+        // would replace the developer's choice of columns.
+        for (table, role) in &self.link_grants {
+            ident::check("table", table)?;
+            if !role_ok(role) {
+                return Err(RlsError::definition(
+                    format!("the link table `{table}` is granted to `{role}`, which is not a role of the schema"),
+                    format!("add `Role::new(\"{role}\")` or `Role::existing(\"{role}\")` to the schema"),
+                ));
+            }
+            match snapshot.tables.get_mut(table) {
+                Some(spec) => {
+                    let by_column = spec
+                        .column_grants
+                        .get(role)
+                        .is_some_and(|p| p.contains_key(&Privilege::Select));
+                    if !by_column {
+                        spec.grants
+                            .entry(role.clone())
+                            .or_default()
+                            .insert(Privilege::Select);
+                    }
+                }
+                None => {
+                    snapshot
+                        .link_grants
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(role.clone());
+                }
             }
         }
 

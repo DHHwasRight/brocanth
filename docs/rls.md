@@ -445,6 +445,15 @@ Schema::new()
   policy and no grant. The table is forced, and the role gets each command
   that has a policy. `.sequence(…)` grants `USAGE` on the table's serial
   sequence when the role may insert.
+- Link tables (bridge decision 15). The role gets `SELECT` on each link
+  table an `exists` reads, because the subquery runs as the role. When
+  `schema()` adds that table too, the grant joins its grants; else the
+  snapshot keeps it in `link_grants`, and the table gets no row-level
+  security from it. `rls diff`, `rls make` and `rls check` see it, and the
+  next migration revokes it when no rule reads the table. If the link
+  table has row-level security, its own policies filter the subquery: with
+  no `SELECT` policy there for the role, the `exists` rule denies every
+  row. Give it a policy that shows the role the rows the rule needs.
 - Write masks (bridge decision 9). A `writable` mask with no guard
   (`writable: only [title]`) grants `UPDATE ("title")` instead of `UPDATE`
   on the table; `writable_on_create`, or `writable` when there is none,
@@ -494,8 +503,9 @@ with `SqlExpr` and `crud`. The database rule is the floor: a missing
 can call `check::<P>(&url, &subjects, cases)` directly.
 
 Per case, it creates a schema with the entity's table (from
-`TypedColumn::sql_type`), each link table an `exists` reads, and the SQL
-of `Policy::from_rules`. It inserts generated rows: the values of
+`TypedColumn::sql_type`), each link table an `exists` reads (no grant of
+its own: the `from_rules` SQL grants it), and the SQL of
+`Policy::from_rules`. It inserts generated rows: the values of
 `brocanth_policy::agreement::pool`, with `NULL`s and near-misses. Then,
 for each subject:
 

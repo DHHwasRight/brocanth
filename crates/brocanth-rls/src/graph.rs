@@ -27,6 +27,10 @@ pub enum NodeKey {
     /// One privilege of a grantee on some columns of a table: table key,
     /// grantee, privilege. After the table grant it can replace.
     ColumnGrant(String, String, Privilege),
+    /// `SELECT` on a link table, a table the schema does not add: table,
+    /// grantee ([`Snapshot::link_grants`]). Last, so the order of a schema
+    /// without one is unchanged.
+    LinkGrant(String, String),
 }
 
 impl fmt::Display for NodeKey {
@@ -42,6 +46,9 @@ impl fmt::Display for NodeKey {
             }
             NodeKey::ColumnGrant(table, grantee, privilege) => {
                 write!(f, "grant {privilege} on columns of {table} to {grantee}")
+            }
+            NodeKey::LinkGrant(table, grantee) => {
+                write!(f, "grant SELECT on link table {table} to {grantee}")
             }
         }
     }
@@ -59,6 +66,8 @@ pub(crate) enum Node<'a> {
     SequenceUsage(&'a TableSpec, &'a str, &'a str),
     /// The table, the grantee, the privilege, the columns.
     ColumnGrant(&'a TableSpec, &'a str, Privilege, &'a BTreeSet<String>),
+    /// The link table's name, the grantee.
+    LinkGrant(&'a str, &'a str),
 }
 
 /// Every node of a snapshot.
@@ -101,6 +110,14 @@ pub(crate) fn nodes(s: &Snapshot) -> BTreeMap<NodeKey, Node<'_>> {
             }
         }
     }
+    for (table, grantees) in &s.link_grants {
+        for grantee in grantees {
+            out.insert(
+                NodeKey::LinkGrant(table.clone(), grantee.clone()),
+                Node::LinkGrant(table, grantee),
+            );
+        }
+    }
     out
 }
 
@@ -114,6 +131,7 @@ pub(crate) fn deps(key: &NodeKey, s: &Snapshot) -> Vec<NodeKey> {
     };
     match key {
         NodeKey::Table(_) => Vec::new(),
+        NodeKey::LinkGrant(_, grantee) => role(grantee).into_iter().collect(),
         // `GRANT "role" TO "member"` needs the member to exist.
         NodeKey::Role(name) => s
             .roles

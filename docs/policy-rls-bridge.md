@@ -7,7 +7,8 @@ resource and admin paths, the agreement test (`brocanth_rls::agreement`,
 the `db { … }` clause, the `EXPLAIN` check; notes under decision 10), the
 scaffold with `rls diff` in CI, and column grants for write masks with no
 guard (decision 9). Decision 14 (21 November 2026): a guard chain keeps
-the column's index. PLAN.md §13 ADR 11 records the decision.
+the column's index. Decision 15 (21 November 2026): link-table grants.
+PLAN.md §13 ADR 11 records the decision.
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -339,6 +340,7 @@ named `<table>_<role>_<command>`, like `crud`.
 | a rule that is `never` for every guard | no policy, no grant | RLS denies what no policy allows. No grant gives a clear `permission denied`. |
 
 `from_rules` also grants the commands that have a policy, and forces RLS.
+It grants `SELECT` on each link table an `exists` reads (decision 15).
 
 ### Decision 8: `UPDATE … WITH CHECK` uses `update_check`, which defaults to the `update` rule.
 
@@ -359,6 +361,44 @@ Postgres also applies the `SELECT` policy to an `UPDATE`/`DELETE` that
 reads a column, so a row you may update but not see stays unchanged. §4's
 test fails on such a row; the docs say: keep `update` and `delete` inside
 `list`.
+
+### Decision 15: `from_rules` grants `SELECT` on each link table an `exists` reads.
+
+The `EXISTS` subquery of a policy runs as the request's role, so the role
+needs `SELECT` on the link table. `Policy::from_rules` takes the table's
+name from `Exists::table`, for each command that has a policy, and
+`Schema::policies` adds the grant. In the snapshot:
+
+- When `schema()` adds the link table too (its own `Table`, or its own
+  `from_rules`), the `SELECT` joins that table's grants. A column `SELECT`
+  for the role there stays as written: a table grant would replace the
+  developer's choice of columns.
+- Else it goes into `link_grants`, an optional field, so an older
+  `rls.json` reads the same: `GRANT SELECT ON "t" TO "role"`, and no
+  row-level security on `t`.
+
+`rls diff`, `rls make` and `catalog::drift` see it like any grant. On a
+link table the schema does not add, `drift` checks only that `SELECT`, not
+the table's other privileges. When the rule stops reading the table, the
+next migration revokes it. A link to the policy's own table, a command with
+no policy, and a `.manual(…)` expression add no grant: grant what a
+hand-written expression reads in `schema()`.
+
+Reasons: before, the developer added the grant by hand, and a forgotten
+grant made every `exists` rule fail with `permission denied for table`. The
+rule names the table, so the grant follows from it, as the sequence `USAGE`
+follows from `INSERT`. The grant does not turn on row-level security on the
+link table: with no policy there, every `exists` would deny.
+
+**A link table with row-level security filters the subquery.** Postgres
+applies the link table's own policies to the `EXISTS` subquery, for the
+request's role. With row-level security on the link table and no `SELECT`
+policy there for the role, the subquery sees no row, and the `exists` rule
+denies every row. Give the link table a `SELECT` policy that shows the role
+the rows the rule needs: for membership, the reader's own rows.
+`tests/bridge_postgres.rs` proves both, and that `drift` reports a revoked
+link grant. The agreement harness creates each link table with no grant of
+its own, so it proves that `from_rules` grants it.
 
 ### Decision 9: write masks stay in the app in the first version.
 
@@ -506,9 +546,8 @@ Changes to the sketch above, and what the harness found:
   `''` is the only absence marker a setting has; an encoding for text
   settings would change every hand-written `Setting` reader.
 - **A link table needs `SELECT` for the role.** The `exists` subquery of
-  a policy runs as the request's role. `from_rules` grants the policy's
-  table only; grant the link table in `schema()` (its own policy, or a
-  plain grant). The harness grants it.
+  a policy runs as the request's role. Phase 5 granted it in the harness
+  and left it to the developer; decision 15 moved it into `from_rules`.
 - **The index is kept for a comparison with a setting** (`EXPLAIN` in
   `brocanth-rls/tests/bridge_postgres.rs`, `bigint` and `uuid`): the
   setting read is `STABLE`, so it is an index condition. Phase 5 found

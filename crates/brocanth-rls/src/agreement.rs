@@ -45,6 +45,9 @@
 //! `brocanth_agree_<pid>_<n>_member` and `…_login`, and drops them at the
 //! end. Each case drops its schema.
 //!
+//! Each link table is created with no row-level security, and its
+//! `SELECT` grant comes from [`Policy::from_rules`], as in an application.
+//!
 //! A rule marked `#[app_only]` has no database rule to compare. Its command
 //! is left out, and the run says so on stderr. So is a write command whose
 //! unguarded mask permits no column. `INSERT` writes every column, so the
@@ -694,11 +697,13 @@ where
                 .iter()
                 .map(|(name, ty, _)| format!("{} {ty}", quote(name)))
                 .collect();
+            // No grant here: `from_rules` grants the link table, and the
+            // policy SQL below holds it.
             let _ = writeln!(
                 ddl,
-                "CREATE TABLE {t} ({});\nGRANT SELECT ON {t} TO {m};",
+                "CREATE TABLE {} ({});",
+                quote(link.table),
                 columns.join(", "),
-                t = quote(link.table),
             );
         }
         ddl.push_str(&plan.policy_sql);
