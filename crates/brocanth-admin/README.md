@@ -566,7 +566,8 @@ The command writes the shipped template to
 `src/plugins/admin/screens/<screen>.rsx` (or
 `screens/models/<model>/<screen>.rsx`). That file is yours. It also
 writes `src/plugins/admin/ejected.rs`, which installs every copy, and
-calls `ejected::apply(config)` in the generated `mount`. The copy renders
+calls `ejected::apply(config)` at the end of the generated `configured`,
+which the start check builds the admin from too. The copy renders
 the same HTML as the shipped screen until you edit it. The
 [CLI README](../brocanth-cli/README.md#brocanth-admin) lists what the
 command refuses.

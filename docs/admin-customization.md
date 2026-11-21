@@ -432,15 +432,38 @@ It also makes three edits, each once and only when missing:
 - `rsx` in `[dependencies]`, because the copy is a template the project
   compiles;
 - `mod ejected;` in `src/plugins/admin/mod.rs`;
-- `let config = ejected::apply(config);` in `mount`, before
-  `Admin::new`. If you rewrote `mount` and that line is gone, the command
-  writes the copy, warns, and tells you where the line goes.
+- `let config = ejected::apply(config);` at the end of `configured`,
+  the function that `mount` and the start check both build the admin
+  from. If you rewrote `configured` and its last line `(config, late)` is
+  gone, the command writes the copy, warns, and tells you where the line
+  goes. An older eject put the line in `mount`, where the start check does
+  not see it: the next eject moves it to `configured`.
 
 `ejected.rs` installs each copy through the same API as levels 5 to 7:
 `Views::with_<screen>` through `AdminConfig::map_views`, or
 `ModelAdmin::<screen>_view` through `AdminConfig::model`. `map_views`
 changes the screens already installed instead of replacing the set, so an
 ejected screen and a `with_views` call of your own both survive.
+
+**Checked at start.** A bad admin configuration fails at start, not on
+the first admin request: `AdminSettings::configure` builds the admin once
+from `configured` and drops it. With the install in `configured`, that
+build holds the ejected screens. What an ejected screen can get wrong at
+run time is its model key: the directory name under `screens/models/`.
+A key the data source does not hold, or that discovery leaves out, stops
+the start:
+
+```
+the admin configures model `invocie`, but the data source holds no model with that key, or discovery left it out (models: `invoice`, `user`)
+help: name a model the admin shows in `AdminConfig::model`; an ejected screen takes the key from its directory, `src/plugins/admin/screens/models/<key>/`: rename it to the model's key and run any `brocanth admin eject` again, or delete it
+```
+
+`Admin::try_new` refuses this for every `AdminConfig::model` call, not
+only an ejected one: a configuration for a model the admin does not show
+governs nothing, the same rule as for a row policy. Everything else in a
+copy is checked by the compiler: the template, the context type and the
+`brocanth_admin::*` paths it names. A copy on disk that `ejected.rs` does
+not list renders nowhere and is not an error: run any eject to list it.
 
 `ejected.rs` is rebuilt from the `.rsx` files on disk. To drop an ejected
 screen, delete its file and run any eject again, or remove its lines from

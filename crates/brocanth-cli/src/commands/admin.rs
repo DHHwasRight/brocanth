@@ -22,7 +22,10 @@
 //! And three edits, each made once and only when missing: `rsx` in
 //! `[dependencies]` (an ejected screen is a template the project compiles),
 //! `mod ejected;` in `src/plugins/admin/mod.rs`, and
-//! `let config = ejected::apply(config);` before `let admin` in `mount`.
+//! `let config = ejected::apply(config);` at the end of `configured`. Both
+//! `mount` and the start check (`AdminSettings::configure`) build the admin
+//! from `configured`, so the check sees the ejected screens: one for a model
+//! the source does not hold stops the start with a `help:` line.
 //!
 //! `ejected.rs` is rebuilt from the `.rsx` files on disk, so the files are
 //! the record of what was ejected. Delete one and run any eject again to
@@ -109,10 +112,13 @@ pub(crate) const PLUGIN: &str = "src/plugins/admin/mod.rs";
 pub(crate) const SCREENS: &str = "src/plugins/admin/screens";
 const WIRING: &str = "src/plugins/admin/ejected.rs";
 
-/// The line in the generated `mount` the install goes in front of: the
-/// admin built over an empty source, or the `OverOrm` that builds it over
-/// the ORM.
-const ANCHOR: &str = "let admin = Arc::new(";
+/// The end of the generated `configured`, which `mount` and the start
+/// check both build the admin from. The install goes in front of it.
+const ANCHOR: &str = "\n    (config, late)\n}";
+/// The line in `mount` the install went in front of, in a plugin from
+/// before `configured`: the admin built over an empty source, or the
+/// `OverOrm` that builds it over the ORM. Such a plugin has no start check.
+const LEGACY_ANCHOR: &str = "let admin = Arc::new(";
 const INSTALL: &str = "let config = ejected::apply(config);";
 
 pub fn run(ui: &Ui, dir: Option<&Path>, args: AdminArgs) -> Outcome {
@@ -216,9 +222,10 @@ fn eject(ui: &Ui, dir: Option<&Path>, args: EjectArgs) -> Outcome {
                 "the copy is written, and nothing installs it yet",
             )
             .at(PLUGIN)
-            .note(format!("`mount` no longer has the line `{ANCHOR}`"))
+            .note("`configured` no longer ends with `(config, late)`")
             .help(format!(
-                "add `{INSTALL}` before the admin is built from `config`"
+                "add `{INSTALL}` where `configured` returns `config`, so the start \
+                 check sees the ejected screens"
             )),
         );
     }
@@ -688,8 +695,11 @@ fn add_rsx(path: &PathBuf) -> Result<bool, Vec<Diagnostic>> {
 /// the install line is there now.
 ///
 /// Each edit is made once. `mod ejected;` goes above the first `use`, and
-/// the install line in front of [`ANCHOR`], at its indentation. A `mount`
-/// the developer rewrote has no anchor: the caller says what to add.
+/// the install line at the end of `configured` ([`ANCHOR`]), or in front of
+/// [`LEGACY_ANCHOR`] in a plugin from before `configured`. An install line
+/// an older eject put in `mount` moves to `configured`, so the start check
+/// sees the screens. A plugin the developer rewrote has no anchor: the
+/// caller says what to add.
 fn wire(text: &str) -> (String, bool) {
     let mut out = text.to_string();
     if !out.lines().any(|l| l.trim() == "mod ejected;") {
@@ -698,10 +708,31 @@ fn wire(text: &str) -> (String, bool) {
             None => format!("{out}\nmod ejected;\n"),
         };
     }
+    let line = format!("    {INSTALL}\n");
+    if out.contains(ANCHOR) {
+        if out.contains(&format!("{line}    (config, late)\n}}")) {
+            return (out, true);
+        }
+        // An older eject installed it in `mount`, after `configured`: the
+        // start check did not see it. Moved; a line elsewhere is the
+        // developer's and stays.
+        if out.contains("ejected::apply(") {
+            let Some(mount) = out.find("pub fn mount(") else {
+                return (out, true);
+            };
+            let Some(at) = out[mount..].find(&line).map(|i| mount + i) else {
+                return (out, true);
+            };
+            out.replace_range(at..at + line.len(), "");
+        }
+        let at = out.find(ANCHOR).expect("checked above") + 1;
+        out.insert_str(at, &line);
+        return (out, true);
+    }
     if out.contains("ejected::apply(") {
         return (out, true);
     }
-    let Some(at) = out.find(ANCHOR) else {
+    let Some(at) = out.find(LEGACY_ANCHOR) else {
         return (out, false);
     };
     let line_start = out[..at].rfind('\n').map_or(0, |i| i + 1);
@@ -1025,6 +1056,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The install is in `configured`, which the start check builds the
+    /// admin from too, and not in `mount` only.
+    #[test]
+    fn the_install_is_where_the_start_check_sees_it() {
+        let root = project("checked", &["config", "admin"]);
+        eject_in(&root, "list", Some("post")).expect("post's list ejects");
+        let plugin = read(&root, PLUGIN);
+        let configured = plugin.find("fn configured(").expect("configured");
+        let mount = plugin.find("pub fn mount(").expect("mount");
+        let install = plugin.find(INSTALL).expect("installed");
+        assert!(configured < install && install < mount, "{plugin}");
+        assert!(plugin.contains(&format!("    {INSTALL}\n    (config, late)\n}}")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An older eject put the install in `mount`, where the start check
+    /// does not see it. The next eject moves it to `configured`.
+    #[test]
+    fn an_install_in_mount_moves_to_configured() {
+        let old = "mod ejected;\n\nuse a::b;\n\nfn configured(prefix: &str) -> (AdminConfig, LateCells<Ctx>) {\n    \
+                   let mut config = AdminConfig::new().at(prefix);\n    (config, late)\n}\n\n\
+                   pub fn mount(routes: &mut R, prefix: &str) {\n    \
+                   let (config, late) = configured(prefix);\n    \
+                   let config = ejected::apply(config);\n    \
+                   let admin = Arc::new(Later::new(config));\n}\n";
+        let (text, installed) = wire(old);
+        assert!(installed);
+        assert_eq!(text.matches(INSTALL).count(), 1, "{text}");
+        assert!(text.find(INSTALL) < text.find("pub fn mount("), "{text}");
+        assert_eq!(
+            wire(&text),
+            (text.clone(), true),
+            "a second wire changes nothing"
+        );
+    }
+
     #[test]
     fn a_rewritten_mount_gets_the_copy_and_a_warning_not_an_edit() {
         let (text, installed) = wire("use a::b;\n\nfn mount() {\n    build(config);\n}\n");
@@ -1104,22 +1171,22 @@ mod tests {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, text).unwrap();
         }
-        // Every screen for every model, and one model's four: the generated
-        // test then renders the locked admin's 403 through the ejected
-        // error screen and layout.
+        // Every screen for every model: the generated test then renders the
+        // locked admin's 403 through the ejected error screen and layout,
+        // and the application starts.
         for s in eject::SCREENS {
             eject_in(&root, s.name, None).expect("ejects");
         }
-        for s in per_model() {
-            eject_in(&root, s, Some("post")).expect("ejects for one model");
-        }
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        for args in [&["test", "--quiet"][..], &["fmt", "--check"][..]] {
-            let output = Command::new(&cargo)
+        let run = |args: &[&str]| {
+            Command::new(&cargo)
                 .args(args)
                 .current_dir(&root)
                 .output()
-                .expect("run cargo");
+                .expect("run cargo")
+        };
+        for args in [&["test", "--quiet"][..], &["fmt", "--check"][..]] {
+            let output = run(args);
             assert!(
                 output.status.success(),
                 "`cargo {}` failed in the ejected project:\n{}{}",
@@ -1128,6 +1195,33 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        // One model's four, for `post`, which this admin's empty source does
+        // not hold: they compile and are formatted, and the start check
+        // refuses them with its `help:` line, so the application's own test
+        // that builds it fails.
+        for s in per_model() {
+            eject_in(&root, s, Some("post")).expect("ejects for one model");
+        }
+        let output = run(&["fmt", "--check"]);
+        assert!(
+            output.status.success(),
+            "the per-model copies are not formatted"
+        );
+        let output = run(&["test", "--quiet"]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "the start check let `post` through:\n{text}"
+        );
+        assert!(text.contains("the admin configures model `post`"), "{text}");
+        assert!(
+            text.contains("help: name a model the admin shows"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

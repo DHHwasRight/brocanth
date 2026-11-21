@@ -274,9 +274,12 @@ It writes `src/plugins/admin/screens/<screen>.rsx`, or
 `src/plugins/admin/screens/models/<model>/<screen>.rsx` with `--model`.
 It writes `src/plugins/admin/ejected.rs` again from the copies on disk.
 It adds `rsx` to `[dependencies]`, `mod ejected;` to
-`src/plugins/admin/mod.rs`, and `let config = ejected::apply(config);` in
-`mount`, each once and only when missing. To drop a copy, delete its file
-and run any eject again.
+`src/plugins/admin/mod.rs`, and `let config = ejected::apply(config);` at
+the end of `configured`, each once and only when missing. `mount` and the
+start check both build the admin from `configured`, so a copy for a model
+the data source does not hold stops the start. An install line an older
+eject put in `mount` moves to `configured`. To drop a copy, delete its
+file and run any eject again.
 
 It refuses:
 

@@ -156,3 +156,28 @@ fn an_ejected_screen_for_one_model_leaves_the_others_shipped() {
         );
     }
 }
+
+/// An ejected screen for a model the source does not hold stops the build
+/// of the admin, which the start check runs, with a `help:` line. The same
+/// screen for a model it holds builds.
+#[test]
+fn an_ejected_screen_for_an_unknown_model_fails_the_build() {
+    let config = |key: &str| {
+        AdminConfig::new()
+            .discovering(Discovery::new().under("blog::models"))
+            .model(key, |m| {
+                m.list_view(|ctx: &ListCtx, w: &mut Writer<'_>| {
+                    ejected::list::List { ctx }.render(w)
+                })
+            })
+    };
+    let error = match Admin::try_new(Arc::new(Fixture::blog()), config("invoice")) {
+        Ok(_) => panic!("an ejected screen for `invoice` built"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("model `invoice`"), "{error}");
+    assert!(error.contains("`post`, `user`"), "{error}");
+    assert!(error.contains("help:"), "{error}");
+    assert!(error.contains("screens/models/<key>/"), "{error}");
+    assert!(Admin::try_new(Arc::new(Fixture::blog()), config("post")).is_ok());
+}

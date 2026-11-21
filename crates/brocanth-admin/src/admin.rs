@@ -356,6 +356,7 @@ impl Admin {
                 ));
             }
         }
+        let known: Vec<String> = descriptors.iter().map(|d| format!("`{}`", d.key)).collect();
         let entries: Vec<Entry> = descriptors
             .into_iter()
             .map(|descriptor| {
@@ -374,6 +375,24 @@ impl Admin {
             })
             .filter(|entry| entry.admin.is_visible())
             .collect();
+        // A model configured under a key the source does not hold governs
+        // nothing: a misspelt `AdminConfig::model`, or an ejected screen
+        // under `screens/models/<key>/` for a model that is not there.
+        // Refused now rather than dropped without a word.
+        if let Some(key) = configured.keys().next() {
+            return invalid(format!(
+                "the admin configures model `{key}`, but the data source holds no model with \
+                 that key, or discovery left it out (models: {})\nhelp: name a model the admin \
+                 shows in `AdminConfig::model`; an ejected screen takes the key from its directory, \
+                 `src/plugins/admin/screens/models/<key>/`: rename it to the model's key and \
+                 run any `brocanth admin eject` again, or delete it",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ));
+        }
         // A `set` action names columns, and a misspelt one would write
         // nothing or fail on the first request. Named now instead.
         for entry in &entries {
