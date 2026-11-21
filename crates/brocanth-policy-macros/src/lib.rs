@@ -1677,6 +1677,18 @@ fn expand_policy(
                         #(#fields)*
                         rules
                     }
+
+                    fn writable_of(
+                        who: &#subject_ty,
+                    ) -> ::std::option::Option<
+                        ::brocanth_policy::FieldMask<
+                            <#entity_name as ::brocanth_policy::Entity>::Column,
+                        >,
+                    > {
+                        ::std::option::Option::Some(
+                            <#name as ::brocanth_policy::Policy>::writable(&#name, who),
+                        )
+                    }
                 }
             })
         }

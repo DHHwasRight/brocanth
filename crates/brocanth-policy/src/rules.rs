@@ -116,6 +116,15 @@ impl<C: Column> MaskRule<C> {
 pub trait DbPolicy: crate::Policy<Subject: crate::Subject> {
     /// The rules, before any subject is known.
     fn rules() -> Rules<Self::Entity>;
+
+    /// [`crate::Policy::writable`] for `subject`, with no policy value.
+    /// `None` when the implementation cannot give it. `policy!` gives it,
+    /// so the agreement test can read a mask with a guard
+    /// ([`MaskRule::PerSubject`]).
+    fn writable_of(subject: &Self::Subject) -> Option<FieldMask<<Self::Entity as Entity>::Column>> {
+        let _ = subject;
+        None
+    }
 }
 
 impl<E: Entity> Rules<E> {

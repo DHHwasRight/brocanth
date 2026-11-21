@@ -26,6 +26,13 @@
 //!      permits (all columns without one).
 //!    - `DELETE`: for each row, `delete` against the `DELETE` in a
 //!      savepoint.
+//!    - A move out of `update`, when the policy writes no `update_check`:
+//!      for each row `update` admits, each column `update` reads that the
+//!      subject's `writable` mask permits, and each sampled value, an
+//!      `UPDATE` of that column alone. The application writes it (the
+//!      stored row is in `update`, the mask permits the column). When the
+//!      new row leaves `update` and the database refuses it, the test
+//!      fails with `help: write update_check`.
 //! 4. Unsets each setting in turn for one subject, and compares `SELECT`
 //!    again (layer 2: a missing attribute denies as in the application).
 //! 5. Runs one `SELECT` without an identity, and expects `permission
@@ -133,7 +140,20 @@ where
     if subjects.is_empty() {
         return Err("no subjects to test\nhelp: list at least one subject".to_string());
     }
-    let subjects: Vec<Attributes> = subjects.iter().map(Subject::attributes).collect();
+    // A column type need not be `Send`: the mask crosses the thread as the
+    // positions in `Column::ALL` it permits.
+    let all = <P::Entity as Entity>::Column::ALL;
+    let subjects: Vec<SubjectOf> = subjects
+        .iter()
+        .map(|s| {
+            let mask = P::writable_of(s).map(|m| {
+                (0..all.len())
+                    .filter(|i| m.permits(all[*i]))
+                    .collect::<Vec<_>>()
+            });
+            (s.attributes(), mask)
+        })
+        .collect();
     let url = url.to_string();
     std::thread::scope(|s| {
         s.spawn(move || check_attributes::<P>(&url, subjects, cases))
@@ -172,6 +192,8 @@ struct Plan<E: Entity> {
     /// The columns an `UPDATE` sets: the `writable` mask's, when it has no
     /// guard (decision 9), or every column but the key.
     update_columns: Vec<E::Column>,
+    /// The columns `update` reads, but the key.
+    update_reads: Vec<E::Column>,
     member: String,
     login: String,
 }
@@ -184,11 +206,15 @@ struct Resolved<C: Column> {
     update: Pred<C>,
     update_check: Pred<C>,
     delete: Pred<C>,
+    /// The columns, but the key, the application lets this subject set in
+    /// an update: its `writable` mask. `None` when the harness cannot know
+    /// it.
+    writable: Option<Vec<C>>,
 }
 
 impl<E: Entity> Plan<E> {
     fn resolve(&self, attrs: Attributes) -> Resolved<E::Column> {
-        resolve(&self.rules, attrs)
+        resolve(&self.rules, attrs, None)
     }
 
     fn skips(&self, command: Command) -> bool {
@@ -196,8 +222,13 @@ impl<E: Entity> Plan<E> {
     }
 }
 
-fn resolve<E: Entity>(rules: &Rules<E>, attrs: Attributes) -> Resolved<E::Column> {
+fn resolve<E: Entity>(
+    rules: &Rules<E>,
+    attrs: Attributes,
+    writable: Option<Vec<E::Column>>,
+) -> Resolved<E::Column> {
     Resolved {
+        writable,
         select: rules.list.resolve(&attrs).or(rules.view().resolve(&attrs)),
         create: rules.create.resolve(&attrs),
         update: rules.update.resolve(&attrs),
@@ -214,7 +245,11 @@ struct Link {
     columns: Vec<(&'static str, String, Vec<Value>)>,
 }
 
-fn check_attributes<P>(url: &str, subjects: Vec<Attributes>, cases: u32) -> Result<(), String>
+/// A subject's attributes and its `writable` mask, when known, as the
+/// positions in `Column::ALL` it permits.
+type SubjectOf = (Attributes, Option<Vec<usize>>);
+
+fn check_attributes<P>(url: &str, subjects: Vec<SubjectOf>, cases: u32) -> Result<(), String>
 where
     P: DbPolicy,
     <P::Entity as Entity>::Column: TypedColumn,
@@ -274,7 +309,7 @@ where
 }
 
 /// The plan: resolved rules, link tables, and the policy SQL.
-fn plan<P>(subjects: Vec<Attributes>, member: &str, login: &str) -> Result<Plan<P::Entity>, String>
+fn plan<P>(subjects: Vec<SubjectOf>, member: &str, login: &str) -> Result<Plan<P::Entity>, String>
 where
     P: DbPolicy,
     <P::Entity as Entity>::Column: TypedColumn,
@@ -333,12 +368,37 @@ where
         format!("{e}\nhelp: the database cannot hold this policy, and `rls make` refuses it too")
     })?;
 
-    let subjects: Vec<_> = subjects.into_iter().map(|a| resolve(&rules, a)).collect();
     let data: Vec<_> = <P::Entity as Entity>::Column::ALL
         .iter()
         .copied()
         .filter(|c| *c != key)
         .collect();
+    // The subject's own mask, or the unguarded mask of the rules. A guarded
+    // mask with no `writable_of` is unknown.
+    let all = <P::Entity as Entity>::Column::ALL;
+    let subjects: Vec<_> = subjects
+        .into_iter()
+        .map(|(attrs, mask)| {
+            let permitted: Option<Vec<_>> = match (mask, &rules.writable) {
+                (Some(positions), _) => Some(positions.into_iter().map(|i| all[i]).collect()),
+                (None, Some(MaskRule::Fixed(mask))) => {
+                    Some(all.iter().copied().filter(|c| mask.permits(*c)).collect())
+                }
+                (None, _) => None,
+            };
+            let writable =
+                permitted.map(|p| data.iter().copied().filter(|c| p.contains(c)).collect());
+            resolve(&rules, attrs, writable)
+        })
+        .collect();
+    let mut update_reads = Vec::new();
+    if rules.update.app_only.is_none() {
+        for (_, term) in &rules.update.arms {
+            columns_read(term, &mut update_reads);
+        }
+        columns_read(&rules.update.fallback, &mut update_reads);
+    }
+    update_reads.retain(|c| *c != key);
     let update_columns = match fixed(rules.writable.as_ref()) {
         Some(columns) => columns.into_iter().filter(|c| *c != key).collect(),
         None => data.clone(),
@@ -355,6 +415,7 @@ where
         policy_sql,
         skipped,
         update_columns,
+        update_reads,
         member: member.to_string(),
         login: login.to_string(),
     })
@@ -484,6 +545,22 @@ fn collect_term<C: Column>(term: &Term<C>, out: &mut Vec<Exists<C>>) {
         Term::All(parts) | Term::Any(parts) => parts.iter().for_each(|t| collect_term(t, out)),
         Term::Not(inner) => collect_term(inner, out),
         _ => {}
+    }
+}
+
+/// The columns of this entity that `term` reads, each once.
+fn columns_read<C: Column>(term: &Term<C>, out: &mut Vec<C>) {
+    let mut push = |c: C| {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    };
+    match term {
+        Term::Cmp { column, .. } | Term::In { column, .. } => push(*column),
+        Term::Exists(e) => push(e.local),
+        Term::All(parts) | Term::Any(parts) => parts.iter().for_each(|t| columns_read(t, out)),
+        Term::Not(inner) => columns_read(inner, out),
+        Term::Always | Term::Never => {}
     }
 }
 
@@ -781,6 +858,9 @@ where
         }
         if !plan.skips(Command::Update) {
             self.compare_update(who, subject, &mut tx).await?;
+            if plan.rules.update_check.is_none() {
+                self.compare_moves(who, subject, &mut tx).await?;
+            }
         }
         if !plan.skips(Command::Delete) {
             self.compare_delete(who, subject, &mut tx).await?;
@@ -939,6 +1019,89 @@ where
                     plan.member,
                     self.policy("UPDATE"),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// With no `update_check`, the database checks the new row of an
+    /// `UPDATE` against `update`, and the application does not read the new
+    /// row at all: its `writable` mask does that job (decision 8). So a
+    /// write the mask permits can leave `update`: the application writes
+    /// it, and the database refuses it. For each row `update` admits, each
+    /// column `update` reads that the mask permits, and each sampled value,
+    /// an `UPDATE` of that column alone: a refusal fails the test.
+    async fn compare_moves(
+        &self,
+        who: &str,
+        subject: &Resolved<E::Column>,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), String> {
+        let plan = self.plan;
+        let Some(writable) = &subject.writable else {
+            return Ok(());
+        };
+        let columns: Vec<E::Column> = plan
+            .update_reads
+            .iter()
+            .copied()
+            .filter(|c| writable.contains(c))
+            .collect();
+        if columns.is_empty() {
+            return Ok(());
+        }
+        let update = self.app(&subject.update).await?;
+        for (row, id) in self.rows.iter().zip(&self.ids) {
+            if !update.ids.contains(id) {
+                continue;
+            }
+            for column in &columns {
+                let pool = brocanth_policy::agreement::pool(
+                    *column,
+                    plan.subjects.iter().flat_map(preds_of),
+                );
+                // The rules' own literals come last in the pool: try them
+                // first, so a report names a value the author wrote.
+                for value in pool.into_iter().rev() {
+                    if value == row.get(*column) {
+                        continue;
+                    }
+                    let new_row = row.clone().with(*column, value.clone());
+                    let stays = match subject.update.eval(&new_row) {
+                        Ok(truth) => truth.admits(),
+                        // An `exists`: ask the condition, with the new row
+                        // in the table.
+                        Err(_) => {
+                            let mut a = self.admin.begin().await.map_err(text)?;
+                            search_path(&mut a, self.schema).await?;
+                            set_column(&mut a, plan, &new_row, *column)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            ids_in::<E>(&mut a, &subject.update).await?.ids.contains(id)
+                        }
+                    };
+                    if stays {
+                        continue;
+                    }
+                    let mut sp = tx.begin().await.map_err(text)?;
+                    let db = outcome(set_column(&mut sp, plan, &new_row, *column).await)?;
+                    let _ = sp.rollback().await;
+                    if db == Outcome::Refused {
+                        let name = column.name();
+                        return Err(format!(
+                            "UPDATE: the application lets {who} set `{name}` to {value} on row {id}, and the database refuses it\n\
+                             `update` admits the stored row and `writable` permits `{name}`, so the application writes the change. \
+                             The policy has no `update_check`, so the database checks the new row with `update`, and the new row fails it.\n\
+                             help: write `update_check` with every row an update may leave (for a status change: the old and the new status), or remove `{name}` from `writable`\n{}  update: {}\n    binds {}\n  new row: {}\n  database (as {}): {db:?}\n  {}",
+                            self.show_rows(),
+                            update.sql,
+                            self.binds(&subject.update),
+                            show_row(plan, &new_row),
+                            plan.member,
+                            self.policy("UPDATE"),
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -1131,6 +1294,28 @@ async fn set_row<E: Entity>(
         .execute(tx.connection())
         .await
         .map(|d| d.rows_affected())
+}
+
+/// `UPDATE` the row with `row`'s key: set `column` alone to `row`'s value.
+async fn set_column<E: Entity>(
+    tx: &mut Tx<'_>,
+    plan: &Plan<E>,
+    row: &MapRow<E::Column>,
+    column: E::Column,
+) -> Result<u64, sqlx::Error> {
+    let sql = format!(
+        "UPDATE {} SET {} = $1 WHERE {} = $2",
+        quote(plan.table),
+        quote(column.name()),
+        quote(plan.key.name()),
+    );
+    bind_all(
+        sqlx::query(AssertSqlSafe(sql)),
+        &[row.get(column), row.get(plan.key)],
+    )
+    .execute(tx.connection())
+    .await
+    .map(|d| d.rows_affected())
 }
 
 fn placeholders(n: usize, from: usize) -> String {

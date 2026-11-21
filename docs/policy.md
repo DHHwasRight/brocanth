@@ -303,6 +303,10 @@ Each `#[attr]` field becomes a setting, `brocanth.<field>`. A field without
 update may leave (bridge decision 8). It defaults to `update`. The
 application does not read it: there, the `writable` mask does that job. So
 `update_check` needs `#[db]`; without it, the macro refuses the rule.
+Write it when `writable` permits a column that `update` reads, such as
+`status` in a draft-to-published change: else the database refuses the
+change that the application permits. The `db { … }` test fails on that
+case, with a `help:` line (bridge decision 16).
 
 **`#[app_only("reason")]`** on one rule keeps that rule in Rust. The
 `Policy` method runs the Rust code, and `rules()` holds
@@ -430,6 +434,11 @@ Keep `update`, `delete` and `update_check` inside `list` (or `view`).
 Postgres applies the `SELECT` policy to an `UPDATE` or `DELETE` that reads
 a column, and to the new row of the `UPDATE`. The test fails, with a
 `help:` line, when a rule reaches a row outside it.
+
+Without `update_check`, the test also tries each write the subject's
+`writable` mask permits on a column that `update` reads. When the database
+refuses one, it fails with ``help: write `update_check` …``: the
+application would write the change, and the database would refuse it.
 
 `db { … }` needs `#[db]`: without it, the macro refuses the clause. An
 `#[app_only]` command is left out of the test.

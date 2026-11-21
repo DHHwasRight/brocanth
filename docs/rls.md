@@ -515,6 +515,7 @@ for each subject:
 | `INSERT` | `create.eval` on each candidate row | the `INSERT`, in a savepoint |
 | `UPDATE` | `update` on the stored row, `update_check` on the new row | the `UPDATE`, in a savepoint: done, no row, or refused |
 | `DELETE` | `delete` on each row | the `DELETE`, in a savepoint |
+| `UPDATE`, no `update_check` | `update` admits the stored row, and the subject's `writable` mask permits the column | an `UPDATE` of one column that `update` reads, to each sampled value: refused fails the test |
 
 An `UPDATE` sets only the columns of an unguarded `writable` mask. An
 `INSERT` writes every column, so the test grants `INSERT` on the whole
@@ -528,15 +529,24 @@ fails when `update`, `delete` or `update_check` reach a row outside
 `list OR view`: Postgres hides such a row from the statement, or refuses
 the new row.
 
+The last row of the table finds a forgotten `update_check` (bridge
+decision 16). Without it, the database checks the new row with `update`,
+and the application does not check the new row at all. So an author who
+may set `status` on a draft can publish it in the application, and the
+database refuses it. The test fails with ``help: write `update_check` …,
+or remove `status` from `writable` ``. The mask is the subject's own
+(`DbPolicy::writable_of`, which `policy!` writes), so a guarded mask
+counts.
+
 The URL's user must be a superuser: the test creates two roles per run
 and reads around the policies as the application's side. `tests/agreement.rs`
 runs it over fixed rules that cover each row of the translation table,
-guard chains, `exists`, `update_check`, `else null`, and `uuid` and
-`timestamptz` columns. `tests/bridge_postgres.rs` checks with `EXPLAIN`
-that a comparison with a setting keeps the column's index, and that a
-guard chain with an `always` arm keeps it through the key gate.
-`tests/agreement_keys.rs` runs the harness over the gate for each key
-type.
+guard chains, `exists`, `update_check` (and a forgotten one), `else
+null`, and `uuid` and `timestamptz` columns. `tests/bridge_postgres.rs`
+checks with `EXPLAIN` that a comparison with a setting keeps the column's
+index, and that a guard chain with an `always` arm keeps it through the
+key gate. `tests/agreement_keys.rs` runs the harness over the gate for
+each key type.
 
 ## 6. Rejected alternatives
 

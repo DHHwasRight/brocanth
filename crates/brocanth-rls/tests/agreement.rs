@@ -1,7 +1,8 @@
 //! The agreement harness (docs/policy-rls-bridge.md decision 10) over
 //! fixed rule sets: every row of the translation table (§1), guard chains,
 //! `exists` and `!exists`, `update_check`, `else null`, `uuid` and
-//! `timestamptz` columns and attributes, and unguarded write masks. Each
+//! `timestamptz` columns and attributes, unguarded write masks, and a
+//! forgotten `update_check` on a status change. Each
 //! policy runs through
 //! `agreement::check`; two run through `policy!`'s `db { … }` clause.
 //!
@@ -221,6 +222,59 @@ brocanth_policy::policy! {
         update: author_id == who.user_id else deny,
         update_check: always,
     }
+
+    /// The generated example's shape: an author edits a draft and may
+    /// publish it, so `update_check` admits a draft or a published row.
+    /// The mask has a guard.
+    #[db]
+    pub policy Publish(who: &Who) for Doc {
+        list {
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
+        }
+        create: author_id == who.user_id else deny,
+        update {
+            who.admin => always,
+            author_id == who.user_id else deny && status == "draft",
+        }
+        update_check {
+            who.admin => always,
+            author_id == who.user_id else deny && status in ["draft", "published"],
+        }
+        writable {
+            who.admin => except [id],
+            only [score, status],
+        }
+    }
+
+    /// `Publish` with `update_check` forgotten: the application lets an
+    /// author publish a draft, and the database refuses it. The harness
+    /// must fail.
+    #[db]
+    pub policy PublishNoCheck(who: &Who) for Doc {
+        list {
+            who.admin => always,
+            status == "published" || author_id == who.user_id else deny,
+        }
+        create: author_id == who.user_id else deny,
+        update {
+            who.admin => always,
+            author_id == who.user_id else deny && status == "draft",
+        }
+        writable {
+            who.admin => except [id],
+            only [score, status],
+        }
+    }
+
+    /// No `update_check`, and the mask permits no column `update` reads:
+    /// no write leaves `update`, so there is nothing to report.
+    #[db]
+    pub policy NoCheckNeeded(who: &Who) for Doc {
+        list: author_id == who.user_id else deny || status == "published",
+        update: author_id == who.user_id else deny,
+        writable: only [status, score],
+    }
 }
 
 macro_rules! require_db {
@@ -303,6 +357,34 @@ fn update_check_outside_list_fails() {
         "{e}"
     );
     assert!(e.contains("help: keep `update_check` inside `list`"), "{e}");
+}
+
+fn authors() -> Vec<Who> {
+    vec![Who::default(), Who::user(1), Who::user(2), Who::admin()]
+}
+
+#[test]
+fn a_status_change_with_update_check_agrees() {
+    let url = require_db!();
+    check::<Publish>(&url, &authors(), 32).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_forgotten_update_check_fails() {
+    let url = require_db!();
+    let e = check::<PublishNoCheck>(&url, &authors(), 32).unwrap_err();
+    assert!(
+        e.contains("set `status` to") && e.contains("and the database refuses it"),
+        "{e}"
+    );
+    assert!(e.contains("The policy has no `update_check`"), "{e}");
+    assert!(e.contains("help: write `update_check`"), "{e}");
+}
+
+#[test]
+fn no_update_check_and_no_writable_column_read_by_update_agrees() {
+    let url = require_db!();
+    check::<NoCheckNeeded>(&url, &subjects(), 16).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]

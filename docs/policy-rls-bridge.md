@@ -8,7 +8,8 @@ the `db { … }` clause, the `EXPLAIN` check; notes under decision 10), the
 scaffold with `rls diff` in CI, and column grants for write masks with no
 guard (decision 9). Decision 14 (21 November 2026): a guard chain keeps
 the column's index. Decision 15 (21 November 2026): link-table grants.
-PLAN.md §13 ADR 11 records the decision.
+Decision 16: the forgotten `update_check` check. PLAN.md §13 ADR 11
+records the decision.
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -566,6 +567,55 @@ Changes to the sketch above, and what the harness found:
   every column, so the harness grants `INSERT` on the whole table: it
   compares rows, and `tests/masks.rs` tests the column grants.
 
+### Decision 16: the agreement test fails on a forgotten `update_check`.
+
+Without `update_check`, the database checks the new row of an `UPDATE`
+with `update`. The application does not read the new row: the `writable`
+mask does that job (decision 8). So a write the mask permits can move the
+row out of `update`. The application writes it, and the database refuses
+it. The comparison of the rules as data read `update` on both sides, so it
+agreed.
+
+The check: when the policy writes no `update_check`, for each subject, each
+row that `update` admits, each column that `update` reads and the
+subject's `writable` mask permits, and each sampled value of that column,
+the harness runs an `UPDATE` of that column alone. When the new row leaves
+`update` and the database refuses it, the test fails with the subject, the
+row, the value, the policy SQL and:
+
+```
+help: write `update_check` with every row an update may leave (for a status change: the old and the new status), or remove `status` from `writable`
+```
+
+The mask is the subject's own: `DbPolicy::writable_of(&subject)`, which
+`policy!` implements as `Policy::writable`, so a guarded mask (the
+scaffold's example) counts. A hand-written `DbPolicy` returns `None` there,
+and the harness then reads an unguarded `MaskRule::Fixed`; a guarded mask
+is unknown and not checked. With no mask written, the application writes
+no column, so there is nothing to check. Deleting `update_check` from the
+example's shape (`tests/agreement.rs`, `PublishNoCheck`) fails the test.
+
+Reasons:
+
+- It reports only a real disagreement: one write that the application
+  accepts and the database refuses, shown as data.
+- With `update_check` written, the author chose the database's floor. It
+  may be stricter than the mask on purpose, for example a status value the
+  application does not check. So the check does not run. To keep a refusal
+  on purpose, write `update_check` (it may repeat `update`), and remove the
+  column from `writable` so the application refuses the write too.
+- Rejected: a `rls make` warning when `update` reads a column the
+  `writable` mask permits and `update_check` is absent. `rls make` cannot
+  read a guarded mask: it is Rust, per subject, and the scaffold's example
+  mask is guarded, so the warning would miss the case it is for. It also
+  cannot tell an arm where no write leaves `update` (the admin's `always`)
+  from one where a write does, so it would warn on correct policies.
+- Rejected: a compile error in `policy!`, for the same reasons. It would
+  refuse a policy that is correct for every subject.
+
+Cost: the check runs only without `update_check`, over the columns
+`update` reads. A value that keeps the row in `update` costs no statement.
+
 ## 5. Generated code, migrations, and what stays manual
 
 ### Decision 11: the `rls` module reads the policies by code reference.
@@ -614,11 +664,12 @@ Built in phase 6 (18 November 2026), with these changes to the sketch:
 - `brocanth-rls` takes the `agreement` feature as a normal dependency
   feature when the project has `policy`: a module cannot write
   `[dev-dependencies]`. The server compiles proptest and links none of it.
-- The agreement test compares the rules as data on both sides, so it does
+- The agreement test compared the rules as data on both sides, so it did
   not see a missing `update_check` when the app's `writable` mask permits
   the change: without `update_check`, both sides read `update` and agree.
-  The project's own unit test (`an_author_publishes_a_draft_…`) covers the
-  example's case.
+  Decision 16 closes it. The project's own unit test
+  (`an_author_publishes_a_draft_…`) still covers the example's case
+  without a database.
 - The project's own test checks that `schema().snapshot()` succeeds and
   that `check_identity` accepts the anonymous identity: a rule the
   database cannot check, or a key no policy reads, fails `cargo test`.
