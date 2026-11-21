@@ -677,6 +677,7 @@ compiler's output.
 * **The `db` test needs `brocanth-rls` with `agreement`** in the
   dev-dependencies. Without it, the test fails to compile on
   `brocanth_rls::agreement`.
-* **A guard chain loses the column's index** in the database policy: the
-  planner cannot read a setting at plan time. A rule without guards keeps
-  it (docs/policy-rls-bridge.md, decision 10 notes).
+* **A guarded arm keeps only the index of a column it compares.** An
+  `always` arm gets a key gate, so it does not force a table scan
+  (docs/policy-rls-bridge.md, decision 14). An arm that compares a column
+  with no index makes every subject scan the table: index that column.

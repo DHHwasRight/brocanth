@@ -463,7 +463,9 @@ Schema::new()
   the translation table of the bridge doc §1. Each subject attribute is a
   `Setting` of its kind, read as `NULL` when it is empty. `else deny` is
   FALSE, not NULL, when the setting is missing, and a guard chain is
-  boolean, not a `CASE`.
+  boolean, not a `CASE` over the arms. `Policy::from_rules` adds a key gate to an
+  `always` arm of a guard chain, `"id" >= CASE WHEN <guards> THEN <least
+  id> END`, so the other arms keep their index (bridge doc, decision 14).
 - `Schema::snapshot`, and so `rls make`, refuses with a `help:` line a
   rule the database cannot check: an app-only rule (`#[app_only]`) or a
   shape decision 3 refuses. `.manual(command, expr)` replaces that
@@ -521,9 +523,10 @@ and reads around the policies as the application's side. `tests/agreement.rs`
 runs it over fixed rules that cover each row of the translation table,
 guard chains, `exists`, `update_check`, `else null`, and `uuid` and
 `timestamptz` columns. `tests/bridge_postgres.rs` checks with `EXPLAIN`
-that a comparison with a setting keeps the column's index. A guard chain
-does not keep it: the planner cannot read the guard's setting at plan
-time.
+that a comparison with a setting keeps the column's index, and that a
+guard chain with an `always` arm keeps it through the key gate.
+`tests/agreement_keys.rs` runs the harness over the gate for each key
+type.
 
 ## 6. Rejected alternatives
 

@@ -14,6 +14,7 @@
 
 use brocanth_db::sea_query::prelude::{DateTime, Utc, Uuid};
 use brocanth_db::sea_query::{Expr, Query, Value as SeaValue};
+use brocanth_policy::typed::TypedColumn;
 use brocanth_policy::{
     Attr, AttrKind, Column, DbPolicy, Entity, Exists, Guard, MaskRule, Missing, Op, Operand, Rule,
     Subject, Term, Value,
@@ -111,6 +112,49 @@ impl Folded {
 struct Ctx<'a> {
     table: &'a str,
     attrs: &'a [Attr],
+    /// The table's primary key and the least value of its type, for the
+    /// index gate of a guard arm that reads no column. `None`: no gate.
+    key: Option<KeyGate>,
+}
+
+/// The primary key column and the least value of its type, as SQL.
+#[derive(Debug, Clone, Copy)]
+struct KeyGate {
+    column: &'static str,
+    least: &'static str,
+}
+
+impl KeyGate {
+    /// The gate of `key`, when its type has a least value this crate
+    /// knows. `NaN` sorts above `-Infinity`, so a float key needs no case
+    /// of its own.
+    fn of(column: &'static str, sql_type: &str) -> Option<KeyGate> {
+        let least = match sql_type {
+            "smallint" => "CAST('-32768' AS smallint)",
+            "integer" => "CAST('-2147483648' AS integer)",
+            "bigint" => "CAST('-9223372036854775808' AS bigint)",
+            "real" => "CAST('-Infinity' AS real)",
+            "double precision" => "CAST('-Infinity' AS double precision)",
+            "text" => "CAST('' AS text)",
+            "bytea" => "CAST('' AS bytea)",
+            "uuid" => "CAST('00000000-0000-0000-0000-000000000000' AS uuid)",
+            "timestamptz" => "CAST('-infinity' AS timestamptz)",
+            _ => return None,
+        };
+        Some(KeyGate { column, least })
+    }
+
+    /// `"key" >= CASE WHEN <cond> THEN <least> END`: TRUE for every row
+    /// when `cond` is TRUE (a primary key is never NULL), NULL otherwise.
+    /// The same truth as `cond`, but an index condition: the planner can
+    /// put the arm in a `BitmapOr`, and the scan returns no row at once
+    /// when `cond` is not TRUE (decision 14).
+    fn expr(&self, cond: &SqlExpr) -> SqlExpr {
+        let least = Expr::case(cond.sea(), Expr::cust(self.least));
+        SqlExpr::col_named(self.column)
+            .ge(SqlExpr::raw(least.into()))
+            .uses(cond)
+    }
 }
 
 impl Ctx<'_> {
@@ -148,7 +192,7 @@ impl Ctx<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         // `(NOT g1 AND … AND g_i AND t_i)` for each arm, then the fallback
         // with every guard negated. A term that is `FALSE` drops out.
-        let mut disjuncts = Vec::new();
+        let mut arms = Vec::new();
         for (i, term) in terms.into_iter().enumerate() {
             if matches!(term, Folded::False) {
                 continue;
@@ -157,9 +201,21 @@ impl Ctx<'_> {
             if let Some(g) = guards.get(i) {
                 conj.push(g.clone());
             }
-            conj.push(term);
-            disjuncts.push(Folded::all(conj));
+            arms.push((conj, term));
         }
+        // An arm that reads no column (`always`) gets the key gate when it
+        // stands in an `OR`: else that branch has no index condition, and
+        // the planner scans the table for every subject (decision 14).
+        let gate = self.key.filter(|_| arms.len() > 1);
+        let disjuncts = arms.into_iter().map(|(mut conj, term)| {
+            let gated = match (gate, &term, Folded::all(conj.clone())) {
+                (Some(key), Folded::True, Folded::Expr(cond)) => Some(key.expr(&cond)),
+                _ => None,
+            };
+            conj.push(term);
+            conj.extend(gated.map(Folded::Expr));
+            Folded::all(conj)
+        });
         let body = Folded::any(disjuncts);
         if matches!(body, Folded::False) {
             return Ok(Folded::False);
@@ -392,7 +448,8 @@ impl SqlExpr {
     /// A guard chain `g1 => r1, g2 => r2, f` becomes
     /// `s(g1) IS NOT NULL AND s(g2) IS NOT NULL AND ((g1 AND r1) OR (NOT g1
     /// AND g2 AND r2) OR (NOT g1 AND NOT g2 AND f))`, an arm whose term is
-    /// `never` left out.
+    /// `never` left out. [`Policy::from_rules`] also adds the key gate of
+    /// decision 14 to an `always` arm; this function does not know the key.
     ///
     /// # Errors
     /// [`RlsError::Definition`], with a `help:` line, for a rule the
@@ -414,6 +471,7 @@ impl SqlExpr {
         let ctx = Ctx {
             table: &table.name,
             attrs,
+            key: None,
         };
         ctx.rule(rule)
             .map(Folded::into_expr)
@@ -510,12 +568,21 @@ impl Policy {
     /// mask that permits no column writes no policy and no grant for its
     /// command. A mask with a guard keeps the table grant and adds a line
     /// to [`Schema::warnings`].
-    pub fn from_rules<P: DbPolicy>(role: &Role) -> RulePolicies {
+    ///
+    /// In a guard chain, an `always` arm gets a key gate, `"key" >= CASE
+    /// WHEN <guards> THEN <least key> END`: the same truth, but an index
+    /// condition, so the other arms keep their index (decision 14).
+    pub fn from_rules<P: DbPolicy>(role: &Role) -> RulePolicies
+    where
+        <P::Entity as Entity>::Column: TypedColumn,
+    {
         let rules = P::rules();
         let table = Table::named(<P::Entity as Entity>::TABLE.as_str());
+        let key = <P::Entity as Entity>::PRIMARY_KEY;
         let ctx = Ctx {
             table: &table.name,
             attrs: <P::Subject as Subject>::ATTRS,
+            key: KeyGate::of(key.name(), key.sql_type()),
         };
         let name = &table.name;
         let select = command_slot(name, Command::Select, &[&rules.list, rules.view()], || {

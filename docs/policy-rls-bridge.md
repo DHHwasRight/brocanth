@@ -6,7 +6,8 @@ to 7 built** (18 November 2026): the rule tree and `#[derive(Subject)]`,
 resource and admin paths, the agreement test (`brocanth_rls::agreement`,
 the `db { … }` clause, the `EXPLAIN` check; notes under decision 10), the
 scaffold with `rls diff` in CI, and column grants for write masks with no
-guard (decision 9). PLAN.md §13 ADR 11 records the decision.
+guard (decision 9). Decision 14 (21 November 2026): a guard chain keeps
+the column's index. PLAN.md §13 ADR 11 records the decision.
 Postgres only. §7 records the owner's answers.
 
 Owner decision: one rule drives the application's `WHERE` (`brocanth-policy`
@@ -86,6 +87,11 @@ s(g1) IS NOT NULL AND s(g2) IS NOT NULL AND (
   OR (NOT g1 AND NOT g2 AND f))
 ```
 
+In `Policy::from_rules`, an arm whose term is `always` also gets the key
+gate of decision 14: `g1 => always` is `(g1 AND "id" >= CASE WHEN g1 THEN
+<least id> END)`. `SqlExpr::from_rule` writes the bare form: it does not
+know the key.
+
 Membership needs a syntax: today `Pred::Exists` enters a `policy!` only
 through a `{ }` block, which decision 3 refuses. Phase 2 adds
 
@@ -109,9 +115,73 @@ never comes from the macro.
 A term with `never` drops out. A NULL guard setting makes the rule FALSE.
 Reason: a Rust `bool` has no third value; without the prefix, a missing
 `brocanth.banned` reads as "not banned". The form is boolean, not `CASE`,
-so the planner sees plain `AND`/`OR` (phase 5 checks the index is kept).
-Phase 5 found that a comparison keeps the index, and a guard chain does
-not: see the notes under decision 10.
+so the planner sees plain `AND`/`OR`. A comparison with a setting keeps
+the column's index (phase 5), and decision 14 keeps it in a guard chain.
+
+### Decision 14: a guard arm that reads no column gets a key gate, so a guard chain keeps the index.
+
+`Policy::from_rules` writes an `always` arm of a guard chain as
+
+```sql
+(cond AND "id" >= CASE WHEN cond THEN <least value of the key type> END)
+```
+
+where `cond` is the arm's guards (`NOT g1 AND g2`) and `id` is the
+entity's `#[key]`. A primary key is never NULL, so the gate is TRUE for
+every row when `cond` is TRUE and NULL otherwise: the same truth as
+`cond`. But it is an index condition. The planner can put the arm in a
+`BitmapOr` with the other arms, and when `cond` is not TRUE the key scan
+returns no row at once. The gate goes only on an arm whose term is
+`always`, and only when the rule has two or more arms left after `never`
+arms drop out. The least values: `smallint`, `integer` and `bigint` minima,
+`-Infinity` for `real` and `double precision` (`NaN` sorts above it), `''`
+for `text` and `bytea`, the nil `uuid`, and `-infinity` for `timestamptz`.
+A key of another type gets no gate, and the rule keeps the bare form.
+
+Reason: Postgres plans one tree for every subject. An `OR` uses an index
+only when each branch has an index condition (`BitmapOr`), and `g AND
+TRUE` has none, so one `always` arm made every subject scan the table. The
+gate gives that branch an index condition whose value the executor reads
+from the setting, so the plan is right for each subject, also as a cached
+generic plan.
+
+Measured on Postgres 16, 10 000 rows, an index on `author_id` and on
+`team_id`, rule `who.admin => always, author_id == who.user_id else deny`
+(plan node for a user / for an admin):
+
+| Shape | User | Admin |
+|---|---|---|
+| bare boolean form (before) | Seq Scan | Seq Scan |
+| (a) one `PERMISSIVE` policy per arm | Seq Scan | Seq Scan |
+| `RESTRICTIVE` policy for the `IS NOT NULL` prefix, body permissive | Seq Scan | Seq Scan |
+| (b) setting read in a `STABLE` or `STABLE LEAKPROOF` SQL function | Seq Scan | Seq Scan |
+| (b) setting read in an `IMMUTABLE` SQL function | Bitmap Index Scan (author) | Seq Scan |
+| (c) key gate on the `always` arm | BitmapOr: pkey (0 rows), author (10 rows) | Seq Scan |
+| (c) key gate, generic plan (`force_generic_plan`) | BitmapOr, 10 rows | BitmapOr, 10 000 rows |
+| bare form, both arms compare an indexed column | BitmapOr | BitmapOr |
+
+Rejected:
+
+- **(a) one policy per arm.** Postgres ORs the permissive policies of a
+  command into one expression before it plans, so the plan does not
+  change, and the split renames every policy, which costs a drop and a
+  create in each project.
+- **(b) a function the planner folds.** Only `IMMUTABLE` folds, and it
+  folds the setting into the plan: a statement prepared as a user and run
+  again as an admin (`force_generic_plan`) returned 10 rows, not 10 000.
+  The reverse leaks rows. sqlx caches prepared statements per pooled
+  connection, so a plan built for one request runs for the next.
+- **The gate on every arm.** For an arm that compares an indexed column,
+  the planner then read the whole key index for the admin, not the
+  `team_id` index. An arm that compares a column keeps its own index; index
+  the columns that your guarded arms compare.
+
+`tests/bridge_postgres.rs` checks the plans (50 000 rows): the bare form
+is a `Seq Scan` for a user; after `rls diff` moves it (one `ALTER
+POLICY`, names do not change), a user's plan is a `BitmapOr` of the key
+and the author index, and staff scan the table. `tests/agreement_keys.rs`
+runs the agreement harness over a guard chain for each key type the gate
+knows.
 
 ### Decision 3: these shapes are refused, at compile time with `#[db]`, or at `rls make`.
 
@@ -441,11 +511,10 @@ Changes to the sketch above, and what the harness found:
   plain grant). The harness grants it.
 - **The index is kept for a comparison with a setting** (`EXPLAIN` in
   `brocanth-rls/tests/bridge_postgres.rs`, `bigint` and `uuid`): the
-  setting read is `STABLE`, so it is an index condition. **A guard chain
-  loses it.** `s(admin) IS NOT NULL AND (admin OR (NOT admin AND col =
-  s(x)))` plans as a sequential scan: the planner cannot know `admin` at
-  plan time, and the `admin` arm reads no column. Measured on Postgres 16
-  with 50 000 rows. A rule without guards keeps the index.
+  setting read is `STABLE`, so it is an index condition. Phase 5 found
+  that a guard chain lost it: `s(admin) IS NOT NULL AND (admin OR (NOT
+  admin AND col = s(x)))` planned as a sequential scan, because the
+  `admin` arm reads no column. Decision 14 fixes it with a key gate.
 - **Each case** creates its own schema; each run creates two roles,
   `brocanth_agree_<pid>_<n>_member` and `…_login` (`NOINHERIT`), and drops
   them. The URL's user must be a superuser: it creates roles and reads

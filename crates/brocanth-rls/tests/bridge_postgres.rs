@@ -5,7 +5,9 @@
 //!
 //! Also the owned-`no_force` report of `rls check` (§4, layer 1), the
 //! sequence `USAGE` in the catalog check, and the `EXPLAIN` check: a
-//! comparison with a setting keeps the column's index (§1, decision 5).
+//! comparison with a setting keeps the column's index (§1, decision 5),
+//! and so does a guard chain with an arm that reads no column (decision
+//! 14).
 //!
 //! Skipped without `BROCANTH_TEST_DATABASE_URL` (a superuser URL). Each test
 //! has its own schema and roles.
@@ -466,6 +468,8 @@ pub struct Reader {
     pub user_id: Option<i64>,
     #[attr]
     pub team: Option<uuid::Uuid>,
+    #[attr]
+    pub staff: bool,
 }
 
 brocanth_policy::policy! {
@@ -484,33 +488,60 @@ brocanth_policy::policy! {
     pub policy TeamTickets(who: &Reader) for Ticket {
         list: team_id == who.team else deny,
     }
+
+    /// A guard arm that reads no column, in an `OR` with one that does.
+    #[db]
+    pub policy StaffTickets(who: &Reader) for Ticket {
+        list {
+            who.staff => always,
+            author_id == who.user_id else deny,
+        }
+    }
 }
 
-/// The plan of `SELECT id FROM tickets` as `who`, under `P`'s policies.
-async fn plan_as<P: brocanth_policy::DbPolicy<Subject = Reader>>(
-    admin: &Db,
-    login: &Db,
-    n: &Names,
-    who: &Reader,
-) -> String {
-    let member = Role::new(&n.member).member(&n.login);
-    let sql = Schema::new()
-        .role(member.clone())
-        .role(Role::existing(&n.login))
-        .policies(Policy::from_rules::<P>(&member))
-        .create_sql()
-        .unwrap();
+/// Applies `schema`'s SQL in the test's schema, with schema `USAGE`.
+async fn apply_in(admin: &Db, n: &Names, sql: &str) {
     let s = &n.schema;
     apply(
         admin,
         &format!(
-            "SET LOCAL search_path = {s};\nDROP POLICY IF EXISTS \"tickets_{m}_select\" ON tickets;\n{sql}\nGRANT USAGE ON SCHEMA {s} TO {m};",
+            "SET LOCAL search_path = {s};\n{sql}\nGRANT USAGE ON SCHEMA {s} TO {m};",
             m = n.member
         ),
     )
     .await;
+}
+
+fn ticket_schema(n: &Names, policies: impl brocanth_rls::IntoPolicies) -> Schema {
+    let member = Role::new(&n.member).member(&n.login);
+    Schema::new()
+        .role(member)
+        .role(Role::existing(&n.login))
+        .policies(policies)
+}
+
+/// `P`'s policies on `tickets`, in place of the previous ones.
+async fn use_policy<P: brocanth_policy::DbPolicy<Subject = Reader, Entity = Ticket>>(
+    admin: &Db,
+    n: &Names,
+) {
+    let member = Role::new(&n.member).member(&n.login);
+    let sql = ticket_schema(n, Policy::from_rules::<P>(&member))
+        .create_sql()
+        .unwrap();
+    let drop = format!(
+        "DROP POLICY IF EXISTS \"tickets_{}_select\" ON tickets;",
+        n.member
+    );
+    apply_in(admin, n, &format!("{drop}\n{sql}")).await;
+}
+
+/// The plan of `SELECT id FROM tickets` as `who`, under the policies in
+/// place.
+async fn plan(login: &Db, n: &Names, who: &Reader) -> String {
+    let member = Role::new(&n.member).member(&n.login);
     let me = brocanth_rls::identity(&member, who);
-    let explain = format!("EXPLAIN SELECT id FROM {s}.tickets");
+    let explain = format!("EXPLAIN SELECT id FROM {}.tickets", n.schema);
     let lines: Vec<String> = login
         .transact_as(&me, async |tx| {
             brocanth_db::sqlx::query_scalar(brocanth_db::sqlx::AssertSqlSafe(explain))
@@ -524,7 +555,7 @@ async fn plan_as<P: brocanth_policy::DbPolicy<Subject = Reader>>(
 }
 
 #[tokio::test]
-async fn a_setting_comparison_keeps_the_index() {
+async fn a_setting_comparison_and_a_guard_chain_keep_the_index() {
     let url = require_db!();
     let n = Names::unique("rls_explain");
     let admin = connect(&url, None).await;
@@ -549,18 +580,84 @@ async fn a_setting_comparison_keeps_the_index() {
     let who = Reader {
         user_id: Some(7),
         team: Some(uuid::Uuid::from_u128(7)),
+        staff: false,
+    };
+    let staff = Reader {
+        staff: true,
+        ..who.clone()
     };
 
     // `(s IS NOT NULL AND col = s)`: the setting read is STABLE, so the
     // planner compares the column with it through the index. A cast on the
     // column (a `text` setting for a `uuid` column) would lose it.
-    let plan = plan_as::<OwnTickets>(&admin, &login, &n, &who).await;
-    assert!(plan.contains("Index Cond: (author_id = "), "{plan}");
-    assert!(plan.contains("tickets_author_id_idx"), "{plan}");
-    let plan = plan_as::<TeamTickets>(&admin, &login, &n, &who).await;
-    assert!(plan.contains("Index Cond: (team_id = "), "{plan}");
-    assert!(plan.contains("tickets_team_id_idx"), "{plan}");
+    use_policy::<OwnTickets>(&admin, &n).await;
+    let p = plan(&login, &n, &who).await;
+    assert!(p.contains("Index Cond: (author_id = "), "{p}");
+    assert!(p.contains("tickets_author_id_idx"), "{p}");
+    use_policy::<TeamTickets>(&admin, &n).await;
+    let p = plan(&login, &n, &who).await;
+    assert!(p.contains("Index Cond: (team_id = "), "{p}");
+    assert!(p.contains("tickets_team_id_idx"), "{p}");
 
+    // A guard chain as the bare boolean form (`SqlExpr::from_rule`, and
+    // `Policy::from_rules` before the key gate): the `staff` arm has no
+    // index condition, so every subject scans the table.
+    let member = Role::new(&n.member).member(&n.login);
+    let rules = <StaffTickets as brocanth_policy::DbPolicy>::rules();
+    let bare = brocanth_rls::SqlExpr::from_rule(
+        &rules.list,
+        &brocanth_rls::Table::named("tickets"),
+        <Reader as Subject>::ATTRS,
+    )
+    .unwrap();
+    let before = ticket_schema(
+        &n,
+        Policy::from_rules::<StaffTickets>(&member).manual(brocanth_rls::Command::Select, bare),
+    );
+    let drop = format!(
+        "DROP POLICY IF EXISTS \"tickets_{}_select\" ON tickets;",
+        n.member
+    );
+    apply_in(
+        &admin,
+        &n,
+        &format!("{drop}\n{}", before.create_sql().unwrap()),
+    )
+    .await;
+    let p = plan(&login, &n, &who).await;
+    assert!(p.starts_with("Seq Scan on tickets"), "{p}");
+
+    // `rls make` from that shape: the diff alters the one policy in place,
+    // and the catalog then matches the new snapshot.
+    let after = ticket_schema(&n, Policy::from_rules::<StaffTickets>(&member));
+    let up = brocanth_rls::diff(&before.snapshot().unwrap(), &after.snapshot().unwrap())
+        .unwrap()
+        .sql();
+    // The policy keeps its name, so one ALTER POLICY moves it.
+    assert!(up.contains("ALTER POLICY"), "{up}");
+    assert!(!up.contains("DROP POLICY"), "{up}");
+    assert!(up.contains(r#""id" >= (CASE WHEN"#), "{up}");
+    apply_in(&admin, &n, &up).await;
+    let scoped = admin_in(&url, s).await;
+    let drift = catalog::drift(&scoped, &after.snapshot().unwrap())
+        .await
+        .unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
+
+    // With the key gate, the `staff` arm is an index condition on the
+    // primary key, NULL for a subject who is not staff: a `BitmapOr` of
+    // the key (no row) and the author index. Staff read every row.
+    let p = plan(&login, &n, &who).await;
+    assert!(p.contains("BitmapOr"), "{p}");
+    assert!(
+        p.contains("Bitmap Index Scan on tickets_author_id_idx"),
+        "{p}"
+    );
+    assert!(p.contains("Bitmap Index Scan on tickets_pkey"), "{p}");
+    let p = plan(&login, &n, &staff).await;
+    assert!(p.starts_with("Seq Scan on tickets"), "{p}");
+
+    scoped.close().await;
     login.close().await;
     teardown(&admin, &n).await;
 }
