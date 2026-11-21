@@ -123,6 +123,10 @@ cargo_metadata = "0.23.1"
 # parse-and-reserialise, which is what `toml` would give. Already in the lock
 # file through cargo_metadata, so it costs the build nothing new.
 toml_edit = "0.25"
+# `brocanth explain --json`: one document for tools and agents. Both are in
+# the graph already, through cargo_metadata.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # `vendor/dpswap.min.js` is embedded with include_str! rather than listed
 # here. See vendor/README.md: a scaffold that needs the network to finish is

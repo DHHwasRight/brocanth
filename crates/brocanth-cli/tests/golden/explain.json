@@ -1,0 +1,1007 @@
+{
+  "version": 1,
+  "project": "my-app",
+  "modules": [
+    {
+      "key": "observability",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "config",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "db",
+      "why": [
+        "provides PgPool: cache requires PgPool"
+      ]
+    },
+    {
+      "key": "cache",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "jobs",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "mail",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "policy",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "rls",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "middleware",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "middleware-csrf",
+      "why": [
+        "part of middleware"
+      ]
+    },
+    {
+      "key": "admin",
+      "why": [
+        "chosen"
+      ]
+    },
+    {
+      "key": "commands",
+      "why": [
+        "rls needs it: the migration is written by `rls make`, a command of the project's binary that runs `schema()`"
+      ]
+    }
+  ],
+  "kinds": [
+    {
+      "kind": "ConfigSource",
+      "gist": "settings read from a file",
+      "provider": "config",
+      "why": "chosen",
+      "read_by": [
+        "db"
+      ]
+    },
+    {
+      "kind": "PgPool",
+      "gist": "a Postgres pool",
+      "provider": "db",
+      "why": "cache requires PgPool",
+      "read_by": [
+        "cache",
+        "jobs",
+        "mail",
+        "rls"
+      ]
+    },
+    {
+      "kind": "CacheStore",
+      "gist": "a cache",
+      "provider": "cache",
+      "why": "chosen",
+      "read_by": []
+    },
+    {
+      "kind": "JobQueue",
+      "gist": "a job queue",
+      "provider": "jobs",
+      "why": "chosen",
+      "read_by": [
+        "mail"
+      ]
+    }
+  ],
+  "bindings": {
+    "recorded": true,
+    "unrecorded": []
+  },
+  "contributions": [
+    {
+      "source": "contribution",
+      "kind": "AdminPanel",
+      "module": "cache",
+      "name": "cache",
+      "what": "a `cache` tab in the admin: purge expired entries, clear a namespace you name",
+      "collected_by": "admin",
+      "toggle": {
+        "group": "admin",
+        "default": true
+      }
+    },
+    {
+      "source": "contribution",
+      "kind": "AdminPanel",
+      "module": "jobs",
+      "name": "jobs",
+      "what": "a `jobs` tab in the admin: the queues, what runs, the retries and the dead letter",
+      "collected_by": "admin",
+      "toggle": {
+        "group": "admin",
+        "default": true
+      }
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "db",
+      "name": "db",
+      "what": "how a page reads the pool, and how a migration is written",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "mail",
+      "name": "mail",
+      "what": "how a page sends mail, and never through `Smtp` itself",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "rls",
+      "name": "rls",
+      "what": "how row-level security is declared in Rust and migrated",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "middleware",
+      "name": "middleware",
+      "what": "which edge middleware is registered, and where",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "middleware-csrf",
+      "name": "middleware-csrf",
+      "what": "every form carries the CSRF token",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "admin",
+      "name": "admin",
+      "what": "how a model gets an admin screen",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "AgentsSection",
+      "module": "commands",
+      "name": "commands",
+      "what": "how a command is added",
+      "collected_by": "the `AGENTS.md` generator",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "ConfigCheck",
+      "module": "cache",
+      "name": "cache",
+      "what": "`deploy/migrate` for `[cache]`, while the cache is on Postgres",
+      "collected_by": "the generated `check` command",
+      "toggle": null
+    },
+    {
+      "source": "contribution",
+      "kind": "ConfigCheck",
+      "module": "jobs",
+      "name": "jobs",
+      "what": "`deploy/migrate` for `[jobs]`, while the queue is on Postgres",
+      "collected_by": "the generated `check` command",
+      "toggle": null
+    },
+    {
+      "source": "mount",
+      "kind": "Mount",
+      "module": "admin",
+      "option": "mount_at",
+      "default": "\"/admin\"",
+      "role": "Backoffice"
+    }
+  ],
+  "hooks": [
+    {
+      "module": "middleware-csrf",
+      "hook": "check",
+      "phase": "Guard",
+      "required": true,
+      "on": true,
+      "what": "refuse an unsafe request that does not send the token back"
+    },
+    {
+      "module": "middleware-csrf",
+      "hook": "mint",
+      "phase": "Guard",
+      "required": true,
+      "on": true,
+      "what": "set the token cookie on a response"
+    }
+  ],
+  "settings": [
+    {
+      "module": "middleware-csrf",
+      "section": "csrf",
+      "key": "cookie",
+      "type": "text",
+      "value": "\"__Host-csrf_token\"",
+      "secret": false,
+      "env": "MY_APP_CSRF__COOKIE",
+      "flags": [
+        "--csrf.cookie"
+      ],
+      "layers": [
+        "default",
+        "src/modules/middleware_csrf.rs",
+        "config/<env>.toml [csrf]",
+        "$MY_APP_CSRF__COOKIE",
+        "--csrf.cookie"
+      ]
+    },
+    {
+      "module": "middleware-csrf",
+      "section": "csrf",
+      "key": "field",
+      "type": "text",
+      "value": "\"_csrf_token\"",
+      "secret": false,
+      "env": "MY_APP_CSRF__FIELD",
+      "flags": [
+        "--csrf.field"
+      ],
+      "layers": [
+        "default",
+        "src/modules/middleware_csrf.rs",
+        "config/<env>.toml [csrf]",
+        "$MY_APP_CSRF__FIELD",
+        "--csrf.field"
+      ]
+    },
+    {
+      "module": "middleware-csrf",
+      "section": "csrf",
+      "key": "header",
+      "type": "text",
+      "value": "\"x-csrf-token\"",
+      "secret": false,
+      "env": "MY_APP_CSRF__HEADER",
+      "flags": [
+        "--csrf.header"
+      ],
+      "layers": [
+        "default",
+        "src/modules/middleware_csrf.rs",
+        "config/<env>.toml [csrf]",
+        "$MY_APP_CSRF__HEADER",
+        "--csrf.header"
+      ]
+    },
+    {
+      "module": "middleware-csrf",
+      "section": "csrf",
+      "key": "exempt",
+      "type": "list",
+      "value": "[]",
+      "secret": false,
+      "env": "MY_APP_CSRF__EXEMPT",
+      "flags": [
+        "--csrf.exempt"
+      ],
+      "layers": [
+        "default",
+        "src/modules/middleware_csrf.rs",
+        "config/<env>.toml [csrf]",
+        "$MY_APP_CSRF__EXEMPT",
+        "--csrf.exempt"
+      ]
+    },
+    {
+      "module": "middleware-csrf",
+      "section": "csrf",
+      "key": "secure",
+      "type": "bool",
+      "value": "true",
+      "secret": false,
+      "env": "MY_APP_CSRF__SECURE",
+      "flags": [
+        "--csrf.secure"
+      ],
+      "layers": [
+        "default",
+        "src/modules/middleware_csrf.rs",
+        "config/<env>.toml [csrf]",
+        "$MY_APP_CSRF__SECURE",
+        "--csrf.secure"
+      ]
+    },
+    {
+      "module": "admin",
+      "section": "admin",
+      "key": "title",
+      "type": "text",
+      "value": "\"My App admin\"",
+      "secret": false,
+      "env": "MY_APP_ADMIN__TITLE",
+      "flags": [
+        "--admin.title"
+      ],
+      "layers": [
+        "default",
+        "src/modules/admin.rs",
+        "config/<env>.toml [admin]",
+        "$MY_APP_ADMIN__TITLE",
+        "--admin.title"
+      ]
+    },
+    {
+      "module": "admin",
+      "section": "admin",
+      "key": "header",
+      "type": "text",
+      "value": "\"Acme backoffice\"",
+      "secret": false,
+      "env": "MY_APP_ADMIN__HEADER",
+      "flags": [
+        "--admin.header"
+      ],
+      "layers": [
+        "default",
+        "src/modules/admin.rs",
+        "config/<env>.toml [admin]",
+        "$MY_APP_ADMIN__HEADER",
+        "--admin.header"
+      ]
+    },
+    {
+      "module": "admin",
+      "section": "admin",
+      "key": "index_title",
+      "type": "text",
+      "value": "\"Site administration\"",
+      "secret": false,
+      "env": "MY_APP_ADMIN__INDEX_TITLE",
+      "flags": [
+        "--admin.index_title"
+      ],
+      "layers": [
+        "default",
+        "src/modules/admin.rs",
+        "config/<env>.toml [admin]",
+        "$MY_APP_ADMIN__INDEX_TITLE",
+        "--admin.index_title"
+      ]
+    },
+    {
+      "module": "admin",
+      "section": "admin",
+      "key": "site_url",
+      "type": "text",
+      "value": "\"/\"",
+      "secret": false,
+      "env": "MY_APP_ADMIN__SITE_URL",
+      "flags": [
+        "--admin.site_url"
+      ],
+      "layers": [
+        "default",
+        "src/modules/admin.rs",
+        "config/<env>.toml [admin]",
+        "$MY_APP_ADMIN__SITE_URL",
+        "--admin.site_url"
+      ]
+    },
+    {
+      "module": "admin",
+      "section": "admin",
+      "key": "stylesheet",
+      "type": "text",
+      "value": "\"/admin-theme.css\"",
+      "secret": false,
+      "env": "MY_APP_ADMIN__STYLESHEET",
+      "flags": [
+        "--admin.stylesheet"
+      ],
+      "layers": [
+        "default",
+        "src/modules/admin.rs",
+        "config/<env>.toml [admin]",
+        "$MY_APP_ADMIN__STYLESHEET",
+        "--admin.stylesheet"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "url",
+      "type": "text",
+      "value": null,
+      "secret": true,
+      "env": "MY_APP_DB__URL",
+      "flags": [
+        "--db.url_file",
+        "--db.url_env"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__URL",
+        "--db.url_file, --db.url_env"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "max_connections",
+      "type": "integer",
+      "value": "10",
+      "secret": false,
+      "env": "MY_APP_DB__MAX_CONNECTIONS",
+      "flags": [
+        "--db.max_connections"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__MAX_CONNECTIONS",
+        "--db.max_connections"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "min_connections",
+      "type": "integer",
+      "value": "0",
+      "secret": false,
+      "env": "MY_APP_DB__MIN_CONNECTIONS",
+      "flags": [
+        "--db.min_connections"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__MIN_CONNECTIONS",
+        "--db.min_connections"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "acquire_timeout",
+      "type": "integer",
+      "value": "30",
+      "secret": false,
+      "env": "MY_APP_DB__ACQUIRE_TIMEOUT",
+      "flags": [
+        "--db.acquire_timeout"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__ACQUIRE_TIMEOUT",
+        "--db.acquire_timeout"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "idle_timeout",
+      "type": "integer",
+      "value": "600",
+      "secret": false,
+      "env": "MY_APP_DB__IDLE_TIMEOUT",
+      "flags": [
+        "--db.idle_timeout"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__IDLE_TIMEOUT",
+        "--db.idle_timeout"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "statement_timeout",
+      "type": "integer",
+      "value": "30",
+      "secret": false,
+      "env": "MY_APP_DB__STATEMENT_TIMEOUT",
+      "flags": [
+        "--db.statement_timeout"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__STATEMENT_TIMEOUT",
+        "--db.statement_timeout"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "lock_timeout",
+      "type": "integer",
+      "value": "10",
+      "secret": false,
+      "env": "MY_APP_DB__LOCK_TIMEOUT",
+      "flags": [
+        "--db.lock_timeout"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__LOCK_TIMEOUT",
+        "--db.lock_timeout"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "search_path",
+      "type": "list",
+      "value": "[]",
+      "secret": false,
+      "env": "MY_APP_DB__SEARCH_PATH",
+      "flags": [
+        "--db.search_path"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__SEARCH_PATH",
+        "--db.search_path"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "read_only",
+      "type": "bool",
+      "value": "false",
+      "secret": false,
+      "env": "MY_APP_DB__READ_ONLY",
+      "flags": [
+        "--db.read_only"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__READ_ONLY",
+        "--db.read_only"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "application_name",
+      "type": "text",
+      "value": "\"my-app\"",
+      "secret": false,
+      "env": "MY_APP_DB__APPLICATION_NAME",
+      "flags": [
+        "--db.application_name"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__APPLICATION_NAME",
+        "--db.application_name"
+      ]
+    },
+    {
+      "module": "db",
+      "section": "db",
+      "key": "ca_file",
+      "type": "text",
+      "value": "\"/etc/ssl/certs/db-ca.pem\"",
+      "secret": false,
+      "env": "MY_APP_DB__CA_FILE",
+      "flags": [
+        "--db.ca_file"
+      ],
+      "layers": [
+        "default",
+        "src/modules/db.rs",
+        "config/<env>.toml [db]",
+        "$MY_APP_DB__CA_FILE",
+        "--db.ca_file"
+      ]
+    },
+    {
+      "module": "cache",
+      "section": "cache",
+      "key": "migrate",
+      "type": "bool",
+      "value": "true",
+      "secret": false,
+      "env": "MY_APP_CACHE__MIGRATE",
+      "flags": [
+        "--cache.migrate"
+      ],
+      "layers": [
+        "default",
+        "src/modules/cache.rs",
+        "config/<env>.toml [cache]",
+        "$MY_APP_CACHE__MIGRATE",
+        "--cache.migrate"
+      ]
+    },
+    {
+      "module": "cache",
+      "section": "cache",
+      "key": "sweep_every",
+      "type": "integer",
+      "value": "300",
+      "secret": false,
+      "env": "MY_APP_CACHE__SWEEP_EVERY",
+      "flags": [
+        "--cache.sweep_every"
+      ],
+      "layers": [
+        "default",
+        "src/modules/cache.rs",
+        "config/<env>.toml [cache]",
+        "$MY_APP_CACHE__SWEEP_EVERY",
+        "--cache.sweep_every"
+      ]
+    },
+    {
+      "module": "jobs",
+      "section": "jobs",
+      "key": "migrate",
+      "type": "bool",
+      "value": "true",
+      "secret": false,
+      "env": "MY_APP_JOBS__MIGRATE",
+      "flags": [
+        "--jobs.migrate"
+      ],
+      "layers": [
+        "default",
+        "src/modules/jobs.rs",
+        "config/<env>.toml [jobs]",
+        "$MY_APP_JOBS__MIGRATE",
+        "--jobs.migrate"
+      ]
+    },
+    {
+      "module": "jobs",
+      "section": "jobs",
+      "key": "worker",
+      "type": "bool",
+      "value": "true",
+      "secret": false,
+      "env": "MY_APP_JOBS__WORKER",
+      "flags": [
+        "--jobs.worker"
+      ],
+      "layers": [
+        "default",
+        "src/modules/jobs.rs",
+        "config/<env>.toml [jobs]",
+        "$MY_APP_JOBS__WORKER",
+        "--jobs.worker"
+      ]
+    },
+    {
+      "module": "jobs",
+      "section": "jobs",
+      "key": "queues",
+      "type": "list",
+      "value": "[\"default\"]",
+      "secret": false,
+      "env": "MY_APP_JOBS__QUEUES",
+      "flags": [
+        "--jobs.queues"
+      ],
+      "layers": [
+        "default",
+        "src/modules/jobs.rs",
+        "config/<env>.toml [jobs]",
+        "$MY_APP_JOBS__QUEUES",
+        "--jobs.queues"
+      ]
+    },
+    {
+      "module": "jobs",
+      "section": "jobs",
+      "key": "concurrency",
+      "type": "integer",
+      "value": "5",
+      "secret": false,
+      "env": "MY_APP_JOBS__CONCURRENCY",
+      "flags": [
+        "--jobs.concurrency"
+      ],
+      "layers": [
+        "default",
+        "src/modules/jobs.rs",
+        "config/<env>.toml [jobs]",
+        "$MY_APP_JOBS__CONCURRENCY",
+        "--jobs.concurrency"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "transport",
+      "type": "text",
+      "value": "\"log\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__TRANSPORT",
+      "flags": [
+        "--mail.transport"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__TRANSPORT",
+        "--mail.transport"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "from",
+      "type": "text",
+      "value": "\"no-reply@example.com\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__FROM",
+      "flags": [
+        "--mail.from"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__FROM",
+        "--mail.from"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "from_name",
+      "type": "text",
+      "value": "\"My App\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__FROM_NAME",
+      "flags": [
+        "--mail.from_name"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__FROM_NAME",
+        "--mail.from_name"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "folder",
+      "type": "text",
+      "value": "\"tmp/mail\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__FOLDER",
+      "flags": [
+        "--mail.folder"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__FOLDER",
+        "--mail.folder"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "smtp_host",
+      "type": "text",
+      "value": "\"localhost\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__SMTP_HOST",
+      "flags": [
+        "--mail.smtp_host"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__SMTP_HOST",
+        "--mail.smtp_host"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "smtp_port",
+      "type": "integer",
+      "value": "587",
+      "secret": false,
+      "env": "MY_APP_MAIL__SMTP_PORT",
+      "flags": [
+        "--mail.smtp_port"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__SMTP_PORT",
+        "--mail.smtp_port"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "smtp_security",
+      "type": "text",
+      "value": "\"starttls\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__SMTP_SECURITY",
+      "flags": [
+        "--mail.smtp_security"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__SMTP_SECURITY",
+        "--mail.smtp_security"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "smtp_username",
+      "type": "text",
+      "value": "\"\"",
+      "secret": false,
+      "env": "MY_APP_MAIL__SMTP_USERNAME",
+      "flags": [
+        "--mail.smtp_username"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__SMTP_USERNAME",
+        "--mail.smtp_username"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "smtp_password",
+      "type": "text",
+      "value": null,
+      "secret": true,
+      "env": "MY_APP_MAIL__SMTP_PASSWORD",
+      "flags": [
+        "--mail.smtp_password_file",
+        "--mail.smtp_password_env"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__SMTP_PASSWORD",
+        "--mail.smtp_password_file, --mail.smtp_password_env"
+      ]
+    },
+    {
+      "module": "mail",
+      "section": "mail",
+      "key": "worker",
+      "type": "bool",
+      "value": "true",
+      "secret": false,
+      "env": "MY_APP_MAIL__WORKER",
+      "flags": [
+        "--mail.worker"
+      ],
+      "layers": [
+        "default",
+        "src/modules/mail.rs",
+        "config/<env>.toml [mail]",
+        "$MY_APP_MAIL__WORKER",
+        "--mail.worker"
+      ]
+    },
+    {
+      "module": "brocanth",
+      "section": "server",
+      "key": "shutdown_grace_secs",
+      "type": "integer",
+      "value": "25",
+      "secret": false,
+      "env": "MY_APP_SERVER__SHUTDOWN_GRACE_SECS",
+      "flags": [
+        "--server.shutdown_grace_secs"
+      ],
+      "layers": [
+        "default",
+        "src/modules/brocanth.rs",
+        "config/<env>.toml [server]",
+        "$MY_APP_SERVER__SHUTDOWN_GRACE_SECS",
+        "--server.shutdown_grace_secs"
+      ]
+    },
+    {
+      "module": "brocanth",
+      "section": "server",
+      "key": "max_body_bytes",
+      "type": "integer",
+      "value": "16777216",
+      "secret": false,
+      "env": "MY_APP_SERVER__MAX_BODY_BYTES",
+      "flags": [
+        "--server.max_body_bytes"
+      ],
+      "layers": [
+        "default",
+        "src/modules/brocanth.rs",
+        "config/<env>.toml [server]",
+        "$MY_APP_SERVER__MAX_BODY_BYTES",
+        "--server.max_body_bytes"
+      ]
+    }
+  ],
+  "options": [
+    {
+      "module": "admin",
+      "key": "mount_at",
+      "default": "\"/admin\"",
+      "file": "src/modules/admin.rs"
+    }
+  ]
+}

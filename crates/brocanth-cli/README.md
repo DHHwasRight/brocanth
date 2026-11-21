@@ -238,6 +238,26 @@ from the same data. See
 [docs/module-capabilities.md](../../docs/module-capabilities.md) §12,
 stage 6.
 
+`brocanth explain --json` prints the same facts as one JSON document, for
+tools and agents. The text report is rendered from that document, so the
+two cannot disagree. A field that is renamed, removed or changes meaning
+bumps `version`; a new field does not. Version 1:
+
+| Field | Value |
+|---|---|
+| `version` | `1` |
+| `project` | the project name in `brocanth.toml` |
+| `modules[]` | `key`, and `why[]`: `chosen`, `part of <parent>`, `<module> needs it: <why>`, `provides <Kind>: <why>` |
+| `kinds[]` | each Kind of cardinality one a module provides, requires or uses: `kind`, `gist`, `provider` and `why` (both `null` when no module is bound), `read_by[]` |
+| `bindings` | `recorded`: `brocanth.toml` has a `[bindings]` table (without one, `kinds` holds the computed bindings); `unrecorded[]`: `{kind, provider}` the modules bind and the table misses |
+| `contributions[]` | sorted by `kind`. `source: "contribution"`: `kind`, `module`, `name`, `what`, `collected_by` (`null`: no module collects it), `toggle` (`{group, default}` for `integrate.<group>`, `null` when a generator collects it). `source: "mount"`: `kind` (`Mount`), `module`, `option`, `default`, `role` |
+| `hooks[]` | `module`, `hook`, `phase` (`null`: none), `required`, `on` (on by default), `what` |
+| `settings[]` | run time: `module`, `section`, `key`, `type` (`text`, `bool`, `integer`, `float`, `list`), `value` (`null` for a secret), `secret`, `env` (no `$`), `flags[]`, `layers[]` (lowest first, as the text prints them) |
+| `options[]` | build time: `module`, `key`, `default` (Rust source), `file` |
+
+`crates/brocanth-cli/tests/golden/explain.json` is the document for a
+fixed project. The generator's bless rewrites it.
+
 ### Project commands: `dbshell`, `migrate`, `settings`
 
 These are commands of the generated project, and `brocanth <name>` hands

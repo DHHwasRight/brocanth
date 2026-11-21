@@ -946,6 +946,8 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "ratatui",
+ "serde",
+ "serde_json",
  "toml_edit",
  "unicode-width",
 ]

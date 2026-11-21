@@ -979,11 +979,23 @@ What was built, and the choices made on the way:
   its layers, lowest first, and each option with its module file. A
   `brocanth.toml` with no `[bindings]` table, or one that disagrees with
   the modules, gets a `!` line that says to run `add` or `remove` once.
-  No `--json`: nothing reads it yet.
+  No `--json`: nothing reads it yet. (Added later: `--json`, below.)
 - `read_record` errors now carry a `help:` line.
 
 Left: the settings layer that wins in one deployment (that needs the
 loader, which the CLI does not link); `explain <Kind>` for one Kind.
+
+**`brocanth explain --json` (2026-11-21).** The same facts as one JSON
+document, with `"version": 1`, for tools and agents. `explain::facts`
+builds one `Explained` value; `text` and `json` only print it, so there is
+no second resolver, and the text shows nothing the JSON lacks. A test
+reads the JSON back and renders the text from it, for a project with
+bindings, one without a `[bindings]` table and one that misses a binding:
+the text is the same. `tests/golden/explain.json` holds the document of a
+fixed project, and the generator's bless rewrites it. The field names are
+in the CLI README. **Reason for the shape:** facts, not sentences: a hook
+carries `required` and `on`, not "on by default"; a setting carries its
+`env` and `flags` beside the `layers` the text joins.
 
 Total: 15-21 days (first draft: 10-13). Stage 1b is new; stages 2 and 3
 grew with RBAC and the settings layers.

@@ -1,5 +1,7 @@
 //! What a manifest says, as text: the table on each `docs/modules/*.md`
-//! page, and the report `brocanth explain` prints for a project.
+//! page, and the report `brocanth explain` prints for a project, as text
+//! or as JSON (`--json`). [`facts`] builds the report once; [`text`] and
+//! [`json`] only print it.
 //!
 //! One source for both. The page shows a module alone; the report shows a
 //! project's modules together, with the bindings `brocanth.toml` records.
@@ -9,6 +11,7 @@
 
 use brocanth_scaffold::kind::Cardinality;
 use brocanth_scaffold::{Kind, Setting};
+use serde::{Deserialize, Serialize};
 
 use crate::commands::create::about;
 
@@ -21,11 +24,11 @@ pub struct Declared {
     pub setting: Setting,
 }
 
-/// How a hook may be turned off, in one word.
-fn hook_state(hook: &brocanth_scaffold::Hook) -> &'static str {
-    if hook.required {
+/// How a hook may be turned off, in a few words.
+fn state_word(required: bool, on: bool) -> &'static str {
+    if required {
         "required"
-    } else if hook.on {
+    } else if on {
         "on by default"
     } else {
         "off by default"
@@ -69,15 +72,184 @@ fn why_in(key: &str, picks: &[&'static str], bindings: &Recorded) -> Vec<String>
     out
 }
 
-/// The `brocanth explain` report for a project of `picks`. `recorded` is
+/// The version of the `brocanth explain --json` document. A field that is
+/// renamed, removed or changes its meaning bumps it; a new field does not.
+pub const JSON_VERSION: u32 = 1;
+
+/// What `brocanth explain` knows about a project: the text report and the
+/// `--json` document are both this, so neither can say what the other
+/// does not. The field names are the JSON's, documented in
+/// `crates/brocanth-cli/README.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Explained {
+    /// [`JSON_VERSION`].
+    pub version: u32,
+    /// The project name in `brocanth.toml`.
+    pub project: String,
+    /// Each module, in the order the generator writes them.
+    pub modules: Vec<ModuleIn>,
+    /// Each Kind of cardinality one that a module provides, requires or
+    /// uses, in the order the modules name them.
+    pub kinds: Vec<KindBinding>,
+    /// Whether `[bindings]` in `brocanth.toml` agrees with the modules.
+    pub bindings: BindingsRecord,
+    /// What each module adds to a collection, sorted by Kind.
+    pub contributions: Vec<Contribution>,
+    /// Each hook of each module.
+    pub hooks: Vec<HookFact>,
+    /// Each run-time setting, with its layers.
+    pub settings: Vec<SettingFact>,
+    /// Each build-time option, with its module file.
+    pub options: Vec<OptionFact>,
+}
+
+/// A module and why it is in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleIn {
+    pub key: String,
+    /// `chosen`, `part of <parent>`, `<module> needs it: <why>`, or
+    /// `provides <Kind>: <why>`.
+    pub why: Vec<String>,
+}
+
+/// A Kind of cardinality one, its provider and its readers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindBinding {
+    pub kind: String,
+    /// What the Kind is, in a few words.
+    pub gist: String,
+    /// The module bound to it, or `null` when none is.
+    pub provider: Option<String>,
+    /// Why that module, as `brocanth.toml` records it; `null` with no provider.
+    pub why: Option<String>,
+    /// The modules that require or use it.
+    pub read_by: Vec<String>,
+}
+
+/// `[bindings]` in `brocanth.toml`, against the modules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingsRecord {
+    /// The file has a `[bindings]` table. Without one, `kinds` holds the
+    /// bindings computed from the modules.
+    pub recorded: bool,
+    /// Bindings the modules make that the table does not record.
+    pub unrecorded: Vec<Binding>,
+}
+
+/// One Kind bound to one module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub kind: String,
+    pub provider: String,
+}
+
+/// One item a module adds to a collection: a declared contribution, or the
+/// mount path a module option sets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum Contribution {
+    /// A contribution the manifest declares.
+    Contribution {
+        kind: String,
+        module: String,
+        /// The contribution's name.
+        name: String,
+        what: String,
+        /// The collector, or `null` when no module of the project collects it.
+        collected_by: Option<String>,
+        /// The `integrate.<group>` toggle that turns it off, for a Kind a
+        /// module collects; `null` for one a generator collects.
+        toggle: Option<Toggle>,
+    },
+    /// A module option that is a mount path.
+    Mount {
+        /// Always `Mount`.
+        kind: String,
+        module: String,
+        /// The option key, such as `mount_at`.
+        option: String,
+        /// Its default, as Rust source.
+        default: String,
+        /// What is mounted there.
+        role: String,
+    },
+}
+
+impl Contribution {
+    fn kind(&self) -> &str {
+        match self {
+            Contribution::Contribution { kind, .. } | Contribution::Mount { kind, .. } => kind,
+        }
+    }
+}
+
+/// The toggle a contribution is turned off with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Toggle {
+    /// `integrate.<group>` in the module file.
+    pub group: String,
+    /// On unless the project turns it off.
+    pub default: bool,
+}
+
+/// One hook of one module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookFact {
+    pub module: String,
+    pub hook: String,
+    /// `Identify`, `Guard`, `Cache` or `Encode`, or `null` with no phase.
+    pub phase: Option<String>,
+    /// A project may not turn it off.
+    pub required: bool,
+    /// On when the project says nothing.
+    pub on: bool,
+    pub what: String,
+}
+
+/// One run-time setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingFact {
+    /// The module that declares it.
+    pub module: String,
+    /// The section in the file and the first part of the flag.
+    pub section: String,
+    pub key: String,
+    /// `text`, `bool`, `integer`, `float` or `list`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The default, as the config file writes it; `null` for a secret.
+    pub value: Option<String>,
+    pub secret: bool,
+    /// The environment variable, without the `$`.
+    pub env: String,
+    /// The flags that set it; empty with no flag.
+    pub flags: Vec<String>,
+    /// Every place it is read from, lowest first: `default`, the module
+    /// file, the config file (with a `ConfigSource`), `env`, the flags (or
+    /// `no flag`).
+    pub layers: Vec<String>,
+}
+
+/// One build-time option.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionFact {
+    pub module: String,
+    pub key: String,
+    /// The default, as Rust source.
+    pub default: String,
+    /// The module file it is set in.
+    pub file: String,
+}
+
+/// What `brocanth explain` reports for a project of `picks`. `recorded` is
 /// `[bindings]` from `brocanth.toml`, `None` when the file has no table.
 /// `settings` is every setting the generator declares for these picks.
-pub fn report(
+pub fn facts(
     name: &str,
     picks: &[&'static str],
     recorded: Option<&Recorded>,
     settings: &[(String, Declared)],
-) -> String {
+) -> Explained {
     let computed: Recorded = crate::resolve::bindings(picks)
         .into_iter()
         .map(|(kind, provider)| {
@@ -90,7 +262,199 @@ pub fn report(
         .collect();
     let bindings = recorded.unwrap_or(&computed);
     let ident = name.replace('-', "_").to_uppercase();
-    let width = picks.iter().map(|k| k.len()).max().unwrap_or(0);
+
+    let modules = picks
+        .iter()
+        .map(|key| ModuleIn {
+            key: key.to_string(),
+            why: why_in(key, picks, bindings),
+        })
+        .collect();
+
+    // Each Kind of cardinality one that a module binds, requires or uses.
+    let mut named: Vec<brocanth_scaffold::KindRef> = Vec::new();
+    for key in picks {
+        let m = about(key);
+        let refs = m
+            .provides
+            .iter()
+            .map(|(k, _)| *k)
+            .chain(m.requires.iter().map(|r| r.kind))
+            .chain(m.uses.iter().map(|(k, _)| *k));
+        for k in refs {
+            if k.cardinality == Cardinality::One && !named.iter().any(|seen| seen.name == k.name) {
+                named.push(k);
+            }
+        }
+    }
+    let kinds = named
+        .iter()
+        .map(|k| {
+            let read_by = picks
+                .iter()
+                .filter(|p| {
+                    let m = about(p);
+                    m.requirements(picks).any(|r| r.kind.name == k.name)
+                        || m.uses.iter().any(|(u, _)| u.name == k.name)
+                })
+                .map(|p| p.to_string())
+                .collect();
+            let bound = bindings.iter().find(|(kind, _, _)| kind == k.name);
+            KindBinding {
+                kind: k.name.to_string(),
+                gist: k.gist.to_string(),
+                provider: bound.map(|(_, provider, _)| provider.clone()),
+                why: bound.map(|(_, _, why)| why.clone()),
+                read_by,
+            }
+        })
+        .collect();
+    let unrecorded = match recorded {
+        Some(recorded) => computed
+            .iter()
+            .filter(|(kind, provider, _)| {
+                !recorded.iter().any(|(k, p, _)| k == kind && p == provider)
+            })
+            .map(|(kind, provider, _)| Binding {
+                kind: kind.clone(),
+                provider: provider.clone(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let collectors = crate::resolve::collectors(picks);
+    let mut contributions = Vec::new();
+    for key in picks {
+        let m = about(key);
+        for (k, c, on) in &m.contributions {
+            let (collected_by, toggle) = match (
+                k.collected_by,
+                collectors.iter().find(|(n, _)| *n == k.name),
+            ) {
+                (Some(by), _) => (Some(by.to_string()), None),
+                (None, Some((_, by))) => (
+                    Some(by.to_string()),
+                    Some(Toggle {
+                        group: k.group.to_string(),
+                        default: *on,
+                    }),
+                ),
+                (None, None) => (None, None),
+            };
+            contributions.push(Contribution::Contribution {
+                kind: k.name.to_string(),
+                module: key.to_string(),
+                name: c.name.to_string(),
+                what: c.what.to_string(),
+                collected_by,
+                toggle,
+            });
+        }
+        for o in m.options.iter().filter(|o| o.mount) {
+            contributions.push(Contribution::Mount {
+                kind: "Mount".to_string(),
+                module: key.to_string(),
+                option: o.key.to_string(),
+                default: o.default.to_string(),
+                role: o.role.name().to_string(),
+            });
+        }
+    }
+    contributions.sort_by(|a, b| a.kind().cmp(b.kind()));
+
+    let mut hooks = Vec::new();
+    for key in picks {
+        for (hook, what, h) in &about(key).hooks {
+            hooks.push(HookFact {
+                module: key.to_string(),
+                hook: hook.to_string(),
+                phase: h.phase.map(|p| p.to_string()),
+                required: h.required,
+                on: h.on,
+                what: what.to_string(),
+            });
+        }
+    }
+
+    let file = picks.iter().any(|p| {
+        about(p).gives(<brocanth_scaffold::ConfigSource as brocanth_scaffold::kind::Kind>::NAME)
+    });
+    let settings = settings
+        .iter()
+        .map(|(by, d)| {
+            let s = &d.setting;
+            let env = format!(
+                "{ident}_{}__{}",
+                d.section.replace('-', "_").to_uppercase(),
+                s.key.replace('.', "__").to_uppercase()
+            );
+            let flags = if s.secret {
+                vec![
+                    format!("--{}.{}_file", d.section, s.key),
+                    format!("--{}.{}_env", d.section, s.key),
+                ]
+            } else if s.flag {
+                vec![format!("--{}.{}", d.section, s.key)]
+            } else {
+                Vec::new()
+            };
+            let mut layers = vec!["default".to_string(), crate::choices::path_of(by)];
+            if file {
+                layers.push(format!("config/<env>.toml [{}]", d.section));
+            }
+            layers.push(format!("${env}"));
+            layers.push(if flags.is_empty() {
+                "no flag".to_string()
+            } else {
+                flags.join(", ")
+            });
+            SettingFact {
+                module: by.clone(),
+                section: d.section.clone(),
+                key: s.key.to_string(),
+                kind: kind_name(s.kind).to_string(),
+                value: (!s.secret).then(|| s.value.clone()),
+                secret: s.secret,
+                env,
+                flags,
+                layers,
+            }
+        })
+        .collect();
+
+    let mut options = Vec::new();
+    for key in picks {
+        for o in &about(key).options {
+            options.push(OptionFact {
+                module: key.to_string(),
+                key: o.key.to_string(),
+                default: o.default.to_string(),
+                file: crate::choices::path_of(key),
+            });
+        }
+    }
+
+    Explained {
+        version: JSON_VERSION,
+        project: name.to_string(),
+        modules,
+        kinds,
+        bindings: BindingsRecord {
+            recorded: recorded.is_some(),
+            unrecorded,
+        },
+        contributions,
+        hooks,
+        settings,
+        options,
+    }
+}
+
+/// The plain-text report: [`Explained`] and nothing else, so every fact it
+/// prints is in the JSON.
+pub fn text(e: &Explained) -> String {
+    let width = e.modules.iter().map(|m| m.key.len()).max().unwrap_or(0);
     let mut out = String::new();
     let mut section = |title: &str, lines: Vec<String>| {
         if !out.is_empty() {
@@ -109,62 +473,38 @@ pub fn report(
     };
 
     section(
-        &format!("Modules: why each is in ({} modules)", picks.len()),
-        picks
+        &format!("Modules: why each is in ({} modules)", e.modules.len()),
+        e.modules
             .iter()
-            .map(|key| format!("{key:width$}  {}", why_in(key, picks, bindings).join("; ")))
+            .map(|m| format!("{:width$}  {}", m.key, m.why.join("; ")))
             .collect(),
     );
 
-    // Each Kind of cardinality one that a module binds, requires or uses.
-    let mut kinds: Vec<brocanth_scaffold::KindRef> = Vec::new();
-    for key in picks {
-        let m = about(key);
-        let named = m
-            .provides
-            .iter()
-            .map(|(k, _)| *k)
-            .chain(m.requires.iter().map(|r| r.kind))
-            .chain(m.uses.iter().map(|(k, _)| *k));
-        for k in named {
-            if k.cardinality == Cardinality::One && !kinds.iter().any(|seen| seen.name == k.name) {
-                kinds.push(k);
-            }
-        }
-    }
     let mut lines = Vec::new();
-    for k in &kinds {
-        let users: Vec<&str> = picks
-            .iter()
-            .copied()
-            .filter(|p| {
-                let m = about(p);
-                m.requirements(picks).any(|r| r.kind.name == k.name)
-                    || m.uses.iter().any(|(u, _)| u.name == k.name)
-            })
-            .collect();
-        let read_by = if users.is_empty() {
+    for k in &e.kinds {
+        let read_by = if k.read_by.is_empty() {
             String::new()
         } else {
-            format!("; read by {}", users.join(", "))
+            format!("; read by {}", k.read_by.join(", "))
         };
-        match bindings.iter().find(|(kind, _, _)| kind == k.name) {
-            Some((_, provider, why)) => {
-                lines.push(format!("{:14} <- {provider} ({why}){read_by}", k.name))
-            }
+        match &k.provider {
+            Some(provider) => lines.push(format!(
+                "{:14} <- {provider} ({}){read_by}",
+                k.kind,
+                k.why.as_deref().unwrap_or_default()
+            )),
             None => lines.push(format!(
                 "{:14} <- none: each reader writes its code without {}{read_by}",
-                k.name, k.gist
+                k.kind, k.gist
             )),
         }
     }
-    if let Some(recorded) = recorded {
-        for (kind, provider, _) in &computed {
-            if !recorded.iter().any(|(k, p, _)| k == kind && p == provider) {
-                lines.push(format!(
-                    "! brocanth.toml does not record {kind} <- {provider}; run `brocanth add` or `brocanth remove` once to rewrite it"
-                ));
-            }
+    if e.bindings.recorded {
+        for b in &e.bindings.unrecorded {
+            lines.push(format!(
+                "! brocanth.toml does not record {} <- {}; run `brocanth add` or `brocanth remove` once to rewrite it",
+                b.kind, b.provider
+            ));
         }
     } else {
         lines.push(
@@ -174,109 +514,91 @@ pub fn report(
     }
     section("Kinds: the provider of each", lines);
 
-    let collectors = crate::resolve::collectors(picks);
-    let mut lines = Vec::new();
-    for key in picks {
-        let m = about(key);
-        for (k, c, on) in &m.contributions {
-            let to = match (
-                k.collected_by,
-                collectors.iter().find(|(n, _)| *n == k.name),
-            ) {
-                (Some(by), _) => format!("collected by {by}"),
-                (None, Some((_, by))) => {
-                    format!("collected by {by}; integrate.{} = {on} by default", k.group)
-                }
-                (None, None) => "not written: no module collects it".to_string(),
-            };
-            lines.push(format!(
-                "{:13} <- {key}: `{}` ({to}): {}",
-                k.name, c.name, c.what
-            ));
-        }
-        for o in m.options.iter().filter(|o| o.mount) {
-            lines.push(format!(
-                "{:13} <- {key}: {} = {} ({})",
-                "Mount",
-                o.key,
-                o.default,
-                o.role.name()
-            ));
-        }
-    }
-    lines.sort_by(|a, b| a.split(" <- ").next().cmp(&b.split(" <- ").next()));
+    let lines = e
+        .contributions
+        .iter()
+        .map(|c| match c {
+            Contribution::Contribution {
+                kind,
+                module,
+                name,
+                what,
+                collected_by,
+                toggle,
+            } => {
+                let to = match (collected_by, toggle) {
+                    (Some(by), None) => format!("collected by {by}"),
+                    (Some(by), Some(t)) => format!(
+                        "collected by {by}; integrate.{} = {} by default",
+                        t.group, t.default
+                    ),
+                    (None, _) => "not written: no module collects it".to_string(),
+                };
+                format!("{kind:13} <- {module}: `{name}` ({to}): {what}")
+            }
+            Contribution::Mount {
+                kind,
+                module,
+                option,
+                default,
+                role,
+            } => format!("{kind:13} <- {module}: {option} = {default} ({role})"),
+        })
+        .collect();
     section(
         "Contributions: what each module adds, and who collects it",
         lines,
     );
 
-    let mut lines = Vec::new();
-    for key in picks {
-        for (hook, what, h) in &about(key).hooks {
-            let phase = h.phase.map_or("-".to_string(), |p| p.to_string());
-            lines.push(format!(
-                "{key:width$}  {hook:16} {phase:8} {:14} {what}",
-                hook_state(h)
-            ));
-        }
-    }
+    let lines = e
+        .hooks
+        .iter()
+        .map(|h| {
+            format!(
+                "{:width$}  {:16} {:8} {:14} {}",
+                h.module,
+                h.hook,
+                h.phase.as_deref().unwrap_or("-"),
+                state_word(h.required, h.on),
+                h.what
+            )
+        })
+        .collect();
     section(
         "Hooks: phase, and whether a project may turn each off",
         lines,
     );
 
-    let file = picks.iter().any(|p| {
-        about(p).gives(<brocanth_scaffold::ConfigSource as brocanth_scaffold::kind::Kind>::NAME)
-    });
-    let mut lines = Vec::new();
-    for (by, d) in settings {
-        let s = &d.setting;
-        let env = format!(
-            "${ident}_{}__{}",
-            d.section.replace('-', "_").to_uppercase(),
-            s.key.replace('.', "__").to_uppercase()
-        );
-        let flag = if s.secret {
-            format!("--{0}.{1}_file, --{0}.{1}_env", d.section, s.key)
-        } else if s.flag {
-            format!("--{}.{}", d.section, s.key)
-        } else {
-            "no flag".to_string()
-        };
-        let mut layers = vec!["default".to_string(), crate::choices::path_of(by)];
-        if file {
-            layers.push(format!("config/<env>.toml [{}]", d.section));
-        }
-        layers.push(env);
-        layers.push(flag);
-        let value = if s.secret {
-            "<secret>".to_string()
-        } else {
-            s.value.clone()
-        };
-        lines.push(format!(
-            "[{}] {} ({}) = {value}  run: {}",
-            d.section,
-            s.key,
-            kind_name(s.kind),
-            layers.join(" < ")
-        ));
-    }
-    for key in picks {
-        for o in &about(key).options {
-            lines.push(format!(
-                "{key}.{} = {}  build: {}",
-                o.key,
-                o.default,
-                crate::choices::path_of(key)
-            ));
-        }
-    }
+    let mut lines: Vec<String> = e
+        .settings
+        .iter()
+        .map(|s| {
+            format!(
+                "[{}] {} ({}) = {}  run: {}",
+                s.section,
+                s.key,
+                s.kind,
+                s.value.as_deref().unwrap_or("<secret>"),
+                s.layers.join(" < ")
+            )
+        })
+        .collect();
+    lines.extend(
+        e.options
+            .iter()
+            .map(|o| format!("{}.{} = {}  build: {}", o.module, o.key, o.default, o.file)),
+    );
     section(
         "Settings: each with its layers, lowest first (run time), or its module file (build time)",
         lines,
     );
     out
+}
+
+/// The `--json` document: [`Explained`], pretty-printed, keys in the order
+/// the struct declares them.
+pub fn json(e: &Explained) -> String {
+    serde_json::to_string_pretty(e).expect("the facts are plain strings, lists and booleans")
 }
 
 /// The table on each `docs/modules/*.md` page. Only `docs_check` writes
@@ -431,7 +753,11 @@ pub mod page {
             .iter()
             .map(|(name, what, hook)| {
                 let phase = hook.phase.map_or("no phase".to_string(), |p| p.to_string());
-                format!("`{name}` ({phase}, {}): {}", hook_state(hook), cell(what))
+                format!(
+                    "`{name}` ({phase}, {}): {}",
+                    state_word(hook.required, hook.on),
+                    cell(what)
+                )
             })
             .collect();
         let options = m

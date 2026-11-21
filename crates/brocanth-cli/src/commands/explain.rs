@@ -5,7 +5,7 @@
 //! each hook with its phase, and each setting with its layers. It reads
 //! `brocanth.toml` and the manifests this CLI was built with. It builds
 //! nothing and connects to nothing; it runs the generator in memory for
-//! the settings.
+//! the settings. `--json` prints the same facts as one JSON document.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -17,14 +17,33 @@ use crate::commands::{add, create, Outcome};
 use crate::ui::{Diagnostic, Ui};
 
 #[derive(Args)]
-pub struct ExplainArgs {}
+pub struct ExplainArgs {
+    /// Print the same facts as one JSON document, for tools and agents
+    ///
+    /// Stable field names, documented in the CLI README, and a `"version"`
+    /// field: 1. The text report is rendered from the same document.
+    #[arg(long)]
+    pub json: bool,
+}
 
-pub fn run(ui: &Ui, dir: Option<&Path>, _args: ExplainArgs) -> Outcome {
+pub fn run(ui: &Ui, dir: Option<&Path>, args: ExplainArgs) -> Outcome {
     let project = Project::find(dir)?;
     let marker = project.root.join(super::delegate::MARKER);
     let text = std::fs::read_to_string(&marker).map_err(|e| add::read_error(&marker, &e))?;
-    let record = add::read_record(&text)?;
-    let recorded = recorded_bindings(&text)?;
+    let facts = explained(&text)?;
+    if args.json {
+        ui.result(crate::explain::json(&facts));
+    } else {
+        ui.result(crate::explain::text(&facts).trim_end());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The facts for the project `brocanth.toml` describes: the one source of
+/// the text report and of `--json`.
+fn explained(text: &str) -> Result<crate::explain::Explained, Vec<Diagnostic>> {
+    let record = add::read_record(text)?;
+    let recorded = recorded_bindings(text)?;
     let answers = create::Answers {
         name: record.name.clone(),
         title: record.title.clone(),
@@ -54,11 +73,12 @@ pub fn run(ui: &Ui, dir: Option<&Path>, _args: ExplainArgs) -> Outcome {
             )
         })
         .collect();
-    ui.result(
-        crate::explain::report(&record.name, &record.enabled, recorded.as_ref(), &settings)
-            .trim_end(),
-    );
-    Ok(ExitCode::SUCCESS)
+    Ok(crate::explain::facts(
+        &record.name,
+        &record.enabled,
+        recorded.as_ref(),
+        &settings,
+    ))
 }
 
 /// `[bindings]` in `brocanth.toml`, or `None` for a file from before it.
@@ -118,7 +138,7 @@ mod tests {
             .into_iter()
             .filter(|k| picks.contains(k))
             .collect();
-        let out = crate::explain::report("my-app", &picks, None, &[]);
+        let out = crate::explain::text(&crate::explain::facts("my-app", &picks, None, &[]));
         assert!(
             out.contains("provides PgPool: jobs requires PgPool"),
             "{out}"
@@ -127,5 +147,93 @@ mod tests {
         assert!(out.contains("read by mail"), "{out}");
         assert!(out.contains("no [bindings] table"), "{out}");
         assert!(out.contains("ConfigCheck"), "{out}");
+    }
+
+    /// The modules of the fixed project the JSON golden is taken from: a
+    /// Kind added for another module, a part, a need, contributions with
+    /// and without a toggle, a mount, required hooks and a secret.
+    const FIXED: &[&str] = &[
+        "admin",
+        "cache",
+        "commands",
+        "config",
+        "db",
+        "jobs",
+        "mail",
+        "middleware",
+        "middleware-csrf",
+        "observability",
+        "policy",
+        "rls",
+    ];
+
+    /// `brocanth.toml` as `brocanth create` writes it for `picks`.
+    fn record_of(picks: &[&str]) -> String {
+        let picks: Vec<&'static str> = crate::commands::create::all()
+            .into_iter()
+            .filter(|k| picks.contains(k))
+            .collect();
+        let answers = create::Answers {
+            name: "my-app".into(),
+            title: "My App".into(),
+            picks,
+            local: None,
+            git: false,
+        };
+        create::scaffold(&answers)
+            .expect("the modules agree")
+            .into_iter()
+            .find(|(path, _)| path == super::super::delegate::MARKER)
+            .map(|(_, text)| text)
+            .expect("create writes brocanth.toml")
+    }
+
+    /// `brocanth explain --json` for the fixed project prints what it
+    /// printed yesterday. The name holds `generator_writes`, so the CLI's
+    /// bless (`BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth --
+    /// generator_writes`) rewrites it with the generator's goldens.
+    #[test]
+    fn explain_json_generator_writes_what_it_wrote_yesterday() {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/explain.json");
+        let have = crate::explain::json(&explained(&record_of(FIXED)).expect("it explains")) + "\n";
+        if std::env::var_os("BROCANTH_BLESS").is_some() {
+            std::fs::write(&file, &have).expect("write the golden");
+            return;
+        }
+        let want = std::fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            want == have,
+            "`brocanth explain --json` changed for {}.\nRun with BROCANTH_BLESS=1 and read the diff.",
+            file.display()
+        );
+    }
+
+    /// Every fact the text prints is in the JSON: the text is rendered from
+    /// the document read back from its JSON, and is the same text. `text`
+    /// takes the document and nothing else, so it has no other source.
+    #[test]
+    fn every_fact_in_the_text_is_in_the_json() {
+        let full = record_of(FIXED);
+        // No `[bindings]` table, and a table that misses a binding: the two
+        // `!` lines.
+        let bare = full
+            .split("\n[bindings]")
+            .next()
+            .expect("a first part")
+            .to_string()
+            + &full[full.find("\n[modules.").expect("module tables")..];
+        let partial = full.replace("JobQueue = { provider = \"jobs\", why = \"chosen\" }\n", "");
+        assert_ne!(partial, full, "the fixture binds JobQueue");
+        for (record, warns) in [(full, false), (bare, true), (partial, true)] {
+            let facts = explained(&record).expect("it explains");
+            assert_eq!(crate::explain::text(&facts).contains("\n  ! "), warns);
+            let json = crate::explain::json(&facts);
+            let back: crate::explain::Explained =
+                serde_json::from_str(&json).expect("the JSON reads back");
+            assert_eq!(back, facts);
+            assert_eq!(crate::explain::text(&back), crate::explain::text(&facts));
+            let value: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+            assert_eq!(value["version"], 1);
+        }
     }
 }
