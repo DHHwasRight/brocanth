@@ -469,7 +469,7 @@ because the argument is still why each one matters.
 | G7 | no migration diffing | **done**: `brocanth migrate make` diffs the models against `migrations/schema.json` by stable field id and writes a SeaORM migration, renames included. It applies nothing. See `docs/migrations.md` |
 | G8 | the cache is key/value only | **done**: tags on `Cache` (`set_tagged`, `invalidate_tag`), `route::RouteCache`, `CacheExt::fragment`, and `TagInvalidator` from model changes. See `docs/cache.md` |
 | G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | **done**: `brocanth-i18n` (see `docs/i18n.md`; the `i18n` module adds it), fixtures, `brocanth dbshell`, `dp-prefetch` and `brocanth check --deploy` (see `docs/tooling.md`) |
-| G10 | **no middleware anybody can name** | **started**: `brocanth-middleware`, five hooks. See `docs/middleware.md` |
+| G10 | **no middleware anybody can name** | **started**: 15 of Gorilla's 16 pieces are built (audit 2026-11-22, below). Open: `CORSMethodMiddleware`, which waits on a decision. See the G10 section and `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
 | G13 | **a template engine is a special case, not a module** | **done**: `Slot::PagesRenderers`, and `jt` attached through it with a manifest, a dependency and one block. A project can hold two engines over one page tree. Sixteen `rsx` branches remain in `create.rs` for seams that do not exist yet. See `docs/modules.md` |
@@ -667,6 +667,68 @@ see the types of a project. Prefetch is `dp-prefetch`. `brocanth check
 --deploy` reads the configuration and `src/` and reports each finding with an
 id and a `help:`. `docs/tooling.md` has those four, and what each one does
 not do.
+
+### G10. No middleware anybody can name
+
+The ask is the Gorilla inventory in `docs/middleware.md` §2 and §3: the
+request plumbing that every framework ships and nobody calls a feature.
+G10 is done when each piece is built or declined with a reason.
+
+**Audit, 2026-11-22.** Each piece, and the code that answers it:
+
+| Piece | Where | State |
+|---|---|---|
+| `ProxyHeaders` | `crates/brocanth-middleware/src/proxy_headers.rs` | built |
+| `HTTPMethodOverrideHandler` | `src/method_override.rs` | built |
+| `CanonicalHost` | `src/canonical_host.rs` | built |
+| `ContentTypeHandler` | `src/content_types.rs` | built |
+| `CORS` | `src/cors.rs` | built |
+| `CompressHandler` | `src/compression.rs` (`middleware-compression`) | built |
+| `LoggingHandler`, `CombinedLoggingHandler` | `crates/brocanth-cli/src/modules/logging.rs`: `format = "common"` or `"combined"` | built, 2026-11-22 |
+| `CustomLoggingHandler` | the same file, written into the project: edit `Line::after_dispatch` | built, by design |
+| `RecoveryHandler` | the generated `handle` (`crates/brocanth-cli/src/commands/create.rs`, "A panic in a request hook"), `brocanth_server::bridge::catch_unwind` | built (ADR 8) |
+| `gorilla/csrf` | `src/csrf.rs` (`middleware-csrf`) | built |
+| `gorilla/securecookie` | `brocanth-auth` sessions, the HMAC in `src/flash.rs` | present where it is used; no general primitive, and none asked for |
+| `gorilla/sessions` | the `sessions` module | built |
+| `gorilla/schema` | `brocanth-input` (G11) | built |
+| `gorilla/websocket` | `brocanth_server::websocket`, `realtime-websocket` | built |
+| security headers, rate limit, conditional GET, flash | `src/security_headers.rs`, `src/rate_limit/`, `src/conditional_get.rs`, `src/flash.rs` | built; beyond Gorilla |
+| `mux.CORSMethodMiddleware` | none | **open** |
+
+The finding under this gap, "no shipped crate implements `HookSource`", is
+also stale: about twenty crates and generated plugins install hooks now.
+
+**What is left.** One piece of the Gorilla set, and one limit found on the
+way that is not a Gorilla piece. A third limit was small and is built.
+
+1. **`CORSMethodMiddleware`: `Access-Control-Allow-Methods` from the route
+   table.** Size: about one day. `RouteMatch::allow` already gives the verbs
+   of a path. `Cors` runs before dispatch and cannot name the project's
+   table, so `CorsConfig` takes a function from a path to its verbs, and
+   the generated registration passes one over `pages::router()`. **It needs
+   two decisions first:** does the route's set replace `CorsConfig::methods`
+   or intersect it, and what does a preflight for a verb the route lacks
+   get? **Recommendation:** intersect, so the configuration stays the
+   ceiling and a new `DELETE` page is not open to other origins by
+   accident; and answer that preflight with no `Access-Control-Allow-*`
+   headers, so the browser refuses it, as it does today for a verb outside
+   the list. G10 is done when this is built.
+2. **A panic does not reach the `errors` module.** Size: half a day, but it
+   changes the generated `handle` and the `errors` contract. The net
+   answers a bare 500 that the response hooks see; `error.rsx` and the
+   reporters never hear of it. Handing the panic to `finish` as an error
+   would let an error hook render and report it, but the hook would then
+   read request state that the panic left half-written, which is what the
+   bridge refuses to do (ADR 8). **Recommendation:** an owner decision in
+   the `errors` module, not in G10: report the panic message with a new
+   `Origin::Panic`, and render `error.rsx` with no request state.
+3. **`SharedRateLimit` behind `Bridge`: done, 2026-11-22.** `Bridge` called
+   `App::begin` and `App::run`, which are a compile error for an
+   application with an `AsyncRequestHook`. Both of its arms now call
+   `App::begin_async`; the blocking arm drives a hook that waits with its
+   parked-thread `block_on`. Tested in
+   `crates/brocanth-server/tests/bridges.rs`,
+   `a_request_hook_that_waits_runs_on_both_arms`.
 
 ### Out of scope, already decided
 

@@ -9,14 +9,17 @@ brocanth column comes from reading this checkout, not from a crate list.
 
 ## 1. The seam
 
-brocanth has two middleware seams, and only one of them is used.
+brocanth has two middleware seams: a pattern-scoped layer chain, and hooks.
 
-**`Layer`** (`brocanth/src/routing_middleware.rs`) is a pattern-scoped chain
-that runs before dispatch. Its own header records that nothing mounts a
-layer, and that an `await` inside one does not compile: the output type is a
-trait parameter, fixed when the stack is built, so it cannot name the borrow
-of the chain that an async layer must hold. `docs/async-handlers.md` §4 has
-both compiler errors in full.
+**Layers** run inside dispatch, for a route that matched. The sync `Layer`
+(`brocanth/src/routing_middleware.rs`) has no user: an `await` inside one
+does not compile, because the output type is a trait parameter, fixed when
+the stack is built, and it cannot name the borrow of the chain that an async
+layer must hold. `docs/async-handlers.md` §4 has both compiler errors in
+full. `AsyncMiddlewareStack` (`routing_middleware_async.rs`) is the shape
+that works. A plugin offers a layer by name, and the generated `src/app.rs`
+mounts it at a pattern the application chooses (PLAN.md §8). `sessions` is
+one such layer.
 
 **Hooks** (`brocanth/src/plugin_hooks.rs`) is the one that works.
 `RequestHook::before_dispatch` may rewrite the request or short-circuit with
@@ -25,13 +28,16 @@ both compiler errors in full.
 `on_body` runs for a buffered one; `ErrorHook` turns an error into a
 response. Hooks are ordered by declaration, not registration.
 
-Everything below is a hook. Nothing below needs the `Layer` stack, which is
-worth saying plainly: the thing that looks like the middleware seam is not
-the middleware seam.
+Everything below is a hook. Nothing below needs a layer, which is worth
+saying plainly: the thing that looks like the middleware seam is not the
+middleware seam. A layer never sees a 404, a 405 or a request a hook
+answered; a hook sees all of them.
 
-**No shipped crate implements `HookSource` today.** Every implementation in
-the repository is a test fixture. `brocanth-middleware` is the first real
-one, which is why the first tranche is deliberately the dullest six.
+When this page was first written, no shipped crate implemented
+`HookSource`: every implementation was a test fixture. `brocanth-middleware`
+was the first real one. Today the edge hooks below, `logging`, the route
+cache, `i18n`, `errors`, `audit`, `gtag`, `analytics`, `webhooks-in` and
+`storage` all install hooks, in generated projects.
 
 ## 2. `gorilla/handlers`, mapped
 
@@ -43,10 +49,10 @@ one, which is why the first tranche is deliberately the dullest six.
 | `ContentTypeHandler` | 415 unless the request's media type is on a list | `RequestHook` + `Flow::Respond` | **built** |
 | `CORS` | preflight answer, and the headers on the real response | `RequestHook` + `ResponseHook` | **built** |
 | `CompressHandler` | gzip when `Accept-Encoding` says so | `ResponseHook::on_body`; a stream is left alone | **built**: `Compression`, gzip and brotli (§8) |
-| `LoggingHandler` | Apache Common Log Format | `RequestHook::after_dispatch` | partly: `logging` writes a line, not CLF |
-| `CombinedLoggingHandler` | Apache Combined Log Format | same | open |
-| `CustomLoggingHandler` | the same with your own formatter | same | open |
-| `RecoveryHandler` | catches a panic, answers 500 | **core**: `catch_unwind` around dispatch | open |
+| `LoggingHandler` | Apache Common Log Format | `RequestHook::after_dispatch` | **built**: `logging`, `format = "common"` |
+| `CombinedLoggingHandler` | Apache Combined Log Format | same | **built**: `logging`, `format = "combined"` |
+| `CustomLoggingHandler` | the same with your own formatter | same | **built**: the plugin file is the project's own; change `Line::after_dispatch` |
+| `RecoveryHandler` | catches a panic, answers 500 | the generated `handle`: `catch_unwind` around the hooks and dispatch | **built** (ADR 8) |
 
 `CompressHandler` is the one with a real cost attached: `flate2` and
 `brotli`. Both arrive behind the off-by-default `compression` feature.
@@ -54,21 +60,27 @@ one, which is why the first tranche is deliberately the dullest six.
 for, and the hook does not use it: a stream is never compressed. §8 says
 why.
 
-`RecoveryHandler` is not a hook at all. `brocanth-server/src/bridge.rs`
-already has a `catch_unwind`, so the edge is covered; what is missing is
-recovery *inside* dispatch, where the application's own handler runs, with
-a hook that can decide what the 500 says. That is a core change and it is
-not in this crate.
+`RecoveryHandler` is not a hook at all. A generated `handle` runs the
+request hooks, the chain and the page inside
+`brocanth_server::bridge::catch_unwind`. A panic is logged and becomes a
+500, and the response hooks and `after_dispatch` still see it, so a
+response hook can rewrite what the 500 says and `logging` writes its line.
+`Bridge`, for a hand-written `main`, has the same net. PLAN.md ADR 8
+records it; the CLI's golden builds test it with a page that panics. One
+limit: the `errors` module's `error.rsx` and its reporters do not hear a
+panic, because the net answers before `catching` can. See G10 in
+`docs/framework-gaps.md`.
 
-The three logging handlers are one question, not three: whether the
-`logging` module's line becomes a format choice. CLF and Combined are two
-format strings over fields brocanth already has.
+The three logging handlers were one question, not three: whether the
+`logging` module's line becomes a format choice. It did. `format` is
+`line`, `common` or `combined`, and the plugin file is the project's, so a
+custom format is an edit. See `docs/modules/logging.md`.
 
 ## 3. The rest of the toolkit
 
 | Repository | What it is | brocanth | State |
 |---|---|---|---|
-| `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | the route table knows this | open, and better here than in Gorilla: the table is complete at build time |
+| `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | the route table knows this (`RouteMatch::allow`) | open, and better here than in Gorilla: the table is complete at build time. Needs a decision; see G10 in `docs/framework-gaps.md` |
 | `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `Csrf`, in this crate | **written**: a double-submit cookie, live in a generated project with `middleware-csrf` (§5) |
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
@@ -290,9 +302,9 @@ synchronous hook. It works with `App::run`, `Bridge` and
 takes any `rate_limit::Store`. A store that waits on the network needs
 an `AsyncRequestHook`, and an application with one must serve through
 `App::begin_async`. The core makes `App::run` a compile error for it.
-`brocanth_server::Bridge` calls `App::run` and `App::begin` today, never
-`begin_async`, so `SharedRateLimit` is served by a project that drives
-`begin_async` itself. A generated `src/app.rs` does. The
+A generated `src/app.rs` and `brocanth_server::Bridge` both call
+`begin_async`, so both serve `SharedRateLimit`; in a test, use
+`TestClient::send_async`. The
 `middleware-rate-limit` module registers `RateLimit`; for
 `SharedRateLimit` and `PgStore`, replace that registration by hand.
 
@@ -348,8 +360,6 @@ CSRF reads `[csrf]` the same way: `cookie`, `field`, `header` and
 
 **What is open.**
 
-- `SharedRateLimit` cannot be served by `Bridge` until the bridge drives
-  `App::begin_async`.
 - The limits are per process with `RateLimit`. A deployment with more
   than one process and a real limit wants `SharedRateLimit`.
 
