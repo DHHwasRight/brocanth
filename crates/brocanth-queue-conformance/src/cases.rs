@@ -173,7 +173,22 @@ async fn push(cx: &Ctx, jobs: Vec<NewJob>) -> Result<Vec<Pushed>, String> {
 /// one call, so a case that claims once is a case that only works against a
 /// database.
 async fn claim_until(cx: &Ctx, r: &ClaimRequest, want: usize) -> Result<Vec<Claimed>, String> {
+    claim_until_at(cx, r, want).await.map(|(have, _)| have)
+}
+
+/// [`claim_until`], and the instant just before the first claim that
+/// returned a job.
+///
+/// The server stamps the lease on its own clock, after that instant. So the
+/// lease holds at least until `sent + r.lease`, measured here, whatever the
+/// round trip cost.
+async fn claim_until_at(
+    cx: &Ctx,
+    r: &ClaimRequest,
+    want: usize,
+) -> Result<(Vec<Claimed>, Instant), String> {
     let start = Instant::now();
+    let mut sent = None;
     let mut have = Vec::new();
     while have.len() < want {
         if start.elapsed() > PATIENCE {
@@ -183,6 +198,7 @@ async fn claim_until(cx: &Ctx, r: &ClaimRequest, want: usize) -> Result<Vec<Clai
                 r.queue
             ));
         }
+        let before = Instant::now();
         let mut got = cx.backend.claim(r).await.map_err(|e| e.to_string())?;
         if got.len() > r.max {
             return Err(format!(
@@ -195,12 +211,16 @@ async fn claim_until(cx: &Ctx, r: &ClaimRequest, want: usize) -> Result<Vec<Clai
             tokio::time::sleep(POLL).await;
             continue;
         }
+        sent.get_or_insert(before);
         have.append(&mut got);
     }
-    Ok(have)
+    Ok((have, sent.unwrap_or(start)))
 }
 
 /// Claim nothing, and prove it stays nothing for a while.
+///
+/// Only for a job that must never come back. For a job that is out of reach
+/// until a lease or a delay ends, use [`claim_none_until`].
 async fn claim_none_for(cx: &Ctx, r: &ClaimRequest, window: Duration) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < window {
@@ -215,6 +235,42 @@ async fn claim_none_for(cx: &Ctx, r: &ClaimRequest, window: Duration) -> Result<
         tokio::time::sleep(POLL).await;
     }
     Ok(())
+}
+
+/// Claim nothing while a job is out of reach, up to `until`.
+///
+/// `until` is an instant on this side, taken before the call that set the
+/// lease or the delay. The server stamps that lease or delay on its own
+/// clock, later, so the job stays out of reach at least until `until`.
+///
+/// A claim that answers before `until` ran on the server before it, and
+/// must come back empty. A claim that answers after `until` proves nothing:
+/// the lease or the delay may have honestly run out. Its jobs go back to the
+/// caller, which then holds them.
+///
+/// Do not time this window from after the call returns, as
+/// [`claim_none_for`] does. The window then grows by one round trip, and on
+/// a slow runner the last claim reaches a job whose lease has ended.
+async fn claim_none_until(
+    cx: &Ctx,
+    r: &ClaimRequest,
+    until: Instant,
+) -> Result<Vec<Claimed>, String> {
+    while Instant::now() < until {
+        let got = cx.backend.claim(r).await.map_err(|e| e.to_string())?;
+        if !got.is_empty() {
+            if Instant::now() < until {
+                return Err(format!(
+                    "claimed {} job(s) from {:?} that should not have been claimable",
+                    got.len(),
+                    r.queue
+                ));
+            }
+            return Ok(got);
+        }
+        tokio::time::sleep(POLL.min(until.saturating_duration_since(Instant::now()))).await;
+    }
+    Ok(Vec::new())
 }
 
 async fn finish(cx: &Ctx, jobs: Vec<Claimed>) -> Result<(), String> {
@@ -339,11 +395,12 @@ async fn lease_expires(cx: &Ctx) -> Result<(), String> {
     let q = cx.queue("expiry");
     push(cx, vec![job(&q, "k.one")]).await?;
     let r = req(&q, 1, Duration::from_millis(150));
-    let first = claim_until(cx, &r, 1).await?;
+    let (first, sent) = claim_until_at(cx, &r, 1).await?;
     // While the lease is held nobody else may have it.
-    claim_none_for(cx, &r, Duration::from_millis(80)).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let second = claim_until(cx, &r, 1).await?;
+    let mut second = claim_none_until(cx, &r, sent + r.lease).await?;
+    if second.is_empty() {
+        second = claim_until(cx, &r, 1).await?;
+    }
     if second[0].lease.token == first[0].lease.token {
         return Err("a reclaim after expiry reused the token; the fence is not a fence".into());
     }
@@ -404,9 +461,10 @@ async fn heartbeat_holds(cx: &Ctx) -> Result<(), String> {
     let q = cx.queue("heartbeat");
     push(cx, vec![job(&q, "k.one")]).await?;
     let r = req(&q, 1, Duration::from_millis(200));
-    let got = claim_until(cx, &r, 1).await?;
+    let (got, mut sent) = claim_until_at(cx, &r, 1).await?;
     for _ in 0..4 {
         tokio::time::sleep(Duration::from_millis(80)).await;
+        sent = Instant::now();
         let state = cx
             .backend
             .heartbeat(&got[0].lease, Duration::from_millis(200))
@@ -416,8 +474,9 @@ async fn heartbeat_holds(cx: &Ctx) -> Result<(), String> {
             return Err("a heartbeat inside the lease reported the lease lost".into());
         }
     }
-    claim_none_for(cx, &r, Duration::from_millis(60)).await?;
-    finish(cx, got).await
+    let late = claim_none_until(cx, &r, sent + r.lease).await?;
+    finish(cx, got).await?;
+    finish(cx, late).await
 }
 
 async fn exclusive(cx: &Ctx) -> Result<(), String> {
@@ -526,12 +585,16 @@ async fn unsupported_answers(cx: &Ctx) -> Result<(), String> {
 
 async fn delay_waits(cx: &Ctx) -> Result<(), String> {
     let q = cx.queue("delay");
+    let delay = Duration::from_millis(400);
     let mut j = job(&q, "k.one");
-    j.run_at = Some(SystemTime::now() + Duration::from_millis(400));
+    let sent = Instant::now();
+    j.run_at = Some(SystemTime::now() + delay);
     push(cx, vec![j]).await?;
     let r = req(&q, 1, Duration::from_secs(30));
-    claim_none_for(cx, &r, Duration::from_millis(250)).await?;
-    let got = claim_until(cx, &r, 1).await?;
+    let mut got = claim_none_until(cx, &r, sent + delay).await?;
+    if got.is_empty() {
+        got = claim_until(cx, &r, 1).await?;
+    }
     finish(cx, got).await
 }
 
