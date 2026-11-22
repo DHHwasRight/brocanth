@@ -45,7 +45,8 @@ runs nightly and on demand only: it downloads a Postgres archive.
   there.
 - Isolation differs per crate, and no rule covers them all:
   - own schema: `brocanth-auth`, `brocanth-middleware` (rate limit), the
-    `brocanth-jobs` panel test and its migrate race test.
+    `brocanth-jobs` panel test and its migrate race test, and the two
+    `brocanth-cache` sweep tests (a sweep deletes expired rows table-wide).
   - a transaction that rolls back: `brocanth-model`.
   - shared tables, isolated by name: `brocanth-cache` (a namespace per
     test), `brocanth-storage` (unique bytes per test, feature `postgres`)
