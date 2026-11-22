@@ -501,7 +501,10 @@ types cannot both be the source of truth, and this is a refusal rather than a
 deferral. The JavaScript hook VM — a framework whose thesis is compile-time
 checking does not ship an interpreter. Database-stored settings. Backups,
 where `pg_dump` plus an object store is the operator's job and a worse wrapper
-is negative value.
+is negative value. One exception since ADR 12: a project on
+`db-embedded-prod` has no operator-run Postgres, so its binary carries
+`db_backup` and `db_restore` over the bundled `pg_dump` and `pg_restore`.
+Shipping the dump to an object store stays the operator's job.
 
 **The headline demo is impossible and the README must not pretend otherwise.**
 "Open a browser, create a collection, store data, thirty seconds" cannot be
