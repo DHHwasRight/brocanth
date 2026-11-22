@@ -415,6 +415,10 @@ both.
   identity of the claim), `tests/scaffold.rs` (three shapes, built with
   `BROCANTH_BUILD=1`).
 
+`brocanth-pages`'s `html!` normalises the calling file's path: through
+`#[path]` a page arrives as `src/bin/../pages/about.rs`, which named a
+module under `crate::bin`. The `everything` shape found it.
+
 Found while building: the transaction borrow (D8). `AdminData::begin`
 borrows its source, and the source bound to a claim is a new `Arc`. So
 no `TabData` could return a transaction without a change to the trait,

@@ -182,16 +182,41 @@ pub fn html(input: TokenStream) -> TokenStream {
 /// outside the package, no `layout.rsx` is found, and every page renders
 /// with no layouts at all and no error. That is the worst shape a bug can
 /// have, so this is the one place the two cases are reconciled.
+///
+/// The path is normalised first. A page compiled into a second binary
+/// through `#[path]` (`src/bin/backoffice.rs` reaches `../pages/mod.rs`)
+/// arrives as `src/bin/../pages/about.rs`, and read as it is, it names a
+/// module under `crate::bin` that does not exist.
 fn within_package(file: &Path) -> PathBuf {
     let absolute = if file.is_absolute() {
         file.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(file)
     };
+    let absolute = normalised(&absolute);
     absolute
         .strip_prefix(manifest_dir())
         .map(Path::to_path_buf)
         .unwrap_or(absolute)
+}
+
+/// `path` with each `.` dropped and each `..` taking off the segment
+/// before it, by the text alone: `src/bin/../pages` is `src/pages`.
+fn normalised(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(part);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The first argument and the rest, split at the first top-level comma.
@@ -602,6 +627,15 @@ fn error(message: &str) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_reached_through_a_path_attribute_is_the_same_file() {
+        assert_eq!(
+            normalised(Path::new("/p/src/bin/../pages/./about.rs")),
+            Path::new("/p/src/pages/about.rs")
+        );
+        assert_eq!(normalised(Path::new("../x")), Path::new("../x"));
+    }
 
     /// A layout at a directory, declaring neither parameter. The file does
     /// not exist, which is what `declares` answers `false` to.
