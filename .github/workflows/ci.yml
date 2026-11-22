@@ -193,5 +193,8 @@ jobs:
       - name: Remove the embedded servers a cache gave back
         run: rm -rf target/tmp
       # Downloads the Postgres archive on its first run
-      # (docs/modules/db-embedded.md).
+      # (docs/modules/db-embedded.md), then runs the tests again with the
+      # archive bundled into the binary: the production tests
+      # (docs/embedded-postgres-production.md) start with no file and no
+      # network.
       - run: mise run embedded

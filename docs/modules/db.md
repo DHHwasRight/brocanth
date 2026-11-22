@@ -25,11 +25,11 @@ An option is set at build time in `src/modules/db.rs`. A setting is read at run 
 | | |
 |---|---|
 | Needs | none |
-| After | [`db-embedded`](db-embedded.md) |
+| After | [`db-embedded`](db-embedded.md), [`db-embedded-prod`](db-embedded-prod.md) |
 | Provides | `PgPool` (a Postgres pool): the project's one Postgres pool, published as `brocanth_db::Db` |
 | Requires | none |
 | Uses | `ConfigSource` (settings read from a file): the development URL is in the development file, so the default is empty and each environment names its own |
-| Adapts to | [`commands`](commands.md): a `dbshell` command opens psql on `[db] url`, and a `migrate` command applies the SQL files in migrations/; [`model`](model.md): no SQL `migrate` command: `model` writes its own, over SeaORM; [`db-embedded`](db-embedded.md): `configure` opens the pool on the embedded server's URL, not on `[db] url` |
+| Adapts to | [`commands`](commands.md): a `dbshell` command opens psql on `[db] url`, and a `migrate` command applies the SQL files in migrations/; [`model`](model.md): no SQL `migrate` command: `model` writes its own, over SeaORM; [`db-embedded`](db-embedded.md): `configure` opens the pool on the embedded server's URL, not on `[db] url`; [`db-embedded-prod`](db-embedded-prod.md): `configure` opens the pool on the embedded server's URL, not on `[db] url` |
 | Contributes | `AgentsSection` `db`: how a page reads the pool, and how a migration is written |
 | Collects | none |
 | Exports | none |

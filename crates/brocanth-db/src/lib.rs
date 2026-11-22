@@ -10,8 +10,9 @@
 //!   `Db` and a `Tx` alike.
 //! - [`DbError`]: what failed, the Postgres message, and a `help:` line.
 //! - [`migrate`]: plain SQL migrations, for a project with no ORM.
-//! - `embedded` (feature `embedded`): a development Postgres started from
-//!   the binary, for the `db-embedded` module. Never in production.
+//! - `embedded` (feature `embedded`): a Postgres server started from the
+//!   binary, for the `db-embedded` module (development) and the
+//!   `db-embedded-prod` module (production too, opted in).
 //! - [`stamp`]: the UTC stamp of a migration's name. It needs no feature.
 //! - [`DbIdentity`]: who a transaction runs as, for row-level security.
 //!   [`Db::transact_as`] and [`Tx::assume`] set it.

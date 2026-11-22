@@ -24,7 +24,7 @@ use brocanth_scaffold::{
     Scaffold, Setting, Slot,
 };
 
-pub use crate::scaffold_embedded::DbEmbedded;
+pub use crate::scaffold_embedded::{DbEmbedded, DbEmbeddedProd};
 
 /// The database, as a choice on the `brocanth create` menu.
 ///
@@ -63,6 +63,10 @@ impl Module for Database {
             "db-embedded",
             "`configure` opens the pool on the embedded server's URL, not on `[db] url`",
         )
+        .adapts_to(
+            "db-embedded-prod",
+            "`configure` opens the pool on the embedded server's URL, not on `[db] url`",
+        )
         .asked_in("data", "A Postgres pool, and SQL built with sea-query")
         .recommends(
             "observability-health",
@@ -76,6 +80,7 @@ impl Module for Database {
         // Its child registers first: the server runs before the pool reads
         // its URL, and stops after the pool closes (shutdown runs in reverse).
         .after("db-embedded")
+        .after("db-embedded-prod")
         .absent(
             "brocanth-db",
             "no database pool; a page that needs SQL has nowhere to send it",
@@ -470,10 +475,9 @@ log, never to the client.
 
 /// The top of `configure` with `db-embedded`: its plugin, registered
 /// before this one, started the server in its own `configure`.
-const EMBEDDED_URL: &str =
-    "        // `db-embedded` started a Postgres server in its own `configure`,
-        // registered before this plugin: the pool opens on it, and `[db] url`
-        // is not read. `brocanth remove db-embedded` goes back to the URL.
+const EMBEDDED_URL: &str = "        // The embedded plugin started a Postgres server in its own
+        // `configure`, registered before this plugin: the pool opens on it,
+        // and `[db] url` is not read. Removing the module goes back to the URL.
         if let Some(embedded) = lc.services().get::<brocanth_db::embedded::EmbeddedUrl>() {
             self.config.url = embedded.0.clone();
         }
@@ -499,7 +503,7 @@ fn plugin_rs(project: &Project) -> String {
              /// local development database; set the variable for `db.url` everywhere else.",
         )
     };
-    let (lc, embedded) = if project.has("db-embedded") {
+    let (lc, embedded) = if project.has("db-embedded") || project.has("db-embedded-prod") {
         ("lc", EMBEDDED_URL)
     } else {
         ("_lc", "")

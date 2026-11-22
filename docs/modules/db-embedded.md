@@ -12,7 +12,7 @@ The wizard shows it under the database, in the Data question:
 | Default | off |
 | Presets | none |
 | Part of | [`db`](db.md), off until you tick it |
-| Conflicts | [`static`](static.md): this module needs a running server |
+| Conflicts | [`db-embedded-prod`](db-embedded-prod.md): both start the server of `[db_embedded]`; this one adds the production rules, so keep one; [`static`](static.md): this module needs a running server |
 | Outside the runtime | no |
 | Development only | yes: `brocanth check --deploy` reports `deploy/development-only` |
 | Crates | `brocanth-db` (feature `embedded`: `postgresql_embedded`, no `bundled`) |
@@ -159,10 +159,20 @@ The build needs no network. The first start installs the binaries into
 |---|---|
 | `$BROCANTH_POSTGRES_ARCHIVE` | the variable names a `postgresql-18.7.0-<target>.tar.gz` file. For a machine with no network: download the file from the [releases](https://github.com/theseus-rs/postgresql-binaries/releases/tag/18.7.0) once and point the variable at it. |
 | `~/.theseus/postgresql/postgresql-18.7.0-<target>.tar.gz` | the cache. One file per machine, shared by every checkout. `postgresql_embedded`'s own build script caches to the same name. |
-| GitHub | one API request (the release by tag, not the release list) and one download, checked against the release's SHA-256 file, then written to the cache. Set `GITHUB_TOKEN` behind the rate limit. |
+| GitHub | one API request (the release by tag, not the release list) and one download, checked against the release's SHA-256 file and the pin, then written to the cache. Set `GITHUB_TOKEN` behind the rate limit. |
+
+Every archive, from every source, is checked before extraction against
+the SHA-256 pinned for the target in
+`crates/brocanth-db/src/embedded_pins.rs`, beside `POSTGRES_VERSION`. Bump
+the two together. A mismatch is an error, and nothing is extracted. A
+binary built with `BROCANTH_POSTGRES_BUNDLE=<file>` carries the archive and
+reads none of the sources above.
 
 The extraction goes to a directory beside `18.7.0/` and is renamed into
-place, so a process killed halfway leaves nothing that looks installed.
+place, so a process killed halfway leaves nothing that looks installed. A
+copy of `18.7.0/` without its binaries (`postgres`, `pg_ctl`, `initdb`,
+`pg_dump`, `pg_restore`) does not count as installed: it is removed and
+extracted again.
 
 **Reason, against `bundled`:** the `bundled` feature of `postgresql_embedded`
 downloads the archive in its build script. Its version defaults to the
@@ -188,7 +198,7 @@ machine, unless `BROCANTH_EMBEDDED_TEST=1` lets them download it.
 |---|---|---|
 | `tmp/postgres/server/<version>/` | the extracted binaries: 270 MB on `aarch64-apple-darwin` | extracted once |
 | `tmp/postgres/data/` | the cluster; `start.log` is the server's log. 47 MB empty | survives a restart |
-| `tmp/postgres/password` | the superuser password, made at the first start | goes with `data/` |
+| `tmp/postgres/password` | the superuser password, made at the first start (32 random bytes in hex, mode `0600`) | goes with `data/` |
 | `tmp/postgres/setup.lock`, `users.lock` | the locks of [One server per directory](#one-server-per-directory) | empty files |
 
 `[db_embedded] dir` moves all three. The path is relative to the working

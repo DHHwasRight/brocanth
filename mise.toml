@@ -11,9 +11,20 @@ run = "cargo build --workspace"
 run = "cargo test --workspace"
 # The tests that start a real embedded Postgres. They skip when the archive
 # is not on the machine; this lets them download it once (GitHub, see
-# docs/modules/db-embedded.md).
+# docs/modules/db-embedded.md). The second run bundles that archive into the
+# test binary (`BROCANTH_POSTGRES_BUNDLE`): build.rs checks it against the
+# pin, and the production tests start from the bundled bytes.
 [tasks.embedded]
-run = "BROCANTH_EMBEDDED_TEST=1 cargo test -p brocanth-db --features embedded --test embedded"
+run = '''
+set -e
+export BROCANTH_EMBEDDED_TEST=1
+cargo test -p brocanth-db --features embedded --test embedded
+version=$(sed -n 's/^pub const POSTGRES_VERSION: &str = "\(.*\)";/\1/p' crates/brocanth-db/src/embedded_pins.rs)
+host=$(rustc -vV | sed -n 's/^host: //p')
+archive="$HOME/.theseus/postgresql/postgresql-$version-$host.tar.gz"
+test -f "$archive" || { echo "embedded: no archive at $archive after the first run" >&2; exit 1; }
+BROCANTH_POSTGRES_BUNDLE="$archive" cargo test -p brocanth-db --features embedded --test embedded
+'''
 [tasks.lint]
 run = "cargo clippy --all-targets -- -D warnings"
 # Every module crate as the CLI takes it: the scaffold side alone, with the

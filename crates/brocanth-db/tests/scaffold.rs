@@ -4,10 +4,10 @@
 //! `tests/golden/<name>.txt`. Bless with `BROCANTH_BLESS=1`; build and test
 //! each project too with `BROCANTH_BUILD=1`.
 
-use brocanth_db::scaffold::{Database, DbEmbedded};
+use brocanth_db::scaffold::{Database, DbEmbedded, DbEmbeddedProd};
 use brocanth_scaffold::{testing, Module};
 
-const MODULES: &[&dyn Module] = &[&Database, &DbEmbedded];
+const MODULES: &[&dyn Module] = &[&Database, &DbEmbedded, &DbEmbeddedProd];
 
 fn shape(name: &str, picks: &[&'static str]) {
     let files = brocanth_cli::testing::generate("my-blog", picks, MODULES)
@@ -52,5 +52,22 @@ fn the_pool_on_an_embedded_server_with_a_config_file() {
     shape(
         "db-embedded-config",
         &["config", "db", "db-embedded", "commands"],
+    );
+}
+
+/// The production opt-in, with no config file and no command line:
+/// `[db_embedded]`, `archive` included, from flags and the environment.
+#[test]
+fn the_pool_on_a_production_embedded_server_without_a_config_file() {
+    shape("db-embedded-prod-flags", &["db", "db-embedded-prod"]);
+}
+
+/// The production opt-in with a config file and a command line: the
+/// `db_backup` and `db_restore` commands.
+#[test]
+fn the_pool_on_a_production_embedded_server_with_commands() {
+    shape(
+        "db-embedded-prod-config",
+        &["config", "db", "db-embedded-prod", "commands"],
     );
 }

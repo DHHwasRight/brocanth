@@ -100,6 +100,9 @@ pub const ALL: &[&dyn Module] = &[
     // Its development server: Postgres from the binary, refused by
     // `check --deploy`. Off until asked for.
     &brocanth_db::scaffold::DbEmbedded,
+    // The same server for production too: the explicit opt-in, not
+    // development-only, with backup and restore (ADR 12).
+    &brocanth_db::scaffold::DbEmbeddedProd,
     // The ORM, from the crate that is the ORM.
     &brocanth_model::scaffold::Model,
     // From `brocanth-cache` itself, which is the point: a module can live in

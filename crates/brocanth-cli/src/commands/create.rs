@@ -6071,7 +6071,17 @@ mod tests {
         available()
             .into_iter()
             .filter(|key| {
-                !["logging", "static", "beacon", "cache-memory", "sessions"].contains(key)
+                // `db-embedded-prod` conflicts with `db-embedded`; its own
+                // shapes are in brocanth-db's tests.
+                ![
+                    "logging",
+                    "static",
+                    "beacon",
+                    "cache-memory",
+                    "sessions",
+                    "db-embedded-prod",
+                ]
+                .contains(key)
             })
             .collect()
     }
@@ -6604,7 +6614,9 @@ mod tests {
                     if has_db {
                         // With `db-embedded` the pool opens on the server
                         // the application starts, so the page answers.
-                        let page = if picks.contains(&"db-embedded") {
+                        let page = if picks.contains(&"db-embedded")
+                            || picks.contains(&"db-embedded-prod")
+                        {
                             DB_PAGE_EMBEDDED
                         } else {
                             DB_PAGE
@@ -7428,7 +7440,7 @@ mod tests {
             .1;
         assert!(
             full.contains(
-                "**Absent:** `logging`, `beacon`, `sessions`, `cache-memory`, `static` —"
+                "**Absent:** `logging`, `beacon`, `sessions`, `db-embedded-prod`, `cache-memory`, `static` —"
             ),
             "{full}"
         );

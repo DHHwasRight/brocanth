@@ -16570,9 +16570,9 @@ impl Plugin for Database {
     }
 
     fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        // `db-embedded` started a Postgres server in its own `configure`,
-        // registered before this plugin: the pool opens on it, and `[db] url`
-        // is not read. `brocanth remove db-embedded` goes back to the URL.
+        // The embedded plugin started a Postgres server in its own
+        // `configure`, registered before this plugin: the pool opens on it,
+        // and `[db] url` is not read. Removing the module goes back to the URL.
         if let Some(embedded) = lc.services().get::<brocanth_db::embedded::EmbeddedUrl>() {
             self.config.url = embedded.0.clone();
         }
@@ -16764,8 +16764,8 @@ fn check_environment(environment: &str) -> Result<(), PluginError> {
     Err(PluginError::new(format!(
         "[db_embedded] starts a Postgres server inside this process, and this is \
          `{environment}`: it is for development and tests only\n\
-         help: run `brocanth remove db-embedded` and set `[db] url` to a real server \
-         before you deploy"
+         help: before you deploy, run `brocanth remove db-embedded` and set `[db] url` to a \
+         real server, or switch to `brocanth add db-embedded-prod`"
     )))
 }
 
@@ -22488,7 +22488,7 @@ request.
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
 
-**Absent:** `logging`, `beacon`, `sessions`, `cache-memory`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `beacon`, `sessions`, `db-embedded-prod`, `cache-memory`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -22542,7 +22542,9 @@ to stop stops it.
 
 It is for development only. It refuses to start when `$<APP>_ENV` is not
 `development` or `test`, and `brocanth check --deploy` reports it. Before a
-deploy, run `brocanth remove db-embedded` and set `[db] url`.
+deploy, run `brocanth remove db-embedded` and set `[db] url`, or switch to
+the production module: `brocanth remove db-embedded && brocanth add
+db-embedded-prod`.
 
 `migrate` and `dbshell` read `[db] url` and do not start the server. Set
 `[db_embedded] port`, run the application, and point `[db] url` at that port
@@ -23431,7 +23433,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 361caa7b3526f8f1 -->
+<!-- brocanth-digest: 2f3e8b2ff2d24119 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

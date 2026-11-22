@@ -89,6 +89,19 @@ postgresql_archive = { version = "0.22", default-features = false, features = [
 ], optional = true }
 # The runtime that starts and stops the server, on a thread of its own.
 tokio = { version = "1", features = ["rt"], optional = true }
+# The SHA-256 of the archive, checked against the pin in
+# `src/embedded_pins.rs` before extraction. 0.11 is the copy
+# `postgresql_archive` takes.
+sha2 = { version = "0.11", optional = true }
+# The superuser and application passwords, from the operating system's
+# random source. 0.3 is a copy the lock already has.
+getrandom = { version = "0.3", optional = true }
+
+# `build.rs` checks a bundled archive (`BROCANTH_POSTGRES_BUNDLE`) against
+# the pin before it embeds it. Not optional: a build script compiles
+# whatever the features are. Without the variable it reads nothing.
+[build-dependencies]
+sha2 = "0.11"
 
 [dev-dependencies]
 # This crate with its `scaffold` side, so `cargo test -p brocanth-db` runs
@@ -112,7 +125,15 @@ plugin = ["runtime", "dep:brocanth"]
 scaffold = ["dep:brocanth-scaffold"]
 # A development Postgres in the binary. Apart from `runtime`: it hands a URL
 # to whatever opens the pool, and opens none itself.
-embedded = ["dep:postgresql_embedded", "dep:postgresql_archive", "dep:tokio"]
+# `sqlx` runs the setup statements (the application role) on the server.
+embedded = [
+    "dep:postgresql_embedded",
+    "dep:postgresql_archive",
+    "dep:tokio",
+    "dep:sqlx",
+    "dep:sha2",
+    "dep:getrandom",
+]
 
 [lints.rust]
 missing_docs = "warn"

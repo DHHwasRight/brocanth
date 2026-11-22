@@ -406,6 +406,17 @@ mod tests {
         );
         assert!(development_only(&project(&["jobs"])).is_empty());
 
+        // The embedded server: the development module is reported, its
+        // production opt-in is not (ADR 12).
+        let found = development_only(&project(&["db", "db-embedded"]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].render().contains("db-embedded-prod"),
+            "{}",
+            found[0].render()
+        );
+        assert!(development_only(&project(&["db", "db-embedded-prod"])).is_empty());
+
         let args = |deploy: bool, env: Option<&str>| CheckArgs {
             deploy,
             env: env.map(str::to_owned),
