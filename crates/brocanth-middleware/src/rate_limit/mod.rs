@@ -59,9 +59,10 @@
 //! [`SharedRateLimit`] counts in any [`Store`], [`PgStore`] included, so
 //! every process behind the load balancer shares one count. A store
 //! that waits on the network needs an asynchronous request hook, and an
-//! application with one must serve through `App::begin_async`. The core
-//! makes that a compile error, not a silent skip. See
-//! `docs/middleware.md` §6.
+//! application with one must serve through `App::begin_async`, as a
+//! generated `src/app.rs` and `brocanth_server::Bridge` do. The core makes
+//! `App::run` a compile error for it, not a silent skip. See
+//! `docs/middleware.md` §7.
 //!
 //! # When the store fails
 //!

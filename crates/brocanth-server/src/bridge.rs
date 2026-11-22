@@ -85,20 +85,22 @@
 //! **Where the two halves of the request run, and why it is not symmetric.**
 //! For a sync route the whole pipeline -- request hooks, dispatch, handler,
 //! error hooks, response hooks, `after_dispatch` -- runs on the blocking
-//! thread, exactly as it did. For an async route only the handler can wait, so
-//! [`App::begin`] and [`App::finish`] run inline on the worker. That is the one
-//! thing this arm changes about hooks, and it is worth saying plainly: **a
-//! `RequestHook::before_dispatch` that blocks will block a worker when the
-//! route it precedes is async.** Response hooks are CPU by contract --
+//! thread, exactly as it did. For an async route only the handler can wait,
+//! so [`App::begin_async`] and [`App::finish`] run inline on the worker. That
+//! is the one thing this arm changes about hooks, and it is worth saying
+//! plainly: **a `RequestHook::before_dispatch` that blocks will block a
+//! worker when the route it precedes is async.** Response hooks are CPU by contract --
 //! compression and ETag over a `Vec<u8>` that is already in memory -- so they
 //! are safe there; a request hook that reaches a session store is not. The
 //! core has an async request hook family for that, `AsyncRequestHook`, and
-//! [`App::begin_async`] runs it. The bridge calls [`App::begin`] and
-//! [`App::run`] only, and for an application with an `AsyncRequestHook`
-//! those two are a compile error, so the bridge cannot serve one yet. A
-//! generated project runs its own dispatch inside [`App::begin_async`] and
-//! [`App::finish`] (see [`to_core`]). Behind the bridge, a request hook that
-//! waits still wants a sync route.
+//! [`App::begin_async`] runs it. Both arms of the bridge call
+//! [`App::begin_async`], never [`App::begin`] or [`App::run`], so the bridge
+//! serves an application with an `AsyncRequestHook` (a shared rate limit, a
+//! session store). On the inline arm the hook awaits on the worker. On the
+//! blocking arm it is driven by the parked thread, as an async route reached
+//! there is. With no hook that waits, `begin_async` is ready on its first
+//! poll and costs what [`App::begin`] costs. A generated project runs its own
+//! dispatch inside the same two calls (see [`to_core`]).
 //!
 //! The alternative was to run `begin` on a blocking thread and hop back to the
 //! worker to await. It keeps that guarantee and loses the headline: fifty
@@ -108,8 +110,8 @@
 //! exists for would then be a smaller number rather than zero.
 //!
 //! **Choosing before the handler is touched.** The kind is read from the route
-//! table, through [`RouteKind::is_async`], before [`App::begin`] runs -- which
-//! means it is read from the request as it arrived, and a request hook may
+//! table, through [`RouteKind::is_async`], before [`App::begin_async`] runs --
+//! which means it is read from the request as it arrived, and a request hook may
 //! still rewrite the method or the path afterwards. The prediction is exact
 //! unless a hook rewrites a request from one kind of route onto the other, and
 //! both mispredictions stay **correct**: an async route reached on a blocking
@@ -204,7 +206,7 @@
 //! | 500 | the core | an error no error hook claimed; or a panicking handler, here |
 //!
 //! The 404 and the 405 are built *inside* the dispatch closure, so they travel
-//! through [`App::run`] like any other response: the response hooks rewrite
+//! through [`App::finish`] like any other response: the response hooks rewrite
 //! them, and `after_dispatch` sees them. A logger that never saw a 404 would
 //! not be a logger.
 //!
@@ -785,30 +787,31 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
 
     /// One request, synchronously: hooks, router, handler, hooks.
     ///
-    /// Everything the core does happens here, on one thread, with no `.await`
-    /// anywhere inside it -- which is the shape the core has and the reason
-    /// this function is called from [`tokio::task::spawn_blocking`].
+    /// Everything the core does happens here, on one thread -- which is the
+    /// shape the core has and the reason this function is called from
+    /// [`tokio::task::spawn_blocking`]. A request hook that waits is driven by
+    /// [`block_on`] on this thread; with none, `begin_async` is ready on its
+    /// first poll and nothing parks.
     fn blocking(&self, mut request: CoreRequest) -> Response {
         let mut state = RequestState::new();
 
-        let response = self.app.run(&mut request, &mut state, |request, state| {
-            // `request` is `&mut` for the hooks that rewrite it; dispatch only
-            // reads, and `RouteCx` borrows it shared.
-            let request: &CoreRequest = request;
-
+        let outcome = match block_on(self.app.begin_async(&mut request, &mut state)) {
+            Begin::Answered(outcome) => outcome,
             // `App::dispatch` owns the router, the context and the 501, the
             // 405 and the 404, shared with `brocanth-test`. They are built
             // inside the dispatch region, so that the response hooks and
             // `after_dispatch` see them like any other response. The 501 is
             // unreachable from the wire (`crate::read` answered it) but
             // reachable from a request hook that rewrote the method.
-            self.app
-                .dispatch_blocking(&self.router, request, state, |handler, cx| {
-                    handler.call_blocking(cx)
-                })
-        });
+            Begin::Dispatch => {
+                self.app
+                    .dispatch_blocking(&self.router, &request, &mut state, |handler, cx| {
+                        handler.call_blocking(cx)
+                    })
+            }
+        };
 
-        from_core(response)
+        from_core(self.app.finish(&mut request, &mut state, outcome))
     }
 
     /// One request, inline: hooks, router, `.await` the handler, hooks.
@@ -820,9 +823,8 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     /// waits, so those three are reachable here only when a request hook then
     /// rewrote it off that route; they are written out anyway, because the two
     /// arms must not be able to disagree about who owns a status.
-    /// [`App::run`] is spelled out as [`App::begin`] and [`App::finish`] for
-    /// one reason: the `.await` goes between them, and the core never holds a
-    /// future.
+    /// [`App::begin_async`] and [`App::finish`], with the `.await` between
+    /// them: the core never holds a future.
     ///
     /// No panic net of its own. The caller wraps the whole of this in one, so
     /// that a panicking *hook* is a 500 as well -- on the other arm
@@ -830,7 +832,7 @@ impl<E: 'static, H: HookFamilies, R: RouteKind<E>> Bridge<E, H, R> {
     async fn inline(&self, mut request: CoreRequest) -> Response {
         let mut state = RequestState::new();
 
-        let outcome = match self.app.begin(&mut request, &mut state) {
+        let outcome = match self.app.begin_async(&mut request, &mut state).await {
             Begin::Answered(outcome) => outcome,
             Begin::Dispatch => {
                 self.app

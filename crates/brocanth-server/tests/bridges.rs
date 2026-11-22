@@ -20,9 +20,9 @@ use brocanth::plugin_app::{App, AppBuilder};
 use brocanth::plugin_body::Body as CoreBody;
 use brocanth::plugin_context::{Base, NoContext};
 use brocanth::plugin_hooks::{
-    BodyShape, Flow, HookFamilies, HookRegistrar, HookSource, OnRequest, OnResponse,
-    Request as CoreRequest, RequestHook, RequestState, Response as CoreResponse, ResponseHead,
-    ResponseHook,
+    AsyncRequestHook, BodyShape, Flow, HookFamilies, HookRegistrar, HookSource, OnAsyncRequest,
+    OnRequest, OnResponse, Request as CoreRequest, RequestHook, RequestState,
+    Response as CoreResponse, ResponseHead, ResponseHook,
 };
 use brocanth::plugin_order::{Order, Phase};
 use brocanth::plugin_routes::{AnyHandler, Handler, RouteCx};
@@ -808,6 +808,96 @@ async fn a_hook_that_reroutes_across_the_kinds_still_gets_the_right_answer() {
         rewritten_to_sync.ends_with("called inline"),
         "{rewritten_to_sync}"
     );
+    server.stop().await;
+}
+
+/// A request hook that waits, as a shared rate limit or a session store
+/// does: it sleeps on a Tokio timer, then refuses `/limited` with a 429.
+struct Gate;
+
+impl Plugin for Gate {
+    type Config = ();
+    type Provides = NoContext;
+    const NAME: &'static str = "gate";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new((): ()) -> Self {
+        Self
+    }
+}
+
+impl HookSource for Gate {
+    type Families = OnAsyncRequest;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        registrar.request_async("wait", Phase::Guard, Order::new(), Waits);
+        Ok(())
+    }
+}
+
+struct Waits;
+
+impl AsyncRequestHook for Waits {
+    fn before_dispatch<'a>(
+        &'a self,
+        request: &'a mut CoreRequest,
+        _state: &'a mut RequestState,
+    ) -> brocanth::plugin_routes::BoxFuture<'a, Result<Flow, PluginError>> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if request.uri().path().ends_with("/limited") {
+                let mut refused = CoreResponse::new(CoreBody::from("slow down"));
+                *refused.status_mut() = http::StatusCode::TOO_MANY_REQUESTS;
+                return Ok(Flow::respond(refused));
+            }
+            Ok(Flow::Continue)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_request_hook_that_waits_runs_on_both_arms() {
+    // `App::begin` and `App::run` are a compile error for an application
+    // with an `AsyncRequestHook`; the bridge calls `begin_async`, so this
+    // application builds, serves, and its hook runs before both kinds of
+    // route.
+    let app = AppBuilder::new()
+        .plugin_hooking(Gate::new(()))
+        .plugin_hooking(Stamp::new(()))
+        .build()
+        .expect("the application builds");
+    let mut builder: RouterBuilder<AnyHandler<Base>> = Router::builder();
+    for path in ["/sync/open", "/sync/limited"] {
+        builder
+            .route(
+                path,
+                Verb::Get,
+                AnyHandler::Sync(Box::new(|_: &mut RouteCx<'_, Base>| Ok(ok("sync page")))),
+            )
+            .expect("a sync route");
+    }
+    for path in ["/await/open", "/await/limited"] {
+        builder
+            .route(
+                path,
+                Verb::Get,
+                waits(|_: &mut RouteCx<'_, Base>| Box::pin(async move { Ok(ok("async page")) })),
+            )
+            .expect("an async route");
+    }
+    let router = builder.build().expect("the table builds");
+    let server = Running::start(app, router).await;
+
+    for (path, page) in [("/sync", "sync page"), ("/await", "async page")] {
+        let open = get(&server.addr, &format!("{path}/open")).await;
+        assert!(open.starts_with("HTTP/1.1 200"), "{open}");
+        assert!(open.ends_with(page), "{open}");
+        let limited = get(&server.addr, &format!("{path}/limited")).await;
+        assert!(limited.starts_with("HTTP/1.1 429"), "{limited}");
+        // The response hooks saw the hook's answer.
+        assert!(limited.contains("x-pipeline: 429"), "{limited}");
+        assert!(limited.ends_with("slow down"), "{limited}");
+    }
     server.stop().await;
 }
 
