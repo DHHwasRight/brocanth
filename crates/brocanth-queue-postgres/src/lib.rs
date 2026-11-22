@@ -108,6 +108,15 @@ pub(crate) fn uniqueness_text(u: UniquenessKind) -> &'static str {
 ///
 /// So a client instant becomes a duration here, and the server turns it
 /// back into an instant on its own clock. Nothing compares the two.
+///
+/// An insert that can run inside a transaction adds the duration to
+/// `clock_timestamp()`, not to `now()`. `now()` is the moment the
+/// transaction began, which is before the client measured the duration: a
+/// delayed job then becomes due early, by the age of the transaction. For
+/// `push` that age is at least the round trip of its `BEGIN`; for an
+/// application's transaction it has no bound. `clock_timestamp()` is read
+/// when the statement runs, after the client measured, so the job is never
+/// due before the instant the caller asked for.
 fn delay_secs(t: SystemTime) -> f64 {
     t.duration_since(SystemTime::now())
         .unwrap_or(Duration::ZERO)
@@ -318,7 +327,7 @@ impl PgQueue {
         let row = sqlx::query(
             "INSERT INTO queue_scheduled \
              (kind, queue, payload, run_at, max_attempts, unique_key, uniqueness) \
-             SELECT $1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7 \
+             SELECT $1, $2, $3, clock_timestamp() + make_interval(secs => $4), $5, $6, $7 \
               WHERE NOT $8 \
                  OR (NOT EXISTS (SELECT 1 FROM queue_bulk WHERE unique_key = $6) \
                      AND NOT EXISTS (SELECT 1 FROM queue_scheduled \
@@ -356,7 +365,7 @@ impl PgQueue {
         let insert = format!(
             "INSERT INTO {table} \
              (kind, queue, payload, available_at, max_attempts, unique_key, uniqueness) \
-             SELECT $1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7 \
+             SELECT $1, $2, $3, clock_timestamp() + make_interval(secs => $4), $5, $6, $7 \
               WHERE $6::text IS NULL OR NOT $8 \
                  OR NOT EXISTS (SELECT 1 FROM queue_scheduled \
                                  WHERE unique_key = $6 AND uniqueness = 'until_success') \

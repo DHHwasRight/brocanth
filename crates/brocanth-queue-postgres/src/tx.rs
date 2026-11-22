@@ -9,9 +9,11 @@ use crate::{claim_window, uniqueness_text};
 
 /// A delay in seconds, from the caller's own clock.
 ///
-/// The server turns it back into an instant with its own `now()`. See
-/// `delay_secs` in the crate root: nothing here ever writes a timestamp the
-/// client computed, because the two clocks are not the same clock.
+/// The server turns it back into an instant with its own
+/// `clock_timestamp()`, not `now()`: the caller's transaction may be old,
+/// and `now()` is the moment it began. See `delay_secs` in the crate root:
+/// nothing here ever writes a timestamp the client computed, because the
+/// two clocks are not the same clock.
 fn delay_secs(at: Option<std::time::SystemTime>) -> f64 {
     at.and_then(|t| t.duration_since(std::time::SystemTime::now()).ok())
         .unwrap_or(std::time::Duration::ZERO)
@@ -121,7 +123,7 @@ impl TxEnqueue for Tx<'_> {
                 let row = sqlx::query(
                     "INSERT INTO queue_tx \
                      (kind, queue, payload, available_at, max_attempts, unique_key, uniqueness) \
-                     VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7) \
+                     VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4), $5, $6, $7) \
                      ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING \
                      RETURNING id",
                 )
@@ -162,7 +164,7 @@ impl TxEnqueue for Tx<'_> {
                       window_ms) \
                      VALUES ($1, $2, $3, \
                              CASE WHEN $4 = 0 THEN NULL \
-                                  ELSE now() + make_interval(secs => $4) END, \
+                                  ELSE clock_timestamp() + make_interval(secs => $4) END, \
                              $5, $6, $7, $8) RETURNING id",
                 )
                 .bind(&job.kind)

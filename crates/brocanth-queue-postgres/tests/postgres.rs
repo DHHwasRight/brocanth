@@ -1024,6 +1024,53 @@ async fn the_transactional_lane_holds_a_window_past_its_row() {
     clear_queue(&pool, queue, &[key]).await;
 }
 
+/// A delay counts from the enqueue, not from the start of the transaction
+/// that holds it. A delay added to `now()` makes the job due early, by the
+/// age of the transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delay_in_an_old_transaction_counts_from_the_enqueue() {
+    use brocanth_queue::TxEnqueue;
+    let _serial = SERIAL.lock().await;
+    let pool = db!();
+    let queue = "pg.tx-delay";
+    clear_queue(&pool, queue, &[]).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    // The transaction is a second old when the job goes in.
+    sqlx::query("SELECT pg_sleep(1)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for lane in [Lane::Transactional, Lane::Bulk] {
+        let job = NewJob {
+            run_at: Some(std::time::SystemTime::now() + Duration::from_secs(2)),
+            ..on(queue, "a")
+        };
+        Tx::new(&mut tx).enqueue_in_tx(lane, job).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    // Durations on the server's clock only: the client's clock is not it.
+    for sql in [
+        "SELECT extract(epoch FROM available_at - clock_timestamp())::float8 \
+           FROM queue_tx WHERE queue = $1",
+        "SELECT extract(epoch FROM run_at - clock_timestamp())::float8 \
+           FROM queue_outbox WHERE queue = $1",
+    ] {
+        let ahead: f64 = sqlx::query_scalar(sql)
+            .bind(queue)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            ahead > 1.5,
+            "a job delayed by 2s is due in {ahead:.2}s: the delay counted from \
+             the start of the transaction ({sql})"
+        );
+    }
+    clear_queue(&pool, queue, &[]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn each_lane_reads_and_requeues_only_its_own_dead() {
     let _serial = SERIAL.lock().await;
