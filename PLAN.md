@@ -914,3 +914,18 @@ agreement test (phase 5) runs both readers on Postgres.
   the app's `WHERE` and leaves the database on the old rule.
 - No registry of `#[db]` policies: one `.policies(…)` line each (ADR 1). A
   forgotten line on a forced table fails closed.
+
+### ADR 12 — Embedded Postgres runs in production only through its own module.
+
+**Status:** accepted (2026-11-22). **Touches:** `brocanth-db` (feature
+`embedded`), the `db-embedded` and `db-embedded-prod` modules, `brocanth
+check --deploy`. **Design:** `docs/embedded-postgres-production.md`.
+
+`db-embedded` stays development only. A project that wants Postgres in its
+binary in production chooses `db-embedded-prod`, a second child of `db`
+with no `development_only`. The module key is in `brocanth.toml`, so
+`check --deploy` sees the choice; the CLI cannot read a value in a module
+file. In production the archive is pinned by version and by a SHA-256 per
+target in the source, the start never downloads, one process owns the
+server, the directory is an absolute path from a flag, and a data directory
+of another major version is refused.

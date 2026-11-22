@@ -106,13 +106,20 @@ Three guards, each with a `help:` line:
    from the manifest's `development_only`.
 2. The plugin refuses to start when `$<APP>_ENV` is not `development` or
    `test`.
-3. The feature `embedded` is off unless this module is chosen, so a project
-   without it links none of it. Remove the module before a deploy:
-   `brocanth remove db-embedded`, and set `[db] url`.
+3. The feature `embedded` is off unless an embedded module is chosen, so a
+   project without one links none of it.
 
-**Reason:** the server lives in one checkout on one disk, with a generated
-password in a file beside its data. It has no backup, no replica, and no
-upgrade path.
+Before a deploy, either remove the module (`brocanth remove db-embedded`,
+and set `[db] url`), or switch to the production module:
+`brocanth remove db-embedded && brocanth add db-embedded-prod`
+([`db-embedded-prod`](db-embedded-prod.md)).
+
+**Reason:** this module keeps its server in one checkout, under a relative
+directory, shared by every process that starts on it. The production
+module adds what a deploy needs: a required data directory, one owning
+process, an archive pinned by hash with no download, a role that is not the
+superuser, and backup and restore. The decisions are in
+[Embedded Postgres in production](../embedded-postgres-production.md).
 
 ## Facts checked (2026-11-16)
 
