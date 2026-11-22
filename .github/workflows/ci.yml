@@ -185,6 +185,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: embedded
+      # rust-cache saves `target/` with every file removed under a directory
+      # that is not a cargo profile, and every directory kept. The embedded
+      # tests keep their servers under `target/tmp`, so a cache hit gives
+      # back `data/` and `server/` as trees of empty directories, and each
+      # start fails with "has files but no cluster". Start them from nothing.
+      - name: Remove the embedded servers a cache gave back
+        run: rm -rf target/tmp
       # Downloads the Postgres archive on its first run
       # (docs/modules/db-embedded.md).
       - run: mise run embedded
