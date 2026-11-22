@@ -34,7 +34,7 @@ An option is set at build time in `src/modules/logging.rs`. A setting is read at
 | Exports | none |
 | Hooks | `line` (Identify, required): write one line per response on stderr |
 | Options (build time) | none |
-| Settings (run time) | `[logging]`: `level` |
+| Settings (run time) | `[logging]`: `level`, `format` |
 <!-- end generated: capabilities -->
 
 Hooks: `logging.line`, required: it is the module.
@@ -59,6 +59,21 @@ preflight, and a 401 or a 429 that another request hook answered. Static
 files are not logged. It is plain text on stderr, through `plugins::say!`
 for its startup line.
 
+`format` picks the shape of a line:
+
+| `format` | A line |
+|---|---|
+| `line` (default) | `GET /a -> 200` |
+| `common` | Apache Common Log Format: `203.0.113.9 - - [10/Oct/2000:20:55:36 +0000] "GET /a?b=1 HTTP/1.1" 200 5` |
+| `combined` | `common`, then `"<Referer>" "<User-Agent>"` |
+
+The time is UTC. The host is the socket's peer; behind a proxy, read
+`brocanth_middleware::ClientInfo` from the request state in
+`Line::after_dispatch`. The byte count is `-` for an empty body and for a
+stream. A quote, a backslash and a byte outside printable ASCII are
+escaped as Apache escapes them, so a client cannot forge a line. For a
+shape of your own, change `Line::after_dispatch`: the file is yours.
+
 ## Settings
 
 Section `[logging]`. Environment variable: `$<APP>_LOGGING__<KEY>`. Flag: `--logging.<key>`. Rename or hide a flag in `src/modules/logging.rs`.
@@ -66,6 +81,7 @@ Section `[logging]`. Environment variable: `$<APP>_LOGGING__<KEY>`. Flag: `--log
 | Key | Kind | File value | Flag | Help |
 |---|---|---|---|---|
 | `level` | text | `"debug"` | `--logging.level` | The least severe line written: error, warn, info or debug. |
+| `format` | text | `"line"` | `--logging.format` | The shape of a line: line, common or combined. |
 
 ## Read more
 
