@@ -122,6 +122,63 @@ pub async fn cache(test: &str) -> Option<PgCache> {
     Some(cache)
 }
 
+/// A cache on a table of its own, in a new schema, or a loud skip and `None`.
+///
+/// For a test that sweeps. A sweep deletes every expired row in the table,
+/// in every namespace, so a namespace does not isolate it. A sweep at the
+/// real clock deletes the rows of a test on a [`ManualClock`], whose
+/// instants are years in the past. A sweep at a moved clock deletes the
+/// live rows of other tests. Drop the schema with [`drop_schema`].
+pub async fn cache_in_own_schema(test: &str) -> Option<(PgCache, String)> {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr as _;
+
+    announce();
+    let Some(url) = test_database_url() else {
+        shout(&format!("*** SKIPPED (no database): {test}\n"));
+        return None;
+    };
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let schema = format!(
+        "t_cache_{}_{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    );
+    let options = PgConnectOptions::from_str(&url).expect("a Postgres URL");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .expect("connecting to Postgres");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&admin)
+    .await
+    .expect("dropping a stale schema");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .expect("creating the schema");
+    admin.close().await;
+    let pool = PgPoolOptions::new()
+        .connect_with(options.options([("search_path", schema.as_str())]))
+        .await
+        .expect("connecting to Postgres");
+    let cache = PgCache::from_pool(pool);
+    cache.migrate().await.expect("creating the cache table");
+    Some((cache, schema))
+}
+
+/// Drops a schema that [`cache_in_own_schema`] made.
+pub async fn drop_schema(cache: &PgCache, schema: &str) {
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(cache.pool())
+    .await;
+}
+
 /// A namespace no other test is using.
 ///
 /// Tests share one database, so isolation is by name rather than by truncation.

@@ -19,10 +19,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use brocanth_cache::ManualClock;
 use brocanth_cache::{
     sweep, Cache, CacheError, CacheExt, FetchError, FetchPolicy, Namespace, PgCache,
 };
-use common::{cache, cache_with_manual_clock, clean_up, namespace, MINUTE};
+use chrono::{TimeZone, Utc};
+use common::{
+    cache, cache_in_own_schema, cache_with_manual_clock, clean_up, drop_schema, namespace, MINUTE,
+};
 
 // ---------------------------------------------------------------------------
 // It stores things
@@ -98,10 +102,13 @@ async fn several_keys_come_back_in_the_order_they_were_asked_for() {
 async fn an_expired_value_is_not_returned() {
     // A manual clock, so this is exact rather than a sleep that is flaky on a
     // loaded machine. See `src/clock.rs` for why the clock is a parameter.
-    let Some((cache, clock)) = cache_with_manual_clock("an_expired_value_is_not_returned").await
+    // Its own table: the sweep below would delete other tests' rows.
+    let Some((cache, schema)) = cache_in_own_schema("an_expired_value_is_not_returned").await
     else {
         return;
     };
+    let clock = ManualClock::new(Utc.timestamp_opt(1_700_000_000, 0).unwrap());
+    let cache = cache.with_clock(clock.clone());
     let ns = namespace("expiry");
     let key = ns.key("short-lived").unwrap();
 
@@ -130,7 +137,7 @@ async fn an_expired_value_is_not_returned() {
     assert!(swept >= 1, "the sweep should have taken the dead row");
     assert_eq!(cache.get(&key).await.unwrap(), None);
 
-    clean_up(&cache, &ns).await;
+    drop_schema(&cache, &schema).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -140,11 +147,10 @@ async fn the_plugin_sweep_removes_expired_rows_without_being_asked() {
     use brocanth::plugin_shutdown::ShutdownReason;
     use brocanth_cache::{CacheConfig, CachePlugin};
 
-    // The real clock and a short TTL, not the manual clock: the tests share
-    // the table, and a sweep at a moved clock would delete rows that other
-    // tests still read. At the real clock it deletes only rows that every
-    // read already treats as gone.
-    let Some(cache) = cache("the_plugin_sweep_removes_expired_rows").await else {
+    // Its own table. A sweep deletes every expired row in the table, and the
+    // rows of a test on a manual clock expire years before the real clock.
+    let Some((cache, schema)) = cache_in_own_schema("the_plugin_sweep_removes_expired_rows").await
+    else {
         return;
     };
     let ns = namespace("scheduled-sweep");
@@ -181,7 +187,7 @@ async fn the_plugin_sweep_removes_expired_rows_without_being_asked() {
     let _ = app.shutdown(ShutdownReason::Requested, None);
     assert_eq!(left, 0, "the scheduled sweep left the expired row");
 
-    clean_up(&cache, &ns).await;
+    drop_schema(&cache, &schema).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
