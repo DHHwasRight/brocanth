@@ -1,0 +1,45 @@
+[package]
+name = "brocanth-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Markdown to HTML, cleaned by brocanth-sanitize: CommonMark with GFM tables, footnotes, strikethrough and task lists, heading ids, and TOML front matter typed through serde."
+
+# Two halves, each behind a feature, because a build script needs only one:
+#
+# - `render`: Markdown to cleaned HTML. `pulldown-cmark` parses (MIT, the
+#   parser behind rustdoc and mdBook, no dependency past `bitflags`,
+#   `memchr` and `unicase`). `brocanth-sanitize` cleans the result, so the
+#   HTML parser (`html5ever`) comes with it.
+# - `front-matter`: TOML between `+++` lines, read into a serde type. `toml`
+#   is already in the workspace (config, i18n). A `build.rs` that checks
+#   content files takes this half alone and links no HTML parser.
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"], optional = true }
+brocanth-sanitize = { workspace = true, optional = true }
+serde = { version = "1", optional = true }
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"], optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `markdown`. Optional and off: only the CLI asks for it.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator. A cycle through dev-dependencies, as in `brocanth-robots`.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime"]
+# Both halves. Off only in the brocanth CLI, which links the scaffold side
+# alone, and in a build script, which takes `front-matter`.
+runtime = ["render", "front-matter"]
+render = ["dep:pulldown-cmark", "dep:brocanth-sanitize"]
+front-matter = ["dep:serde", "dep:toml"]
+# `SafeHtml` as an `rsx::Template`, so a component writes rendered
+# Markdown with `{! body }`.
+rsx = ["render", "brocanth-sanitize/rsx"]
+scaffold = ["dep:brocanth-scaffold"]

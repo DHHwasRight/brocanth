@@ -939,6 +939,7 @@ dependencies = [
  "brocanth-cache-redis",
  "brocanth-client",
  "brocanth-config",
+ "brocanth-content",
  "brocanth-db",
  "brocanth-errors",
  "brocanth-filters",
@@ -948,6 +949,7 @@ dependencies = [
  "brocanth-input",
  "brocanth-jobs",
  "brocanth-mail",
+ "brocanth-markdown",
  "brocanth-meta",
  "brocanth-middleware",
  "brocanth-model",
@@ -1027,6 +1029,19 @@ dependencies = [
  "serde_spanned",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
+name = "brocanth-content"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-content",
+ "brocanth-markdown",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "serde",
  "toml",
 ]
 
@@ -1188,6 +1203,18 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "brocanth-markdown"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-sanitize",
+ "brocanth-scaffold",
+ "pulldown-cmark",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -6149,6 +6176,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8960,6 +9005,12 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

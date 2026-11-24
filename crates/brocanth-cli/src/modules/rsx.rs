@@ -34,6 +34,7 @@ impl Module for Rsx {
             "meta",
             "the root layout declares `meta: &Head` and writes the page's title, language and tags",
         )
+        .adapts_to("feed", "the root layout links the Atom feed from `<head>`")
         .adapts_to(
             "flash",
             "the layout carries `<div id=\"flash\">`, where the messages go",
@@ -606,6 +607,13 @@ fn layout_rsx(p: &Project) -> String {
     if p.has("rsx-htmx") {
         head.push_str(
             "            <script src={crate::assets::url(\"dpswap.min.js\")} defer></script>\n",
+        );
+    }
+    // The feed, for a reader that finds it from any page. A path from the
+    // root: a reader resolves it against the page.
+    if p.has("feed") {
+        head.push_str(
+            "            <link rel=\"alternate\" type=\"application/atom+xml\" title={TITLE} href=\"/feed.xml\">\n",
         );
     }
     let body_class = if p.has("rsx-tailwind") {

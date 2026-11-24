@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/rsx.rs`. A setting is read at run
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`rsx-tailwind`](rsx-tailwind.md): the layout links the stylesheet; [`rsx-htmx`](rsx-htmx.md): the layout loads dp-swap and marks its depth; [`meta`](meta.md): the root layout declares `meta: &Head` and writes the page's title, language and tags; [`flash`](flash.md): the layout carries `<div id="flash">`, where the messages go |
+| Adapts to | [`rsx-tailwind`](rsx-tailwind.md): the layout links the stylesheet; [`rsx-htmx`](rsx-htmx.md): the layout loads dp-swap and marks its depth; [`meta`](meta.md): the root layout declares `meta: &Head` and writes the page's title, language and tags; [`feed`](feed.md): the root layout links the Atom feed from `<head>`; [`flash`](flash.md): the layout carries `<div id="flash">`, where the messages go |
 | Contributes | `AgentsSection` `rsx`: how views, layouts and static files are written |
 | Collects | none |
 | Exports | none |

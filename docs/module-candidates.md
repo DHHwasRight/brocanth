@@ -41,7 +41,10 @@ then what the module unblocks. Both scans put `mail` first.
 | 21 | `flags` | Feature flags with an admin panel. **Built** (`brocanth-flags`). | Flipper, django-waffle, Vercel flags | M |
 | 22 | `admin-actions` | Bulk actions with a confirm page, then inlines. **Built**, without inlines (`brocanth-admin`). | Django admin actions, ActiveAdmin batch actions | M |
 
-Next after these: `markdown` with `content` and `feed`, `image`,
+Built after these: `markdown` ([page](modules/markdown.md)), `content`
+([page](modules/content.md)) and `feed` ([page](modules/feed.md)).
+
+Next: `image`,
 `auth-otp` and `auth-mfa`, `debug-toolbar`, `impersonate`,
 `notifications`, `ci-security` (`cargo audit`), `humanize`.
 
@@ -147,7 +150,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `rich-text` | Rich text field: an editor island, sanitized storage, attachments | django-ckeditor-5, Wagtail RichText; Action Text (Trix) | no | Renderer | L | 3 | Needs `sanitize` and `attachments`; one JS island |
 | `impersonate` | Staff signs in as a user, with a banner and an audit line | django-hijack; pretender, devise_masquerade | partly: `brocanth-auth/src/impersonation.rs`, no module | Routes | S | 3 | Logic exists; needs an admin button and a banner |
 | `notifications` | In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |
-| `feeds` | RSS and Atom from a list | contrib.syndication; `atom_feed` builder | no | Routes | S | 3 | Small; fits content sites and the `static` preset |
+| `feeds` | RSS and Atom from a list | contrib.syndication; `atom_feed` builder | yes (`feed`: Atom from the `content` collection) | Routes | S | 3 | **Built** ([page](modules/feed.md)). Atom only; a feed over a database query is not built |
 | `redirects` | Old-URL to new-URL table, checked on 404 | contrib.redirects, django-redirects; – | no | Middleware | S | 3 | Keeps SEO after URL changes; admin edits rows |
 | `humanize` | `time_ago`, `intcomma`, `filesizeformat`, pluralize, number and currency formats | contrib.humanize; ActionView number and date helpers | no | Renderer | S | 3 | Small helpers every page uses; locale from `i18n` |
 | `slugs` | Unique slug column, history of old slugs, redirect | django-autoslug; friendly_id | no | Enhancer | S | 3 | Readable URLs are an HTML-first habit |
@@ -272,9 +275,9 @@ HTML-first Rust app.
 | `storage-routes` (part of `storage`) | **Built.** Multipart upload route, download route, `?thumb=WxH`, `?token=` for protected files | PB file API (P26–P28); uploadthing, @vercel/blob | partly: `brocanth-input/src/multipart.rs`, storage tokens, variants; module writes no route | Routes | S | 5 | Every hard part is done; the HTTP edge is missing |
 | `storage-s3` | S3-compatible backend (R2, MinIO), presigned URLs | PB S3 (P29), pocketbase-presigned-urls; @vercel/blob | no: declined in PLAN.md §4 (Postgres `bytea` instead) | Enhancer | M | 4 | Containers have no durable disk; revisit the §4 decision |
 | `not-found` | `not-found.rsx` and `error.rsx` per directory, rendered in the layout | `not-found.tsx`, `forbidden()`, `unauthorized()` (N7) | no: a miss answers plain `Not Found` | Renderer | S | 4 | Day-one polish; reuses the layout walk in `html!` |
-| `markdown` | `.md` pages in `src/pages/` with frontmatter and a layout, through `Slot::PagesRenderers` | `@next/mdx` (N50), Contentlayer | no | Renderer | M | 4 | Docs and blogs are what a server-rendered framework does best |
-| `content` | Typed content collections: `content/posts/*.md`, frontmatter checked at build, list and detail pages | Contentlayer (abandoned), Astro content collections, next-mdx-remote | no | Enhancer | M | 4 | Contentlayer is dead and the need stays; compile-time checks fit brocanth |
-| `feed` | RSS / Atom / JSON Feed from a content collection or a query | blog starters, next-sitemap peers | no | Routes | S | 3 | Small; pairs with `content` and `sitemap` |
+| `markdown` | `.md` pages in `src/pages/` with frontmatter and a layout, through `Slot::PagesRenderers` | `@next/mdx` (N50), Contentlayer | partly: **Built** as a renderer library ([page](modules/markdown.md)); a `.md` file as a route is not built | Renderer | M | 4 | Docs and blogs are what a server-rendered framework does best |
+| `content` | Typed content collections: `content/posts/*.md`, frontmatter checked at build, list and detail pages | Contentlayer (abandoned), Astro content collections, next-mdx-remote | yes: **Built** ([page](modules/content.md)) | Enhancer | M | 4 | Contentlayer is dead and the need stays; compile-time checks fit brocanth |
+| `feed` | RSS / Atom / JSON Feed from a content collection or a query | blog starters, next-sitemap peers | yes: **Built**, Atom from the collection ([page](modules/feed.md)) | Routes | S | 3 | Small; pairs with `content` and `sitemap` |
 | `search` | Postgres full-text search: `tsvector` column, migration, ranked query, a search page; Meilisearch adapter later | algoliasearch, meilisearch; PB FTS plugin, discussion #2199 | yes (`search`; no Meilisearch adapter yet) | Routes | M | 4 | Done: Postgres FTS, a site index and /search |
 | `flags` | Feature flags in Postgres: boolean and percentage rollouts, per user or org, admin panel, `ctx.flag()` | flags / `@vercel/flags`, Edge Config, LaunchDarkly, Unleash | no | Enhancer | M | 4 | Safe deploys; server-side flags fit HTML-first, no client SDK |
 | `webhooks-out` | **Built**, in `brocanth-webhooks`. Signed outbound webhooks from `RowChange`: endpoints table, HMAC (Standard Webhooks), retries via jobs, delivery log | svix; PB webhooks plugin, PocketHost webhooks | no (queue outbox in `brocanth-queue-postgres` is the base) | Enhancer | M | 4 | Integrations ask for it first; events + jobs + outbox already exist |
@@ -340,9 +343,8 @@ Ranked by value per effort, then by what each unblocks. "Partly" counts as
     `@sentry/nextjs` has 16.6M downloads a week.
 13. **`auth-otp` + `auth-mfa`** (S+M, 4). Passwordless login and TOTP. The
     code is written. They need `mail` first.
-14. **`markdown` + `content`** (M, 4). `.md` pages and typed content
-    collections. Contentlayer is abandoned and the need stays. Add `feed` at
-    the same time.
+14. ~~**`markdown` + `content`**~~ (M, 4). Built, with `feed`. Not built:
+    a `.md` file as a route, tag pages, a second collection by generator.
 15. **`image`** (M, 4). A resize and format endpoint for `assets/`, with
     `srcset`. It reuses the storage decoder and its pixel cap.
 

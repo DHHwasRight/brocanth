@@ -1597,7 +1597,8 @@ mod tests {
         m.at = 3;
         m.wrow = 0;
         m.wizard_toggle();
-        let screen = render(&m, None, 100, 24);
+        // Tall enough for every row of the pages question and both notes.
+        let screen = render(&m, None, 100, 30);
         assert!(
             screen.contains("rsx-tailwind is part of rsx and starts on"),
             "a row that arrived on its own has to say so:\n{screen}"

@@ -50,7 +50,9 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # tem
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
 brocanth-assets = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-sanitize = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["rsx"] }
+brocanth-markdown = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["rsx"] }
 brocanth-robots = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-content = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pagination = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["policy"] }  # pages, cursors and the links between them
 brocanth-filters = { git = "https://github.com/DHHwasRight/brocanth.git" }  # filters compiled into the policy's WHERE
 brocanth-search = { git = "https://github.com/DHHwasRight/brocanth.git" }  # full-text search in Postgres, and the site index
@@ -63,6 +65,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
 
 [build-dependencies]
+brocanth-content = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs checks content/; no Markdown or HTML parser in the build script
+serde = { version = "1", features = ["derive"] }  # build.rs reads the front matter into src/plugins/content/posts.rs
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs compiles locales/; no CLDR data in the build script
 
 [[bin]]
@@ -1917,8 +1921,11 @@ mod tests {
             "/account/signup".to_string(),
             "/account/totp".to_string(),
             "/account/verify/{token}".to_string(),
+            "/feed.xml".to_string(),
             "/openapi.json".to_string(),
             "/openapi.yaml".to_string(),
+            "/posts".to_string(),
+            "/posts/{slug}".to_string(),
             "/realtime/events".to_string(),
             "/realtime/socket".to_string(),
             "/robots.txt".to_string(),
@@ -2049,9 +2056,11 @@ pub mod auth_oauth;
 pub mod auth_screens;
 pub mod backoffice;
 pub mod cache;
+pub mod content;
 pub mod db;
 pub mod db_embedded;
 pub mod errors;
+pub mod feed;
 pub mod flags;
 pub mod i18n;
 pub mod jobs;
@@ -2449,6 +2458,11 @@ macro_rules! register {
                 crate::plugins::webhooks_out_settings(&layers)?,
             ),
         );
+        let builder = builder.plugin(
+            <crate::plugins::content::Content as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::content_settings(&layers)?,
+            ),
+        );
 
         // -- brocanth-errors: error pages and reporters --------------------
         //
@@ -2517,6 +2531,11 @@ macro_rules! register {
             ),
         );
         let builder = builder.plugin(
+            <crate::plugins::feed::Feed as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::feed_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
             <crate::plugins::auth_screens::AuthScreens as brocanth::plugin_api::Plugin>::new(
                 crate::plugins::auth_screens_settings(&layers)?,
             ),
@@ -2569,14 +2588,16 @@ type WithAuth = After<crate::plugins::auth::Auth, WithMail>;
 type WithStorage = After<crate::plugins::storage::Files, WithAuth>;
 type WithWebhooksIn = After<crate::plugins::webhooks_in::WebhooksIn, WithStorage>;
 type WithWebhooksOut = After<crate::plugins::webhooks_out::WebhooksOut, WithWebhooksIn>;
-type WithErrors = After<brocanth_errors::Errors, WithWebhooksOut>;
+type WithContent = After<crate::plugins::content::Content, WithWebhooksOut>;
+type WithErrors = After<brocanth_errors::Errors, WithContent>;
 type WithAudit = After<brocanth_audit::AuditPlugin, WithErrors>;
 type WithAuthOauth = After<crate::plugins::auth_oauth::AuthOauth, WithAudit>;
 type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
 type WithRls = After<crate::plugins::rls::RowSecurity, WithSuperuser>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithRls>;
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithStorageRoutes>;
-type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithOauthClient>;
+type WithFeed = After<crate::plugins::feed::Feed, WithOauthClient>;
+type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFeed>;
 pub type Installed = WithAuthScreens;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
@@ -4391,6 +4412,16 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "content.drafts",
+        help: "Show drafts in the list and at their URL.",
+        flag: true,
+        file: "src/modules/content.rs",
+        flags: crate::modules::content::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "errors.details",
         help: "Show the cause of a 500 in a debug build. A release build never shows it.",
         flag: true,
@@ -4721,6 +4752,46 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "feed.site_url",
+        help: "The site's address, scheme and host: every URL in the feed starts with it.",
+        flag: true,
+        file: "src/modules/feed.rs",
+        flags: crate::modules::feed::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "feed.title",
+        help: "The feed's title.",
+        flag: true,
+        file: "src/modules/feed.rs",
+        flags: crate::modules::feed::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "feed.author",
+        help: "The author Atom names for the feed.",
+        flag: true,
+        file: "src/modules/feed.rs",
+        flags: crate::modules::feed::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "feed.limit",
+        help: "The most posts the feed lists, newest first.",
+        flag: true,
+        file: "src/modules/feed.rs",
+        flags: crate::modules::feed::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "auth_screens.base_url",
         help: "The address links in mail start with: scheme, host, port.",
         flag: true,
@@ -4969,6 +5040,12 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::sitemap::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::content::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::feed::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::i18n::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -5088,6 +5165,12 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     }
     for (key, value) in crate::modules::sitemap::MODULE.set {
         code.push((key.path(), *value, "src/modules/sitemap.rs"));
+    }
+    for (key, value) in crate::modules::content::MODULE.set {
+        code.push((key.path(), *value, "src/modules/content.rs"));
+    }
+    for (key, value) in crate::modules::feed::MODULE.set {
+        code.push((key.path(), *value, "src/modules/feed.rs"));
     }
     for (key, value) in crate::modules::i18n::MODULE.set {
         code.push((key.path(), *value, "src/modules/i18n.rs"));
@@ -5354,12 +5437,14 @@ fn defaults() -> Vec<(&'static str, String)> {
     let storage = crate::plugins::storage::Settings::default();
     let webhooks_in = crate::plugins::webhooks_in::Settings::default();
     let webhooks_out = crate::plugins::webhooks_out::Settings::default();
+    let content = crate::plugins::content::Settings::default();
     let errors = brocanth_errors::ErrorsConfig::default();
     let audit = brocanth_audit::AuditConfig::default();
     let auth_oauth = crate::plugins::auth_oauth::Settings::default();
     let superuser = crate::plugins::superuser::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
+    let feed = crate::plugins::feed::Settings::default();
     let auth_screens = crate::plugins::auth_screens::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
@@ -5670,6 +5755,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "webhooks_out.keep_days",
             format!("{:?}", webhooks_out.keep_days),
         ),
+        ("content.drafts", format!("{:?}", content.drafts)),
         ("errors.details", format!("{:?}", errors.details)),
         (
             "audit.retention_days",
@@ -5784,6 +5870,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "oauth_client.gitlab_client_secret",
             format!("{:?}", oauth_client.gitlab_client_secret),
         ),
+        ("feed.site_url", format!("{:?}", feed.site_url)),
+        ("feed.title", format!("{:?}", feed.title)),
+        ("feed.author", format!("{:?}", feed.author)),
+        ("feed.limit", format!("{:?}", feed.limit)),
         (
             "auth_screens.base_url",
             format!("{:?}", auth_screens.base_url),
@@ -5962,6 +6052,11 @@ pub fn webhooks_out_settings(
     layers.section("webhooks_out").map_err(|e| e.to_string())
 }
 
+/// `[content]`, from every settings layer.
+pub fn content_settings(layers: &Layers) -> Result<crate::plugins::content::Settings, String> {
+    layers.section("content").map_err(|e| e.to_string())
+}
+
 /// `[errors]`, from every settings layer.
 pub fn errors_settings(layers: &Layers) -> Result<brocanth_errors::ErrorsConfig, String> {
     layers.section("errors").map_err(|e| e.to_string())
@@ -5996,6 +6091,11 @@ pub fn oauth_client_settings(
     layers: &Layers,
 ) -> Result<crate::plugins::oauth_client::Settings, String> {
     layers.section("oauth_client").map_err(|e| e.to_string())
+}
+
+/// `[feed]`, from every settings layer.
+pub fn feed_settings(layers: &Layers) -> Result<crate::plugins::feed::Settings, String> {
+    layers.section("feed").map_err(|e| e.to_string())
 }
 
 /// `[auth_screens]`, from every settings layer.
@@ -6214,7 +6314,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b68738f701cc80b0
+// brocanth-digest: e7186462b6698e44
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -8412,6 +8512,17 @@ pub mod sanitize {
     }
 }
 
+/// The shape of src/modules/markdown.rs.
+pub mod markdown {
+    /// What src/modules/markdown.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/robots.rs.
 pub mod robots {
     pub use super::{Flag, Flags};
@@ -8488,6 +8599,94 @@ pub mod sitemap {
     }
 
     /// What src/modules/sitemap.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/content.rs.
+pub mod content {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[content]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Drafts,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Drafts => "content.drafts",
+            }
+        }
+    }
+
+    /// What src/modules/content.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/feed.rs.
+pub mod feed {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[feed]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        SiteUrl,
+        Title,
+        Author,
+        Limit,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::SiteUrl => "feed.site_url",
+                Key::Title => "feed.title",
+                Key::Author => "feed.author",
+                Key::Limit => "feed.limit",
+            }
+        }
+    }
+
+    /// What src/modules/feed.rs holds.
     pub struct Module {
         /// Whether the settings of this module have flags.
         pub flags: Flags,
@@ -8793,7 +8992,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: eb36afbb68068a6d
+// brocanth-digest: f58cc6c0f5f2265a
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -8828,11 +9027,13 @@ pub mod ci_github;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod content;
 pub mod db;
 pub mod db_embedded;
 pub mod docker;
 pub mod docker_kubernetes;
 pub mod errors;
+pub mod feed;
 pub mod filters;
 pub mod flags;
 pub mod flash;
@@ -8844,6 +9045,7 @@ pub mod jobs;
 pub mod jobs_memory;
 pub mod jt;
 pub mod mail;
+pub mod markdown;
 pub mod meta;
 pub mod middleware;
 pub mod middleware_compression;
@@ -8948,8 +9150,11 @@ pub const ALL: &[&str] = &[
     "rsx-tailwind",
     "rsx-htmx",
     "sanitize",
+    "markdown",
     "robots",
     "sitemap",
+    "content",
+    "feed",
     "pagination",
     "filters",
     "search",
@@ -8963,7 +9168,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: cd0c04b3f73602e2
+// brocanth-digest: 9b6252993d774318
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -10621,6 +10826,20 @@ use crate::plugins::shape::sanitize::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/markdown.rs =====
+//! `markdown`: Markdown to cleaned HTML: GFM tables and footnotes, heading ids,
+//! TOML front matter; links html5ever.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::markdown::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/robots.rs =====
 //! `robots`: a robots.txt from your settings, served at /robots.txt; closed
 //! outside production.
@@ -10691,6 +10910,76 @@ pub const MODULE: Module = Module {
     // A value in code, spelled as a flag spells it: over the default,
     // under the config file, the environment and the flags. Example:
     //   (Key::BaseUrl, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/content.rs =====
+//! `content`: Markdown files with typed front matter, checked by the build,
+//! listed at /posts; no database.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [content] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::content::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [content]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Drafts, Flag::As("drafts")),
+    //   (Key::Drafts, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Drafts, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/feed.rs =====
+//! `feed`: an Atom feed of the posts at /feed.xml, with absolute URLs from
+//! `--feed.site_url`.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [feed] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::feed::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [feed]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::SiteUrl, Flag::As("site-url")),
+    //   (Key::SiteUrl, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::SiteUrl, "value"),
     set: &[],
 
     ..Module::DEFAULT
@@ -11459,6 +11748,12 @@ allow_private = true
 # Days a delivered or failed delivery stays in the log. 0 keeps it.
 keep_days = 30
 
+[content]
+# Show drafts in the list and at their URL.
+# Unset, drafts are shown in a debug build (`cargo run`) and hidden in a
+# release build. A draft is never in the feed.
+# drafts = false
+
 [errors]
 # Show the cause of a 500 in a debug build. A release build never shows it.
 # Turn it off to see error.rsx while you design it.
@@ -11557,6 +11852,19 @@ allow_http = false
 # gitlab_client_id = ""
 # The secret of the GitLab application. No flag: it is a secret. Empty means none.
 # gitlab_client_secret = ""
+
+[feed]
+# The site's address, scheme and host: every URL in the feed starts with it.
+# Required. This file is the development one; set the production
+# address in production's file, with the environment or with
+# --feed.site_url. Empty, the server refuses to start.
+site_url = "http://localhost:3000"
+# The feed's title.
+title = "My Blog"
+# The author Atom names for the feed.
+author = "My Blog"
+# The most posts the feed lists, newest first.
+limit = 20
 
 [auth_screens]
 # The address links in mail start with: scheme, host, port.
@@ -11804,17 +12112,47 @@ CMD ["/app/my-blog", "serve"]
 ===== assets/css/site.css =====
 /* Written by `brocanth create` so the first build works.
    `brocanth css` replaces it with the real one. */
-===== build.rs =====
-//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
-//! which `src/plugins/i18n/mod.rs` includes.
-//!
-//! The second argument is the default catalog: every other one is checked
-//! against it, and a key it lacks is a build error. A key a translation
-//! lacks is a warning, and that locale shows the default's text.
+===== content/posts/hello.fr.md =====
++++
+title = "Bonjour, le monde"
+description = "Le premier billet, traduit."
+date = 2026-11-22
+tags = ["meta"]
++++
 
-fn main() {
-    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
-}
+Ce billet est `content/posts/hello.fr.md`, la traduction de `hello.md`.
+Une page en français le montre à la place de l'original.
+===== content/posts/hello.md =====
++++
+title = "Hello, world"
+description = "The first post: what a post is and where it lives."
+date = 2026-11-22
+tags = ["meta"]
++++
+
+This post is `content/posts/hello.md`. The name is the URL:
+`/posts/hello`.
+
+## Front matter
+
+The lines between the two `+++` are TOML, read into the `Post` type in
+`src/plugins/content/posts.rs`. A missing `title`, a date that is not a
+date or a misspelt key stops `cargo build` and names this file.
+
+## The body
+
+Markdown, with tables, footnotes[^1], ~~strikethrough~~ and task lists:
+
+- [x] write the first post
+- [ ] write the second
+
+| Field | Required |
+|-------|:--------:|
+| title | yes |
+| date | yes |
+| draft | no |
+
+[^1]: Rendered once, when the server starts.
 ===== deploy/kubernetes.yaml =====
 # A minimal deployment of this image. Change the image, the replica count
 # and the secrets; keep the probes and the timings in step.
@@ -13835,6 +14173,33 @@ pub fn ErrorPage(caught: &Caught) -> Element {
     }
     <p><a href="/">Back to the home page</a></p>
 }
+===== src/pages/feed.xml.rs =====
+//! `/feed.xml` -- because the file is called `feed.xml.rs`.
+//!
+//! The XML was rendered once, at start, by `src/plugins/feed/mod.rs`. This
+//! page hands it out. With no `site_url` there is no feed: a 500, with the
+//! fix in the log.
+
+use crate::pages::{Ctx, Error, IntoResponse};
+
+/// GET `/feed.xml`.
+///
+/// An hour of cache: the feed changes only when the application is built
+/// again.
+pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let body = crate::plugins::feed::xml().map_err(Error::internal)?;
+    Ok((
+        body.to_string(),
+        200,
+        vec![
+            (
+                "content-type".to_string(),
+                "application/atom+xml; charset=utf-8".to_string(),
+            ),
+            ("cache-control".to_string(), "max-age=3600".to_string()),
+        ],
+    ))
+}
 ===== src/pages/index.rsx =====
 use crate::pages::views::link::Link;
 
@@ -13886,6 +14251,7 @@ pub fn Layout(layout: &str, meta: &Head, children: Element) -> Element {
             {! meta }
             <link rel="stylesheet" href={crate::assets::url("css/site.css")}>
             <script src={crate::assets::url("dpswap.min.js")} defer></script>
+            <link rel="alternate" type="application/atom+xml" title={TITLE} href="/feed.xml">
         </head>
         <body class="min-h-screen bg-white text-slate-900">
             <header><a href="/">{TITLE}</a></header>
@@ -14067,6 +14433,200 @@ pub fn KeysetNav(pager: &brocanth_pagination::KeysetPager) -> Element {
             <a href={href} rel="next">Next</a>
         }
     </nav>
+}
+===== src/pages/posts/[slug].rs =====
+//! `/posts/{slug}` -- one post. The slug is the file name:
+//! `content/posts/hello.md` is `/posts/hello`.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse};
+use crate::plugins::content::Posts;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let posts = *ctx
+        .provided::<Posts, _>()
+        .ok_or_else(|| Error::internal("the content plugin is not registered"))?;
+    let slug = ctx.require("slug")?.to_string();
+    // The locale the `i18n` plugin chose: a translation where one exists.
+    let lang = brocanth_i18n::Locales::tag(crate::plugins::i18n::locale(ctx));
+    // A slug with no file, or a draft this server hides, is not found.
+    let post = posts
+        .get(&slug, Some(lang))
+        .ok_or_else(|| Error::new(404, "Not Found"))?;
+    // The locale segment the request came under: `/fr/posts/hello`.
+    let segment = ctx.hooked::<brocanth_i18n::PathLocale>().cloned();
+    let href = |path: &str| {
+        segment
+            .as_ref()
+            .map_or_else(|| path.to_string(), |l| l.href(path))
+    };
+    let index = href(crate::plugins::content::BASE);
+    // The post's title and description are the page's, and its share
+    // tags say it is an article.
+    let meta = ctx.meta();
+    meta.title(post.data.title.clone()).kind("article");
+    if let Some(description) = &post.data.description {
+        meta.description(description.clone());
+    }
+    html!(
+        ctx,
+        views::posts::_slug_::Article {
+            post,
+            index: &index,
+        }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    /// The status and the body of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, String) {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        let body = response.body.bytes().expect("a whole body");
+        (response.status, String::from_utf8_lossy(body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_post_shows_its_rendered_body() {
+        let (status, body) = get("/en/posts/hello").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("<h1>Hello, world</h1>"), "{body}");
+        // The Markdown, rendered: a heading with its id, and a table.
+        assert!(body.contains(r#"<h2 id="front-matter">"#), "{body}");
+        assert!(body.contains("<table>"), "{body}");
+        // The page's <title> is the post's.
+        assert!(body.contains("<title>Hello, world"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_slug_with_no_file_is_not_found() {
+        let (status, _) = get("/en/posts/no-such-post").await;
+        assert_eq!(status, 404);
+    }
+}
+===== src/pages/posts/[slug].rsx =====
+// One post. `post.html` is the body, rendered from Markdown and cleaned by
+// the sanitizer's allow-list when the server started, so it is written
+// with `{! }`. Every other value is escaped.
+
+use brocanth_content::Entry;
+
+use crate::plugins::content::Post;
+
+pub fn Article(post: &Entry<Post>, index: &str) -> Element {
+    <article>
+        <h1>{&post.data.title}</h1>
+        <p>
+            <time datetime={post.data.date.to_string()}>{post.data.date.to_string()}</time>
+            if let Some(updated) = post.data.updated {
+                , updated <time datetime={updated.to_string()}>{updated.to_string()}</time>
+            }
+        </p>
+        if !post.data.tags.is_empty() {
+            <ul>
+                for tag in &post.data.tags {
+                    <li>{tag}</li>
+                }
+            </ul>
+        }
+        {! &post.html }
+    </article>
+    <p><a href={index}>All posts</a></p>
+}
+===== src/pages/posts/index.rs =====
+//! `/posts` -- every post, newest first.
+//!
+//! The posts are `content/posts/*.md`, read once at start by
+//! `src/plugins/content/mod.rs`. A draft is listed only where
+//! `[content] drafts` shows drafts.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse};
+use crate::plugins::content::Posts;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let posts = *ctx
+        .provided::<Posts, _>()
+        .ok_or_else(|| Error::internal("the content plugin is not registered"))?;
+    // The locale segment the request came under: `/fr/posts/hello`.
+    let segment = ctx.hooked::<brocanth_i18n::PathLocale>().cloned();
+    let href = |path: &str| {
+        segment
+            .as_ref()
+            .map_or_else(|| path.to_string(), |l| l.href(path))
+    };
+    // The locale the `i18n` plugin chose: a translation where one exists.
+    let lang = brocanth_i18n::Locales::tag(crate::plugins::i18n::locale(ctx));
+    let list: Vec<_> = posts
+        .list(Some(lang))
+        .into_iter()
+        .map(|post| (post, href(&post.path)))
+        .collect();
+    ctx.meta()
+        .title("Posts")
+        .description("Every post, newest first.");
+    html!(ctx, views::posts::index::Index { posts: &list })
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    /// The status and the body of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, String) {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        let body = response.body.bytes().expect("a whole body");
+        (response.status, String::from_utf8_lossy(body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_list_links_each_post_with_its_date() {
+        let (status, body) = get("/en/posts").await;
+        assert_eq!(status, 200);
+        assert!(body.contains(r#"href="/en/posts/hello""#), "{body}");
+        assert!(body.contains("Hello, world"), "{body}");
+        assert!(body.contains(r#"datetime="2026-11-22""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_french_reader_gets_the_translation() {
+        let (status, body) = get("/fr/posts").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("Bonjour, le monde"), "{body}");
+    }
+}
+===== src/pages/posts/index.rsx =====
+// The list of posts. Each item is a post and the link to it, which the
+// handler made: the link keeps the locale segment when the site has one.
+
+use brocanth_content::Entry;
+
+use crate::plugins::content::Post;
+
+pub fn Index(posts: &[(&Entry<Post>, String)]) -> Element {
+    <h1>Posts</h1>
+    if posts.is_empty() {
+        <p>No post yet. Add one to <code>content/posts/</code>.</p>
+    } else {
+        <ul>
+            for (post, href) in posts {
+                <li>
+                    <a href={href}>{&post.data.title}</a>
+                    <time datetime={post.data.date.to_string()}>{post.data.date.to_string()}</time>
+                    if post.data.draft {
+                        <em>draft</em>
+                    }
+                    if let Some(description) = &post.data.description {
+                        <p>{description}</p>
+                    }
+                </li>
+            }
+        </ul>
+    }
 }
 ===== src/pages/realtime/events.rs =====
 //! `GET /realtime/events?topics=posts/*,posts/42` -- the broker's frames, as
@@ -16433,6 +16993,207 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
+===== src/plugins/content/mod.rs =====
+//! Written by `brocanth`. The `posts` collection: every
+//! `content/posts/*.md`, checked by `build.rs` and read once, at start.
+//!
+//! `build.rs` reads each file's front matter into [`Post`] (`posts.rs`,
+//! beside this file) and stops the build on a bad one. The binary embeds
+//! the files it listed and renders each body through `brocanth-markdown`
+//! the first time the collection is read. Nothing is read from disk while a
+//! request is served, and there is no database.
+//!
+//! A page reads the posts with `ctx.provided::<Posts, _>()`: a view with
+//! drafts shown or hidden, as `[content] drafts` says.
+
+use std::sync::LazyLock;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth_content::{Collection, View};
+
+mod posts;
+
+pub use posts::Post;
+
+/// The files `build.rs` checked, embedded with `include_str!`.
+mod sources {
+    include!(concat!(env!("OUT_DIR"), "/content_posts.rs"));
+}
+
+/// Where the posts are served: `src/pages/posts/`.
+pub const BASE: &str = "/posts";
+
+/// Every post, read once. The files and the type cannot change while the
+/// binary runs, so one copy serves every application in the process.
+static POSTS: LazyLock<Result<Collection<Post>, String>> =
+    LazyLock::new(|| Collection::parse(BASE, sources::SOURCES));
+
+/// The collection, drafts included, or why it did not read.
+pub fn collection() -> Result<&'static Collection<Post>, String> {
+    POSTS.as_ref().map_err(Clone::clone)
+}
+
+/// The paths a static export writes: `/posts` and each published post,
+/// never a draft.
+#[allow(dead_code)]
+pub fn paths() -> Vec<String> {
+    collection().map(Collection::paths).unwrap_or_default()
+}
+
+/// The posts as a page sees them: drafts shown or hidden.
+#[derive(Clone, Copy)]
+pub struct Posts(pub View<'static, Post>);
+
+impl ContextItem for Posts {}
+
+impl std::ops::Deref for Posts {
+    type Target = View<'static, Post>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[content]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Show drafts in the list and at their URL.
+    /// Unset, `true` in a debug build and `false` in a release one.
+    pub drafts: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            drafts: cfg!(debug_assertions),
+        }
+    }
+}
+
+/// Reads the collection at start and puts a [`Posts`] view on each
+/// request's context.
+pub struct Content {
+    settings: Settings,
+}
+
+impl Plugin for Content {
+    type Config = Settings;
+    type Provides = ProvidesContext<Posts>;
+    const NAME: &'static str = "content";
+
+    fn new(config: Settings) -> Self {
+        Self { settings: config }
+    }
+
+    /// Reads every post now, so a file that does not read stops the start
+    /// and not a request. `build.rs` checked them, so this does not fail on
+    /// a file it checked.
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        collection()
+            .map(|_| ())
+            .map_err(|e| PluginError::new(format!("[content] {e}")))
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        if let Ok(posts) = collection() {
+            cx.insert(Posts(posts.view(self.settings.drafts)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_post_reads_and_hello_is_published() {
+        let posts = collection().expect("build.rs checked every file");
+        let hello = posts
+            .view(false)
+            .get("hello", None)
+            .expect("content/posts/hello.md");
+        assert_eq!(hello.path, "/posts/hello");
+        assert!(!hello.html.is_empty());
+        assert!(paths().contains(&"/posts/hello".to_string()));
+    }
+
+    #[test]
+    fn a_draft_is_in_no_published_path() {
+        let posts = collection().expect("build.rs checked every file");
+        for post in posts.all().iter().filter(|post| post.data.draft) {
+            assert!(!paths().contains(&post.path), "{} is a draft", post.source);
+        }
+    }
+}
+===== src/plugins/content/posts.rs =====
+//! The front matter of `content/posts/*.md`: the lines between the two
+//! `+++` at the top of each file, as TOML.
+//!
+//! This file is yours. Add a field and every post may set it; add a
+//! required one and `cargo build` names each post that lacks it.
+//!
+//! `build.rs` compiles this file too, to check every post before the
+//! binary is built. So it may use `serde`, `std` and `brocanth_content`,
+//! and nothing else from this crate.
+
+use brocanth_content::{Date, FrontMatter};
+use serde::Deserialize;
+
+/// One post's front matter.
+///
+/// `deny_unknown_fields`: a misspelt key (`titel`) is a build error, not a
+/// post with no title.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Post {
+    pub title: String,
+    /// One or two sentences: the list's summary and the page description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The day it was published: `date = 2026-11-22`.
+    pub date: Date,
+    /// The day it last changed, when that is not `date`.
+    #[serde(default)]
+    pub updated: Option<Date>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Listed only where `[content] drafts` shows drafts, and never in a
+    /// feed or an export.
+    #[serde(default)]
+    pub draft: bool,
+}
+
+impl FrontMatter for Post {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn date(&self) -> Option<Date> {
+        Some(self.date)
+    }
+
+    fn updated(&self) -> Option<Date> {
+        self.updated
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    fn draft(&self) -> bool {
+        self.draft
+    }
+}
 ===== src/plugins/db/mod.rs =====
 //! The database, as this application registers it.
 //!
@@ -17006,6 +17767,152 @@ mod tests {
             "{}",
             body(&response)
         );
+    }
+}
+===== src/plugins/feed/mod.rs =====
+//! Written by `brocanth`. The Atom feed of the posts, served at
+//! `/feed.xml` by `src/pages/feed.xml.rs`.
+//!
+//! Rendered once at start from the published posts (no draft, no
+//! translation) and `Settings`. Every URL in it is `site_url` and a path: a
+//! feed is read away from the site. An unset `site_url` is no feed, and the
+//! start refuses: a readiness check says so before the server binds.
+
+use std::sync::OnceLock;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth_content::feed::Atom;
+
+/// Where the feed is served: `src/pages/feed.xml.rs`. The root layout links
+/// it.
+pub const PATH: &str = "/feed.xml";
+
+/// The XML, or why there is none, set once at `configure`.
+static RENDERED: OnceLock<Result<String, String>> = OnceLock::new();
+
+/// The feed's XML, or why there is none.
+pub fn xml() -> Result<&'static str, String> {
+    match RENDERED.get() {
+        Some(Ok(xml)) => Ok(xml),
+        Some(Err(why)) => Err(why.clone()),
+        None => Err("the feed plugin is not registered\n\
+             help: register crate::plugins::feed::Feed in src/plugins/mod.rs"
+            .to_string()),
+    }
+}
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[feed]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// The site's address, scheme and host. Required.
+    pub site_url: String,
+    /// The feed's title.
+    pub title: String,
+    /// The author Atom names for the feed.
+    pub author: String,
+    /// The most posts the feed lists, newest first.
+    pub limit: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            site_url: String::new(),
+            title: "My Blog".to_string(),
+            author: "My Blog".to_string(),
+            limit: 20,
+        }
+    }
+}
+
+/// The feed these settings describe, over the published posts.
+pub fn render(settings: &Settings) -> Result<String, String> {
+    let posts = crate::plugins::content::collection()?;
+    let feed = Atom::new(&settings.site_url, PATH, &settings.title, &settings.author)?;
+    Ok(feed.entries(posts.published(), settings.limit).render())
+}
+
+pub struct Feed {
+    settings: Settings,
+}
+
+impl Plugin for Feed {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "feed";
+
+    fn new(config: Settings) -> Self {
+        Self { settings: config }
+    }
+
+    /// Renders the feed. Without a `site_url` it registers a check that
+    /// fails, so `serve` stops before it binds and `/readyz` says why; a
+    /// test that builds the application and serves nothing still runs.
+    fn configure(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let rendered = render(&self.settings);
+        if let Err(why) = &rendered {
+            let why = why.clone();
+            lc.ready_when(move || {
+                let why = why.clone();
+                async move { Err(why) }
+            });
+        }
+        let _ = RENDERED.set(rendered);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::*;
+
+    fn settings(site_url: &str) -> Settings {
+        Settings {
+            site_url: site_url.to_string(),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn the_feed_lists_the_posts_at_absolute_urls() {
+        let xml = render(&settings("https://example.com")).expect("a feed");
+        assert!(
+            xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<id>https://example.com/posts/hello</id>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<title>Hello, world</title>"), "{xml}");
+    }
+
+    #[test]
+    fn no_site_url_is_no_feed_and_says_how_to_set_it() {
+        let why = render(&settings("")).expect_err("refused");
+        assert!(why.contains("help: set `site_url` under [feed]"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn every_page_links_the_feed() {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, "/en")).await;
+        let body = response.body.bytes().expect("a whole body");
+        let body = String::from_utf8_lossy(body);
+        assert!(
+            body.contains(r#"<link rel="alternate" type="application/atom+xml""#),
+            "{body}"
+        );
+        assert!(body.contains(r#"href="/feed.xml""#), "{body}");
     }
 }
 ===== src/plugins/flags/mod.rs =====
@@ -22388,6 +23295,38 @@ impl brocanth_webhooks::outgoing::ShutdownGrace for Grace {
     "@tailwindcss/cli": "^4.1.14"
   }
 }
+===== build.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! The build script: what this project checks or compiles before the
+//! crate itself. Each step below belongs to one module and says which.
+//! A step that fails stops the build with the file to fix and a `help:`
+//! line.
+
+fn main() {
+    // -- i18n: compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`, which
+    // `src/plugins/i18n/mod.rs` includes. The second argument is the
+    // default catalog: every other one is checked against it, and a key it
+    // lacks is a build error. A key a translation lacks is a warning, and
+    // that locale shows the default's text.
+    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
+    // -- content: reads every `content/posts/*.md` against the type in
+    // `src/plugins/content/posts.rs`, and stops the build on a bad file with
+    // its path, its line and a `help:` line. Writes the list of files to
+    // `$OUT_DIR/content_posts.rs`, which `src/plugins/content/mod.rs`
+    // embeds. The type is compiled here as well as in the binary, so the
+    // two cannot disagree about a field.
+    {
+        #[allow(dead_code)]
+        #[path = "src/plugins/content/posts.rs"]
+        mod posts;
+        brocanth_content::build::collection::<posts::Post>("content/posts")
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
+// brocanth-digest: 03356cae01e3c0aa
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -22474,8 +23413,11 @@ request.
 - `rsx-tailwind`  a CSS build over the class names in your templates; needs node
 - `rsx-htmx`  a click swaps what changed; the server renders from the shared layout down
 - `sanitize`  an allow-list HTML sanitizer and a SafeHtml type; links html5ever
+- `markdown`  Markdown to cleaned HTML: GFM tables and footnotes, heading ids, TOML front matter; links html5ever
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
+- `content`  Markdown files with typed front matter, checked by the build, listed at /posts; no database
+- `feed`  an Atom feed of the posts at /feed.xml, with absolute URLs from `--feed.site_url`
 - `pagination`  offset and keyset pages, with links that keep the query; no dependency
 - `filters`  typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE
 - `search`  Postgres full-text and trigram search: a site index, its migration, a page at /search
@@ -22815,6 +23757,19 @@ HTML a user wrote reaches a page only as a
 Never widen a policy with `style`, `class`, `id`, an `on*` attribute
 or a `javascript:` URL. Store what the user wrote and clean it when
 the page renders, so a stricter policy also covers old rows.
+
+## Markdown
+
+Markdown becomes HTML only through `brocanth-markdown`, which cleans
+the result with the sanitizer's allow-list:
+`brocanth_markdown::render(text)` for text the site's authors wrote,
+`brocanth_markdown::render_user(text)` for text a visitor typed. Both
+return a `SafeHtml`. Write it with `{! body }`. Do not call a Markdown parser directly:
+its raw HTML and `javascript:` links reach the page.
+
+Front matter is TOML between two `+++` lines, read into a type with
+`brocanth_markdown::front_matter::<T>(text)`. Give the type
+`#[serde(deny_unknown_fields)]`, so a misspelt key is an error.
 
 ## Pagination
 
@@ -23183,6 +24138,24 @@ Do not post to a partner's URL from a page: the delivery log, the
 signature and the retries come from `emit`. Show an endpoint's secret
 once, to the person who registered it, and never log it.
 
+## Content
+
+A post is a file: `content/posts/<slug>.md`, served at
+`/posts/<slug>`. Its front matter is TOML between two `+++` lines, read
+into `Post` in `src/plugins/content/posts.rs`. `build.rs` checks every
+file against that type, so a bad post fails `cargo build` with its path
+and a `help:` line: fix the file, not the check. Add a field to `Post`
+to give posts a new value; a template reads it as `post.data.<field>`.
+
+`draft = true` keeps a post out of the list and its URL where
+`[content] drafts` is false (a release build), and always out of the
+feed and the static export. A translation is `<slug>.<locale>.md`
+beside the default file. Do not read `content/` at run time and do not
+store posts in a database: the binary embeds them.
+
+A second collection copies the pattern under a new name: a directory, a
+type, a step in `build.rs`, a plugin and two pages.
+
 ## Search
 
 `/search` ranks the rows of `search_documents`, the site index.
@@ -23374,6 +24347,16 @@ client secret in `$<APP>_OAUTH_CLIENT__<PROVIDER>_CLIENT_SECRET`, never in
 a committed config file. Changing the key makes every stored token
 unreadable.
 
+## Feed
+
+`/feed.xml` is an Atom feed of the published posts: no draft, no
+translation, at most `[feed] limit`. Every URL in it starts with
+`[feed] site_url`, which is required: unset, the server refuses to
+start. Set it per deployment (`--feed.site_url=https://example.com` or
+the environment). Do not write a second feed route, and do not make a
+URL in a post relative to the feed: each entry carries `xml:base`, so a
+link from the root (`/about`) resolves.
+
 ## Account screens
 
 `src/pages/account/` holds the sign-up, sign-in, sign-out, reset,
@@ -23433,7 +24416,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 2f3e8b2ff2d24119 -->
+<!-- brocanth-digest: decd52198c12acf2 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -23445,7 +24428,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "robots", "sitemap", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "markdown", "robots", "sitemap", "content", "feed", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
@@ -23900,7 +24883,7 @@ kind = ["renderer"]
 files = ["src/modules/rsx.rs", "src/assets.rs", "src/pages/about.rsx", "src/pages/error.rsx", "src/pages/index.rsx", "src/pages/layout.rsx", "src/pages/not-found.rsx", "src/pages/parts/pager.rsx", "src/pages/search.rsx", "src/pages/users/[id].rsx", "src/pages/users/layout.rsx", "src/plugins/static_files/"]
 config = []
 crates = ["rsx"]
-adapted_to = ["rsx-tailwind", "rsx-htmx", "meta", "flash"]
+adapted_to = ["rsx-tailwind", "rsx-htmx", "meta", "feed", "flash"]
 
 [modules.jt]
 version = "0.1.0"
@@ -23934,6 +24917,14 @@ config = []
 crates = ["brocanth-sanitize"]
 adapted_to = ["rsx"]
 
+[modules.markdown]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/markdown.rs"]
+config = []
+crates = ["brocanth-markdown"]
+adapted_to = ["rsx"]
+
 [modules.robots]
 version = "0.1.0"
 kind = ["routes"]
@@ -23949,6 +24940,22 @@ files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/site
 config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["jt", "realtime-sse", "i18n-routing", "meta"]
+
+[modules.content]
+version = "0.1.0"
+kind = ["enhancer", "routes"]
+files = ["src/modules/content.rs", "content/posts/hello.fr.md", "content/posts/hello.md", "src/pages/posts/[slug].rs", "src/pages/posts/[slug].rsx", "src/pages/posts/index.rs", "src/pages/posts/index.rsx", "src/plugins/content/"]
+config = ["content"]
+crates = ["brocanth-content", "serde"]
+adapted_to = ["meta", "i18n", "i18n-routing"]
+
+[modules.feed]
+version = "0.1.0"
+kind = ["routes"]
+files = ["src/modules/feed.rs", "src/pages/feed.xml.rs", "src/plugins/feed/"]
+config = ["feed"]
+crates = ["brocanth-content"]
+adapted_to = ["i18n-routing"]
 
 [modules.pagination]
 version = "0.1.0"
@@ -23977,7 +24984,7 @@ adapted_to = ["model", "rsx"]
 [modules.i18n]
 version = "0.1.0"
 kind = ["middleware"]
-files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
+files = ["src/modules/i18n.rs", "content/posts/hello.fr.md", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
 adapted_to = ["gtag", "rsx", "jt", "i18n-routing"]
@@ -24038,4 +25045,4 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: 5645d6a41f62926c
+# brocanth-digest: 79f152458bd785d7

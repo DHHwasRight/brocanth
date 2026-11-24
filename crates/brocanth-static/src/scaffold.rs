@@ -47,6 +47,10 @@ impl Module for StaticSite {
         .category(Category::Enhancer)
         .adapts_to("rsx-tailwind", "the export writes the compiled stylesheet")
         .adapts_to("rsx-htmx", "the export writes dp-swap and the partials")
+        .adapts_to(
+            "content",
+            "the export writes /posts and each published post, never a draft",
+        )
         .asked_in("pages", "Compile the pages to files any static host serves")
         .needs("commands", "`export` is a subcommand of this binary")
         .krate(Dep::brocanth("brocanth-static"))
@@ -61,9 +65,18 @@ impl Module for StaticSite {
         } else {
             ASSETS_NONE
         };
+        // The posts are routes with a parameter: the export cannot list
+        // them from the route table, so the collection lists them.
+        let content = if project.has("content") {
+            CONTENT_PATHS
+        } else {
+            ""
+        };
         s.file(
             "src/commands/export.rs",
-            EXPORT_RS.replace("@ASSETS@", assets),
+            EXPORT_RS
+                .replace("@ASSETS@", assets)
+                .replace("@CONTENT@", content),
         );
         s.at(Slot::CommandsMod).line("pub mod export;");
         s.at(Slot::GitIgnore).line("/dist");
@@ -153,7 +166,7 @@ impl Command for Export {
             .base(&self.base)
             .partials(PARTIALS)
             .routes(&app.router)
-            .paths(PATHS.iter().copied())@ASSETS@;
+            .paths(PATHS.iter().copied())@CONTENT@@ASSETS@;
         let report = runtime.block_on(site.run(|request| crate::app::handle(&app, request)))?;
 
         eprintln!("export: {report} in {}", self.out.display());
@@ -173,6 +186,11 @@ const ASSETS_EMBEDDED: &str = "
                     .iter()
                     .map(|asset| (asset.published, asset.body)),
             )";
+
+/// The posts of the `content` collection: `/posts` and each published
+/// post. A draft is never written.
+const CONTENT_PATHS: &str = "
+            .paths(crate::plugins::content::paths())";
 
 // No embedded assets: nothing in this project writes `assets/` or
 // `public/`, and `crate::assets` does not exist.

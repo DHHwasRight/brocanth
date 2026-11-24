@@ -122,9 +122,12 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`rsx-tailwind`](rsx-tailwind.md) | a CSS build over the class names in your templates; needs node | External, Enhancer | rsx |
 | [`rsx-htmx`](rsx-htmx.md) | a click swaps what changed; the server renders from the shared layout down | Renderer | rsx |
 | [`sanitize`](sanitize.md) | an allow-list HTML sanitizer and a SafeHtml type; links html5ever | Renderer |  |
+| [`markdown`](markdown.md) | Markdown to cleaned HTML: GFM tables and footnotes, heading ids, TOML front matter; links html5ever | Renderer |  |
 | [`static`](static.md) | `export` writes every GET page and every asset to dist/; no server, so no runtime modules | External, Enhancer |  |
 | [`robots`](robots.md) | a robots.txt from your settings, served at /robots.txt; closed outside production | Routes |  |
 | [`sitemap`](sitemap.md) | a sitemap.xml of every page with no parameter, served at /sitemap.xml | Routes |  |
+| [`content`](content.md) | Markdown files with typed front matter, checked by the build, listed at /posts; no database | Enhancer, Routes |  |
+| [`feed`](feed.md) | an Atom feed of the posts at /feed.xml, with absolute URLs from `--feed.site_url` | Routes |  |
 | [`pagination`](pagination.md) | offset and keyset pages, with links that keep the query; no dependency | Renderer |  |
 | [`filters`](filters.md) | typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE | Renderer |  |
 | [`search`](search.md) | Postgres full-text and trigram search: a site index, its migration, a page at /search | Routes |  |

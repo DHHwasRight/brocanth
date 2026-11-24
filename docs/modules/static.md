@@ -28,7 +28,7 @@ An option is set at build time in `src/modules/static.rs`. A setting is read at 
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`rsx-tailwind`](rsx-tailwind.md): the export writes the compiled stylesheet; [`rsx-htmx`](rsx-htmx.md): the export writes dp-swap and the partials |
+| Adapts to | [`rsx-tailwind`](rsx-tailwind.md): the export writes the compiled stylesheet; [`rsx-htmx`](rsx-htmx.md): the export writes dp-swap and the partials; [`content`](content.md): the export writes /posts and each published post, never a draft |
 | Contributes | `AgentsSection` `static`: the project builds files, not a server |
 | Collects | none |
 | Exports | none |

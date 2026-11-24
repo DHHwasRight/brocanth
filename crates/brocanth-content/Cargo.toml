@@ -1,0 +1,46 @@
+[package]
+name = "brocanth-content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Content collections: Markdown files with typed front matter, checked by the build script and rendered once at start; and an Atom feed of a collection. The `content` and `feed` modules."
+
+# No new crate past `brocanth-markdown`. A date is three numbers and the
+# feed is a few XML elements, so neither takes a crate of its own.
+#
+# Two features, because the same types serve two compilations:
+#
+# - `build`: what `build.rs` links. It reads each file's front matter into
+#   the project's type and writes the list of files the binary embeds. The
+#   front-matter half of `brocanth-markdown` only: no Markdown parser and no
+#   HTML parser in the build script.
+# - `runtime`: what the binary links. The collection, rendered through
+#   `brocanth-markdown`, and the feed.
+[dependencies]
+brocanth-markdown = { workspace = true, optional = true }
+serde = { version = "1", optional = true }
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"], optional = true }
+
+# `src/scaffold.rs` and `src/scaffold_feed.rs` are the modules `brocanth
+# create` offers under the keys `content` and `feed`. Optional and off: only
+# the CLI asks for them.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+# This crate with `build` on too, so `cargo test -p brocanth-content` runs
+# the build-script checks rather than compiling them out.
+brocanth-content = { path = ".", features = ["build"] }
+serde = { version = "1", features = ["derive"] }
+brocanth-test = { workspace = true }
+# `tests/scaffold.rs`: the modules, generated into a project by the CLI's own
+# generator. A cycle through dev-dependencies, as in `brocanth-robots`.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+brocanth-markdown = { workspace = true, features = ["scaffold"] }
+
+[features]
+default = ["runtime"]
+runtime = ["dep:brocanth-markdown", "brocanth-markdown/runtime", "dep:serde", "dep:toml"]
+build = ["dep:brocanth-markdown", "brocanth-markdown/front-matter", "dep:serde", "dep:toml"]
+scaffold = ["dep:brocanth-scaffold"]

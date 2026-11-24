@@ -56,6 +56,9 @@ edition = "2021"
 #   rsx                   no template engine; a page builds the String it returns
 #   jt                    no JSON templates; a page that answers JSON builds the String it returns, or derives a struct for the shape
 #   sanitize              no sanitizer; HTML a user wrote can only be shown escaped, as text
+#   brocanth-markdown     no Markdown; a page shows Markdown as text, or links a parser and a sanitizer by hand
+#   brocanth-content      no content collections; a post is a page written by hand, with no checked front matter
+#   feed                  no feed; a reader learns of a new post by visiting the site
 #   brocanth-pagination   no paginator; each list counts its own offset and writes its own links
 #   brocanth-filters      no typed filters; a list that filters parses its own query string
 #   brocanth-search       no search; a visitor finds a page by its link or not at all
@@ -2835,17 +2838,6 @@ allow = []
 extra = []
 # Path prefixes kept out of the sitemap: "/drafts".
 exclude = []
-===== build.rs =====
-//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
-//! which `src/plugins/i18n/mod.rs` includes.
-//!
-//! The second argument is the default catalog: every other one is checked
-//! against it, and a key it lacks is a build error. A key a translation
-//! lacks is a warning, and that locale shows the default's text.
-
-fn main() {
-    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
-}
 ===== locales/en.toml =====
 # The default catalog. Every key is here; `build.rs` names this file.
 #
@@ -3528,6 +3520,25 @@ mod tests {
         assert!(!xml.contains("example.com/about</loc>"), "{xml}");
     }
 }
+===== build.rs =====
+//! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
+//! Something else belongs here? Put it in `src/app.rs`, which is yours.
+//!
+//! The build script: what this project checks or compiles before the
+//! crate itself. Each step below belongs to one module and says which.
+//! A step that fails stops the build with the file to fix and a `help:`
+//! line.
+
+fn main() {
+    // -- i18n: compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`, which
+    // `src/plugins/i18n/mod.rs` includes. The second argument is the
+    // default catalog: every other one is checked against it, and a key it
+    // lacks is a build error. A key a translation lacks is a warning, and
+    // that locale shows the default's text.
+    brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
+}
+
+// brocanth-digest: 7219b0e3466174c7
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -3560,7 +3571,7 @@ request.
 - `robots`  a robots.txt from your settings, served at /robots.txt; closed outside production
 - `sitemap`  a sitemap.xml of every page with no parameter, served at /sitemap.xml
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `static`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `superuser`, `roles`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `content`, `feed`, `pagination`, `filters`, `search`, `meta`, `errors`, `docker`, `docker-kubernetes`, `ci`, `ci-github` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3656,7 +3667,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 1aa72cf58e3e89e4 -->
+<!-- brocanth-digest: 967d371c5ee65bd0 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -3684,7 +3695,7 @@ adapted_to = []
 [modules.i18n]
 version = "0.1.0"
 kind = ["middleware"]
-files = ["src/modules/i18n.rs", "build.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/"]
+files = ["src/modules/i18n.rs", "locales/en.toml", "locales/fr.toml", "src/plugins/i18n/", "build.rs"]
 config = ["i18n"]
 crates = ["brocanth-i18n"]
 adapted_to = ["i18n-routing"]
@@ -3713,4 +3724,4 @@ config = ["sitemap"]
 crates = ["brocanth-robots"]
 adapted_to = ["i18n-routing"]
 
-# brocanth-digest: d73890c99852a251
+# brocanth-digest: 4d1ac4fc3b1dbefb

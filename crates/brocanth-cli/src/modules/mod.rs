@@ -229,6 +229,9 @@ pub const ALL: &[&dyn Module] = &[
     // HTML a user wrote, cleaned by an allow-list into a `SafeHtml` the
     // templates write as markup. Its own crate: it links an HTML parser.
     &brocanth_sanitize::scaffold::Sanitize,
+    // Markdown to HTML, cleaned by the same allow-list, with TOML front
+    // matter. Its own crate: it links a Markdown parser and the sanitizer.
+    &brocanth_markdown::scaffold::MarkdownModule,
     // The pages as files, for a static host. It refuses every module that
     // needs a running server.
     &brocanth_static::scaffold::StaticSite,
@@ -238,6 +241,11 @@ pub const ALL: &[&dyn Module] = &[
     // A sitemap.xml of the page table, from the same crate. `robots`
     // names it on its `Sitemap:` line when both are chosen.
     &brocanth_robots::scaffold::Sitemap,
+    // Posts as Markdown files with typed front matter, checked by the
+    // build and rendered once at start, and an Atom feed of them. No
+    // database: the binary embeds the files.
+    &brocanth_content::scaffold::Content,
+    &brocanth_content::scaffold::Feed,
     // Lists: one paginator, offset and keyset, with links that keep
     // the query.
     &brocanth_pagination::scaffold::Pagination,

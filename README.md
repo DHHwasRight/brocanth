@@ -11,7 +11,7 @@
 
 ## What brocanth is
 
-A Cargo workspace of 54 crates under `crates/` and two examples under
+A Cargo workspace of 58 crates under `crates/` and two examples under
 `examples/` (`demo-app`, `nested-cards`). The core is a router that hands a
 request and a context to a handler. Everything else is a plugin that you
 name in `main`. The `brocanth` CLI writes a project from the modules you
@@ -164,8 +164,10 @@ puts the crate in a new project.
 | [`brocanth-input`](crates/brocanth-input/README.md) | A form or JSON body read into a struct, with every fault at once | `input` |
 | [`brocanth-schema`](crates/brocanth-schema/README.md) | Schemas checked by the compiler and at run time; a handler takes `Valid<T>` | `validation` |
 | [`brocanth-openapi`](crates/brocanth-openapi/README.md) | An OpenAPI 3.1 document from the route table, with a drift check | `openapi` |
+| [`brocanth-content`](crates/brocanth-content/README.md) | Markdown content collections checked by the build script, and an Atom feed of them | `content`, `feed` |
 | [`brocanth-robots`](crates/brocanth-robots/README.md) | A robots.txt and a sitemap.xml from builders, checked before they are served | `robots`, `sitemap` |
 | [`brocanth-sanitize`](crates/brocanth-sanitize/README.md) | An allow-list HTML sanitizer over html5ever, and a `SafeHtml` the templates write as markup | `sanitize` |
+| [`brocanth-markdown`](crates/brocanth-markdown/README.md) | Markdown to HTML cleaned by the sanitizer, with heading ids and typed TOML front matter | `markdown` |
 | [`brocanth-meta`](crates/brocanth-meta/README.md) | A title, a description, a canonical URL, share tags and hreflang for each page | `meta` |
 | [`brocanth-errors`](crates/brocanth-errors/README.md) | HTML 404 and 500 pages, a development page with the cause, and the reporter hook | `errors` |
 | [`brocanth-client`](crates/brocanth-client/README.md) | A command line that calls the application's own API, built from its routes | `client` |
