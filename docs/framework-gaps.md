@@ -713,6 +713,8 @@ way that is not a Gorilla piece. A third limit was small and is built.
    accident; and answer that preflight with no `Access-Control-Allow-*`
    headers, so the browser refuses it, as it does today for a verb outside
    the list. G10 is done when this is built.
+   **Owner decision, 2026-11-24:** intersect, and no `Access-Control-Allow-*`
+   headers on a preflight for a verb the route lacks. To build.
 2. **A panic does not reach the `errors` module.** Size: half a day, but it
    changes the generated `handle` and the `errors` contract. The net
    answers a bare 500 that the response hooks see; `error.rsx` and the
@@ -722,6 +724,9 @@ way that is not a Gorilla piece. A third limit was small and is built.
    bridge refuses to do (ADR 8). **Recommendation:** an owner decision in
    the `errors` module, not in G10: report the panic message with a new
    `Origin::Panic`, and render `error.rsx` with no request state.
+   **Owner decision, 2026-11-24:** as recommended. On a panic, render the
+   `errors` 500 page with no request state, and call the reporters with
+   the panic message and the path only. To build.
 3. **`SharedRateLimit` behind `Bridge`: done, 2026-11-22.** `Bridge` called
    `App::begin` and `App::run`, which are a compile error for an
    application with an `AsyncRequestHook`. Both of its arms now call
