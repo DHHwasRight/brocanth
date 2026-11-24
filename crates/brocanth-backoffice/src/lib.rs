@@ -30,7 +30,7 @@
 //!
 //! **The second binary** ([`gate`]). A project with the `backoffice` module
 //! builds `src/bin/backoffice.rs`, which runs the application itself and
-//! serves only the admin's mount. [`Gate`] decides which paths a process
+//! serves only the admin's mount. [`Gate`] decides which paths an application
 //! answers, from its [`Role`].
 //!
 //! The module that writes all of it into a project is [`scaffold`], behind
@@ -66,7 +66,7 @@ pub use contract::{
     TabTransaction, Write,
 };
 #[cfg(feature = "runtime")]
-pub use gate::{check_addr, role, serve_as, Gate, Role};
+pub use gate::{check_addr, Gate, Role};
 #[cfg(feature = "runtime")]
 pub use json::Json;
 #[cfg(feature = "runtime")]

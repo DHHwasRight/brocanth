@@ -162,6 +162,7 @@ fn main() -> ExitCode {
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use brocanth::plugin_api::Services;
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
 use brocanth::plugin_routes::BoxFuture;
@@ -204,12 +205,27 @@ pub struct App {
 type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;
 
 /// Builds it. The only place that decides what this binary is.
+///
+/// [`build_with`], with nothing given. Tests and commands call it;
+/// `serve` does not, so a binary with neither leaves it unused.
+#[allow(dead_code)]
 pub fn build() -> Result<App, String> {
+    build_with(Services::new())
+}
+
+/// Builds it with `given` in its services before any plugin registers.
+///
+/// What a binary tells its plugins about itself, as a value and not as
+/// process-wide state: a second binary of this application (a module's
+/// `src/bin/`) gives what tells it apart, and a plugin reads it in
+/// `register`. Two applications in one process can be given different
+/// values.
+pub fn build_with(given: Services) -> Result<App, String> {
     // 1. The application, and every plugin it contains. The chain is in
     //    `src/plugins/mod.rs`, one line per plugin and each one a line a
     //    reader can delete. It is there rather than here because the
     //    generator rewrites it whenever the module list changes.
-    let app = plugins::register!(AppBuilder::new())
+    let app = plugins::register!(AppBuilder::with_services(given))
         .setup(|setup| {
             // A plugin *offers* middleware and cannot mount it: a
             // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
@@ -309,6 +325,11 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
+    serve_with(addr, Services::new())
+}
+
+/// [`serve`], with the application built by [`build_with`] from `given`.
+pub fn serve_with(addr: &str, given: Services) -> Result<(), String> {
     let grace = plugins::shutdown_grace()?;
     // Before the socket, so a signal during startup stops the server
     // through the drain and does not kill the process.
@@ -325,7 +346,7 @@ pub fn serve(addr: &str) -> Result<(), String> {
     // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
-        build()?
+        build_with(given)?
     };
     let names = app.plugins.join(", ");
     plugins::say!(info, "plugins: [{names}]"; plugins = %names);

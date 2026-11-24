@@ -358,16 +358,36 @@ the application crate. Not a subcommand: a project without `commands`
 has none, and a binary of its own is its own container. Its tests do
 not run a second time (`test = false`).
 
-**B2. One code path, two roles.** Both binaries call `app::build` and
-`app::serve`: one plugin chain, one route table, one admin. A server
-wrap, `plugins::backoffice::Door`, asks a `brocanth_backoffice::Gate`
-and answers 404 outside `mount_at` when
-the process runs as the backoffice, and 404 inside `mount_at` when the
-application runs with `embedded = false`. The second binary sets its
-role before it serves. Reason: a second router would drift, and the
-mount role `Backoffice` (§5.4) is already the boundary. The role is a
-process-wide value, set once by `main`: it says which binary this is,
-and it carries no data, so §5.1 does not apply to it.
+**B2. One code path, two roles.** Both binaries build the application
+through `app::build_with` and serve it through `app::serve_with`: one
+plugin chain, one route table, one admin. (`app::build` and
+`app::serve` are the same calls with nothing given.) A server wrap,
+`plugins::backoffice::Door`, asks a `brocanth_backoffice::Gate` and
+answers 404 outside `mount_at` when the application serves as the
+backoffice, and 404 inside `mount_at` when the application runs with
+`embedded = false`. Reason: a second router would drift, and the mount
+role `Backoffice` (§5.4) is already the boundary.
+
+The role is a value that flows from `main`, not process-wide state.
+`src/bin/backoffice.rs` calls `plugins::backoffice::serve`, which
+passes `plugins::backoffice::given()` (services that hold
+`Role::Backoffice`) to `app::serve_with`. `app::build_with` starts the
+builder with `AppBuilder::with_services`, so the value is in the
+services before any plugin registers. The `Backoffice` plugin reads it
+in `register` and builds the `Gate`; no value means `Role::App`.
+Reason: an earlier version kept the role in a `static OnceLock`, set by
+`main`, on the argument that it carried no data. But the first role set
+in a process decided for every later application in it, so a test
+could not build both binaries' applications side by side, and the rule
+that a module keeps no global (`docs/module-capabilities.md` §5.1) had
+an exception to remember. The admin and the OAuth plugins lost their
+globals for the same reason. A flag was not chosen: the role is what
+the binary is, not a setting an operator picks, and the flags are read
+from the process's arguments. The seam is generic: any second binary
+can give its plugins a value this way. `src/app.rs` belongs to the
+project and `brocanth add` does not rewrite it, so a project made
+before `build_with` and `serve_with` existed adds them by hand: copy
+them from a new project.
 
 **B3. It shares by linking.** Models, policies, the `db` pool, auth and
 sessions come from the same `register!` chain. The two processes read
@@ -513,8 +533,9 @@ otherwise it keeps `InProcess`. The application binary ignores
 `data_url`, and the backoffice binary never serves the wire, so one
 configuration file serves both. The binary's name comes from
 `CARGO_BIN_NAME`, which cargo compiles in. Reason: `contract` runs when
-the admin is built, in the admin plugin's `configure` stage, before any
-plugin's `register` and with no services to read a role from. The name of
+the admin is built, in the admin plugin's `configure` stage, and it is
+called with the data source alone: it has no services to read the role
+(B2) from. The name of
 the binary is what the binary is; it is fixed when it is compiled, and it
 is not state that one application in a process can set for another. The
 client connects on a thread of its own with a small runtime, because the

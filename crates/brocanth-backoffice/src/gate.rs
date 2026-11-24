@@ -2,9 +2,15 @@
 //! (docs/backoffice.md §7.2, B2).
 
 use std::net::SocketAddr;
-use std::sync::OnceLock;
 
-/// Which binary this process is.
+/// Which binary an application serves as.
+///
+/// A value, and not process-wide state. `src/bin/backoffice.rs` builds its
+/// application with `Role::Backoffice` in the services
+/// (`app::serve_with`), and the generated `backoffice` plugin reads it in
+/// `register` and builds the [`Gate`] from it. An application built
+/// without one is [`Role::App`]. So two applications in one process (two
+/// tests, say) can serve as two roles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
     /// The application: every path, and the backoffice's too while it is
@@ -15,26 +21,7 @@ pub enum Role {
     Backoffice,
 }
 
-static ROLE: OnceLock<Role> = OnceLock::new();
-
-/// Makes this process the backoffice binary. `src/bin/backoffice.rs` calls
-/// it once, before it builds the application.
-///
-/// Process-wide, and set once: it says which binary this is and carries no
-/// data, so the rule that a tab reads no global
-/// (`docs/module-capabilities.md` §5.1) does not apply. A second call
-/// with another role keeps the first.
-pub fn serve_as(role: Role) {
-    let _ = ROLE.set(role);
-}
-
-/// Which binary this process is: [`Role::App`] until [`serve_as`] said
-/// else.
-pub fn role() -> Role {
-    ROLE.get().copied().unwrap_or_default()
-}
-
-/// Which paths this process answers.
+/// Which paths an application answers.
 ///
 /// The backoffice binary answers its mount and the paths under it. The
 /// application answers every path, except the mount when the backoffice
@@ -47,7 +34,7 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// The gate of a process in `role`, with the backoffice at `mount`.
+    /// The gate of an application in `role`, with the backoffice at `mount`.
     /// `embedded` is whether the application serves the mount too.
     pub fn new(role: Role, mount: &str, embedded: bool) -> Gate {
         Gate {
@@ -57,7 +44,7 @@ impl Gate {
         }
     }
 
-    /// Whether this process answers `path`.
+    /// Whether this application answers `path`.
     pub fn admits(&self, path: &str) -> bool {
         match self.role {
             Role::Backoffice => self.under_mount(path),

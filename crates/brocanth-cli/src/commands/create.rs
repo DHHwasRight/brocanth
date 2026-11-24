@@ -2302,6 +2302,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          use std::sync::Arc;\n\
          use std::time::{{Duration, Instant}};\n\
          \n\
+         use brocanth::plugin_api::Services;\n\
          use brocanth::plugin_app::AppBuilder;\n\
          use brocanth::plugin_hooks::{{self as hooks, Begin, RequestState}};\n\
          use brocanth::plugin_routes::BoxFuture;\n\
@@ -2348,12 +2349,27 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;\n\
          \n\
          /// Builds it. The only place that decides what this binary is.\n\
+         ///\n\
+         /// [`build_with`], with nothing given. Tests and commands call it;\n\
+         /// `serve` does not, so a binary with neither leaves it unused.\n\
+         #[allow(dead_code)]\n\
          pub fn build() -> Result<App, String> {{\n\
+        \x20   build_with(Services::new())\n\
+         }}\n\
+         \n\
+         /// Builds it with `given` in its services before any plugin registers.\n\
+         ///\n\
+         /// What a binary tells its plugins about itself, as a value and not as\n\
+         /// process-wide state: a second binary of this application (a module's\n\
+         /// `src/bin/`) gives what tells it apart, and a plugin reads it in\n\
+         /// `register`. Two applications in one process can be given different\n\
+         /// values.\n\
+         pub fn build_with(given: Services) -> Result<App, String> {{\n\
         \x20   // 1. The application, and every plugin it contains. The chain is in\n\
         \x20   //    `src/plugins/mod.rs`, one line per plugin and each one a line a\n\
         \x20   //    reader can delete. It is there rather than here because the\n\
         \x20   //    generator rewrites it whenever the module list changes.\n\
-        \x20   let app = plugins::register!(AppBuilder::new())\n\
+        \x20   let app = plugins::register!(AppBuilder::with_services(given))\n\
         \x20       .setup(|setup| {{\n\
         \x20           // A plugin *offers* middleware and cannot mount it: a\n\
         \x20           // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the\n\
@@ -2585,6 +2601,11 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
+    serve_with(addr, Services::new())
+}
+
+/// [`serve`], with the application built by [`build_with`] from `given`.
+pub fn serve_with(addr: &str, given: Services) -> Result<(), String> {
     let grace = plugins::shutdown_grace()?;
     // Before the socket, so a signal during startup stops the server
     // through the drain and does not kill the process.
@@ -2601,7 +2622,7 @@ pub fn serve(addr: &str) -> Result<(), String> {
     // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
-        build()?
+        build_with(given)?
     };
     let names = app.plugins.join(", ");
     plugins::say!(info, "plugins: [{names}]"; plugins = %names);

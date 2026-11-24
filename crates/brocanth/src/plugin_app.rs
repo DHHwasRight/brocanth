@@ -432,6 +432,22 @@ impl AppBuilder<Base, NoHooks> {
             _families: PhantomData,
         }
     }
+
+    /// Starts an application whose services already hold `given`, before
+    /// any plugin is registered.
+    ///
+    /// This is how a binary tells its plugins something about itself that
+    /// is not configuration: the backoffice binary gives the role it
+    /// serves, and a plugin reads it in `register` from
+    /// [`Lifecycle::services`](crate::plugin_api::Lifecycle::services). The
+    /// value belongs to this application, so two applications in one
+    /// process can be given different values.
+    pub fn with_services(given: Services) -> Self {
+        Self {
+            services: given,
+            ..Self::new()
+        }
+    }
 }
 
 impl Default for AppBuilder<Base, NoHooks> {
@@ -2080,5 +2096,53 @@ mod tests {
             .unwrap();
         let cx = app.context_for(&asking("fr"), &RequestState::new());
         assert!(cx.get::<RequestId, _>().0.ends_with("-1"));
+    }
+
+    // -- a value the binary gives, per application ---------------------------
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Which {
+        First,
+        Second,
+    }
+
+    /// Reads the given value in `register` and keeps it.
+    struct Reads(Option<Which>);
+
+    impl Plugin for Reads {
+        type Config = ();
+        type Provides = NoContext;
+        const NAME: &'static str = "reads";
+
+        fn new((): ()) -> Self {
+            Self(None)
+        }
+
+        fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+            self.0 = lc.services().get::<Which>().copied();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn each_application_reads_the_services_it_was_given() {
+        let built = |which: Option<Which>| {
+            let mut given = Services::new();
+            if let Some(which) = which {
+                given.insert(which);
+            }
+            AppBuilder::with_services(given)
+                .plugin(Reads::new(()))
+                .build()
+                .expect("builds")
+        };
+        // Two applications in one process, built in turn: each plugin
+        // reads its own application's value.
+        let first = built(Some(Which::First));
+        let second = built(Some(Which::Second));
+        let none = built(None);
+        assert_eq!(first.plugin::<Reads>().unwrap().0, Some(Which::First));
+        assert_eq!(second.plugin::<Reads>().unwrap().0, Some(Which::Second));
+        assert_eq!(none.plugin::<Reads>().unwrap().0, None);
     }
 }

@@ -116,6 +116,31 @@ fn the_admin_goes_on_the_contract_through_a_generated_file() {
     assert!(!file(&files, "src/plugins/admin/mod.rs").contains("data_through"));
 }
 
+/// Which binary an application serves as is a value the binary builds it
+/// with, not process-wide state: the plugin reads it from the services,
+/// and neither generated file keeps a global.
+#[test]
+fn the_role_is_a_value_the_binary_builds_with() {
+    let files = generate(&["config", "admin", "backoffice"]);
+    let plugin = file(&files, "src/plugins/backoffice/mod.rs");
+    let bin = file(&files, "src/bin/backoffice.rs");
+    for text in [plugin, bin] {
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.trim_start().starts_with("static ")
+                    || line.contains("thread_local!")),
+            "{text}"
+        );
+    }
+    assert!(
+        plugin.contains("crate::app::serve_with(&addr.to_string(), given())"),
+        "{plugin}"
+    );
+    assert!(plugin.contains("lc.services().get::<Role>()"), "{plugin}");
+    assert!(!plugin.contains("brocanth_backoffice::role()"), "{plugin}");
+}
+
 /// Without the admin there is nothing to serve.
 #[test]
 fn the_module_refuses_a_project_without_the_admin() {

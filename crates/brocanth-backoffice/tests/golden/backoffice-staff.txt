@@ -175,6 +175,7 @@ fn run() -> brocanth_command::anyhow::Result<()> {
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use brocanth::plugin_api::Services;
 use brocanth::plugin_app::AppBuilder;
 use brocanth::plugin_hooks::{self as hooks, Begin, RequestState};
 use brocanth::plugin_routes::BoxFuture;
@@ -217,12 +218,27 @@ pub struct App {
 type Core = brocanth::plugin_app::App<plugins::Installed, plugins::Hooks>;
 
 /// Builds it. The only place that decides what this binary is.
+///
+/// [`build_with`], with nothing given. Tests and commands call it;
+/// `serve` does not, so a binary with neither leaves it unused.
+#[allow(dead_code)]
 pub fn build() -> Result<App, String> {
+    build_with(Services::new())
+}
+
+/// Builds it with `given` in its services before any plugin registers.
+///
+/// What a binary tells its plugins about itself, as a value and not as
+/// process-wide state: a second binary of this application (a module's
+/// `src/bin/`) gives what tells it apart, and a plugin reads it in
+/// `register`. Two applications in one process can be given different
+/// values.
+pub fn build_with(given: Services) -> Result<App, String> {
     // 1. The application, and every plugin it contains. The chain is in
     //    `src/plugins/mod.rs`, one line per plugin and each one a line a
     //    reader can delete. It is there rather than here because the
     //    generator rewrites it whenever the module list changes.
-    let app = plugins::register!(AppBuilder::new())
+    let app = plugins::register!(AppBuilder::with_services(given))
         .setup(|setup| {
             // A plugin *offers* middleware and cannot mount it: a
             // `MiddlewareCatalog` has no `mount`. Mounting takes a pattern, the
@@ -322,6 +338,11 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
 /// the runtime is built here rather than wrapped around `main`: a command
 /// that never serves should not start a reactor to run.
 pub fn serve(addr: &str) -> Result<(), String> {
+    serve_with(addr, Services::new())
+}
+
+/// [`serve`], with the application built by [`build_with`] from `given`.
+pub fn serve_with(addr: &str, given: Services) -> Result<(), String> {
     let grace = plugins::shutdown_grace()?;
     // Before the socket, so a signal during startup stops the server
     // through the drain and does not kill the process.
@@ -338,7 +359,7 @@ pub fn serve(addr: &str) -> Result<(), String> {
     // leave it with no runtime to spawn on.
     let app = {
         let _guard = runtime.enter();
-        build()?
+        build_with(given)?
     };
     let names = app.plugins.join(", ");
     plugins::say!(info, "plugins: [{names}]"; plugins = %names);
@@ -5354,7 +5375,7 @@ fn sealing_totp(services: Services, var: &str) -> Result<Services, PluginError> 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::NoContext;
 use brocanth_admin::policy::Principal;
 use brocanth_admin::SharedData;
@@ -5462,8 +5483,11 @@ impl Plugin for Backoffice {
             settings.tx_max,
         )
         .map_err(PluginError::new)?;
+        // The role the binary built this application with: see [`given`].
+        // No role means the application binary.
+        let role = lc.services().get::<Role>().copied().unwrap_or_default();
         let gate = Gate::new(
-            brocanth_backoffice::role(),
+            role,
             crate::modules::admin::MODULE.mount_at,
             settings.embedded,
         );
@@ -5554,10 +5578,19 @@ fn claim(principal: &Principal<'_>) -> Claim {
 /// calls it; the application binary does not.
 #[allow(dead_code)]
 pub fn serve() -> Result<(), String> {
-    brocanth_backoffice::serve_as(Role::Backoffice);
     let settings = crate::plugins::backoffice_settings(&crate::plugins::layers()?)?;
     let addr = brocanth_backoffice::check_addr(&settings.addr)?;
-    crate::app::serve(&addr.to_string())
+    crate::app::serve_with(&addr.to_string(), given())
+}
+
+/// What [`serve`] builds the application with: [`Role::Backoffice`], which
+/// [`Backoffice`] reads in `register`. A value on this application and not
+/// process-wide state, so a test builds both roles in one process.
+#[allow(dead_code)]
+pub fn given() -> Services {
+    let mut given = Services::new();
+    given.insert(Role::Backoffice);
+    given
 }
 
 /// A server wrap: a path this binary does not serve answers 404. With
@@ -5627,6 +5660,38 @@ mod tests {
         // the gate's 404. A locale module may redirect it.
         let home = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, "/")).await;
         assert_ne!(home.status, 404);
+    }
+
+    /// Two applications in one process: one built as the backoffice binary
+    /// builds it, one as the application binary does. Each keeps its own
+    /// role, so no process-wide state decides it.
+    #[tokio::test]
+    async fn two_applications_in_one_process_serve_their_own_paths() {
+        let backoffice = Arc::new(crate::app::build_with(super::given()).expect("it builds"));
+        let app = Arc::new(crate::app::build().expect("the application builds"));
+        let at = crate::modules::admin::MODULE.mount_at;
+
+        assert_eq!(served(&backoffice, "/").await, 404);
+        assert_eq!(served(&backoffice, at).await, 403);
+        // Built second, and still the application: whatever the page
+        // answers, it is not the gate's 404.
+        assert_ne!(served(&app, "/").await, 404);
+        assert_eq!(served(&app, at).await, 403);
+    }
+
+    /// The status `app` answers a GET of `path` with, through the server
+    /// wraps, as `serve` answers it.
+    async fn served(app: &Arc<crate::app::App>, path: &str) -> u16 {
+        let handler = crate::plugins::wrap(app, {
+            let app = Arc::clone(app);
+            move |request| {
+                let app = Arc::clone(&app);
+                async move { crate::app::handle(&app, request).await }
+            }
+        });
+        handler(brocanth_server::Request::new(Verb::Get, path))
+            .await
+            .status
     }
 
     /// The backoffice binary answers the admin's mount and nothing else;
@@ -6926,6 +6991,12 @@ serves the admin too while `[backoffice] embedded` is true; set it false
 when the backoffice runs as its own service. Both binaries take the same
 flags and the same config file.
 
+Which binary an application serves as is a value, not a global: the
+second binary builds it with `plugins::backoffice::given()`
+(`app::serve_with`), and the `backoffice` plugin reads the `Role` from
+the services in `register`. A test builds either with
+`app::build_with`.
+
 The admin reads its rows through the tab data contract
 (`brocanth_backoffice::TabData`), so a call carries the staff member's
 `Claim`. An identity function of the admin's data source reads the
@@ -7037,7 +7108,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b58d9bb213f59b75 -->
+<!-- brocanth-digest: 91cbe3a86e92dd20 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

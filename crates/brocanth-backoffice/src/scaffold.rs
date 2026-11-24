@@ -14,7 +14,10 @@
 //!   wire when `wire` is on, and `contract`, which puts the admin's data
 //!   source on the tab data contract: in this process, or over the wire
 //!   in the backoffice binary when `data_url` is set
-//!   (docs/backoffice.md §7.5).
+//!   (docs/backoffice.md §7.5). The second binary builds its application
+//!   with `Role::Backoffice` in the services (`app::serve_with`), and the
+//!   plugin reads the role from there: no process-wide state says which
+//!   binary this is.
 //! * One line in `plugins::admin_panels`, a generated file:
 //!   `config.data_through(crate::plugins::backoffice::contract)`. So an
 //!   admin file written before this module needs no edit.
@@ -161,6 +164,12 @@ const AGENTS: &str = "\n\
     serves the admin too while `[backoffice] embedded` is true; set it false\n\
     when the backoffice runs as its own service. Both binaries take the same\n\
     flags and the same config file.\n\
+    \n\
+    Which binary an application serves as is a value, not a global: the\n\
+    second binary builds it with `plugins::backoffice::given()`\n\
+    (`app::serve_with`), and the `backoffice` plugin reads the `Role` from\n\
+    the services in `register`. A test builds either with\n\
+    `app::build_with`.\n\
     \n\
     The admin reads its rows through the tab data contract\n\
     (`brocanth_backoffice::TabData`), so a call carries the staff member's\n\
@@ -321,7 +330,7 @@ const PLUGIN_RS: &str = r#"//! The backoffice as a service of its own (docs/back
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::NoContext;
 use brocanth_admin::policy::Principal;
 use brocanth_admin::SharedData;
@@ -407,8 +416,11 @@ impl Plugin for Backoffice {
             settings.tx_max,
         )
         .map_err(PluginError::new)?;
+        // The role the binary built this application with: see [`given`].
+        // No role means the application binary.
+        let role = lc.services().get::<Role>().copied().unwrap_or_default();
         let gate = Gate::new(
-            brocanth_backoffice::role(),
+            role,
             crate::modules::admin::MODULE.mount_at,
             settings.embedded,
         );
@@ -467,10 +479,19 @@ fn wire_client() -> Option<WireClient> {
 /// calls it; the application binary does not.
 #[allow(dead_code)]
 pub fn serve() -> Result<(), String> {
-    brocanth_backoffice::serve_as(Role::Backoffice);
     let settings = crate::plugins::backoffice_settings(&crate::plugins::layers()?)?;
     let addr = brocanth_backoffice::check_addr(&settings.addr)?;
-    crate::app::serve(&addr.to_string())
+    crate::app::serve_with(&addr.to_string(), given())
+}
+
+/// What [`serve`] builds the application with: [`Role::Backoffice`], which
+/// [`Backoffice`] reads in `register`. A value on this application and not
+/// process-wide state, so a test builds both roles in one process.
+#[allow(dead_code)]
+pub fn given() -> Services {
+    let mut given = Services::new();
+    given.insert(Role::Backoffice);
+    given
 }
 
 /// A server wrap: a path this binary does not serve answers 404. With
@@ -540,6 +561,38 @@ mod tests {
         // the gate's 404. A locale module may redirect it.
         let home = crate::app::handle(&app, brocanth_server::Request::new(Verb::Get, "/")).await;
         assert_ne!(home.status, 404);
+    }
+
+    /// Two applications in one process: one built as the backoffice binary
+    /// builds it, one as the application binary does. Each keeps its own
+    /// role, so no process-wide state decides it.
+    #[tokio::test]
+    async fn two_applications_in_one_process_serve_their_own_paths() {
+        let backoffice = Arc::new(crate::app::build_with(super::given()).expect("it builds"));
+        let app = Arc::new(crate::app::build().expect("the application builds"));
+        let at = crate::modules::admin::MODULE.mount_at;
+
+        assert_eq!(served(&backoffice, "/").await, 404);
+        assert_eq!(served(&backoffice, at).await, 403);
+        // Built second, and still the application: whatever the page
+        // answers, it is not the gate's 404.
+        assert_ne!(served(&app, "/").await, 404);
+        assert_eq!(served(&app, at).await, 403);
+    }
+
+    /// The status `app` answers a GET of `path` with, through the server
+    /// wraps, as `serve` answers it.
+    async fn served(app: &Arc<crate::app::App>, path: &str) -> u16 {
+        let handler = crate::plugins::wrap(app, {
+            let app = Arc::clone(app);
+            move |request| {
+                let app = Arc::clone(&app);
+                async move { crate::app::handle(&app, request).await }
+            }
+        });
+        handler(brocanth_server::Request::new(Verb::Get, path))
+            .await
+            .status
     }
 
     /// The backoffice binary answers the admin's mount and nothing else;
