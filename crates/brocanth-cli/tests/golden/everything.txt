@@ -26,6 +26,7 @@ brocanth-flags = { git = "https://github.com/DHHwasRight/brocanth.git", features
 brocanth-audit = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the change history, its model hook and its Postgres store
 brocanth-mail = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["smtp", "serde", "postgres"] }  # the `Outbox` in src/plugins/mail, and SMTP with rustls
 brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["reqwest-client", "policy", "postgres", "admin"] }  # the provider requests: a token exchange and a profile read
+qrcode = { version = "0.14", features = ["svg"], default-features = false }  # the QR code of a new TOTP key, as SVG; no image crate
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["macro"] }
 brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["agreement"] }  # roles, grants and policies in Rust, diffed into migrations
 brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["routes", "variants", "postgres"] }
@@ -1915,6 +1916,12 @@ mod tests {
             "/account/code".to_string(),
             "/account/elevate".to_string(),
             "/account/forgot".to_string(),
+            "/account/mfa".to_string(),
+            "/account/mfa/off".to_string(),
+            "/account/mfa/recovery".to_string(),
+            "/account/mfa/setup".to_string(),
+            "/account/otp".to_string(),
+            "/account/otp/code".to_string(),
             "/account/reset/{token}".to_string(),
             "/account/signin".to_string(),
             "/account/signout".to_string(),
@@ -1922,6 +1929,8 @@ mod tests {
             "/account/totp".to_string(),
             "/account/verify/{token}".to_string(),
             "/feed.xml".to_string(),
+            "/impersonate".to_string(),
+            "/impersonate/stop".to_string(),
             "/openapi.json".to_string(),
             "/openapi.yaml".to_string(),
             "/posts".to_string(),
@@ -2052,7 +2061,9 @@ pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod auth_lockout;
+pub mod auth_mfa;
 pub mod auth_oauth;
+pub mod auth_otp;
 pub mod auth_screens;
 pub mod backoffice;
 pub mod cache;
@@ -2063,6 +2074,7 @@ pub mod errors;
 pub mod feed;
 pub mod flags;
 pub mod i18n;
+pub mod impersonate;
 pub mod jobs;
 pub mod mail;
 pub mod meta;
@@ -2540,6 +2552,32 @@ macro_rules! register {
                 crate::plugins::auth_screens_settings(&layers)?,
             ),
         );
+        let builder = builder.plugin(
+            <crate::plugins::auth_otp::AuthOtp as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::auth_otp_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin_hooking(
+            <crate::plugins::auth_mfa::AuthMfa as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::auth_mfa_settings(&layers)?,
+            ),
+        );
+
+        // -- impersonate ---------------------------------------------------
+        //
+        // Notes an impersonated session on each request, and puts a banner
+        // with a stop button on every HTML page it answers.
+        //
+        let builder = builder.plugin_hooking(
+            <crate::plugins::impersonate::Impersonate as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::impersonate::Settings::default(),
+            ),
+        );
+        let builder = builder.hooks_off_from(
+            "impersonate",
+            "src/modules/impersonate.rs",
+            crate::modules::impersonate::MODULE.hooks.off(),
+        );
         builder
     }};
 }
@@ -2598,7 +2636,10 @@ type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, Wi
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithStorageRoutes>;
 type WithFeed = After<crate::plugins::feed::Feed, WithOauthClient>;
 type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFeed>;
-pub type Installed = WithAuthScreens;
+type WithAuthOtp = After<crate::plugins::auth_otp::AuthOtp, WithAuthScreens>;
+type WithAuthMfa = After<crate::plugins::auth_mfa::AuthMfa, WithAuthOtp>;
+type WithImpersonate = After<crate::plugins::impersonate::Impersonate, WithAuthMfa>;
+pub type Installed = WithImpersonate;
 
 type HookedCsrf = Both<<brocanth_middleware::Csrf as HookSource>::Families, NoHooks>;
 type HookedSecurityHeaders =
@@ -2622,6 +2663,10 @@ type HookedStorageRoutes = Both<
     <crate::plugins::storage_routes::StorageRoutes as HookSource>::Families,
     HookedAuditPlugin,
 >;
+type HookedAuthMfa =
+    Both<<crate::plugins::auth_mfa::AuthMfa as HookSource>::Families, HookedStorageRoutes>;
+type HookedImpersonate =
+    Both<<crate::plugins::impersonate::Impersonate as HookSource>::Families, HookedAuthMfa>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -2629,7 +2674,7 @@ type HookedStorageRoutes = Both<
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = HookedStorageRoutes;
+pub type Hooks = HookedImpersonate;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -2840,6 +2885,14 @@ pub fn admin_panels(
             Some(std::sync::Arc::clone(auth.store()))
         });
         config = config.panel(brocanth_auth::admin::RolesPanel::late(store));
+    }
+    // Impersonate: every account, with a form that posts to /impersonate.
+    if crate::modules::impersonate::MODULE.integrate.admin {
+        let store = late.cell(|ctx| {
+            let auth = ctx.provided::<crate::plugins::auth::Services, _>()?;
+            Some(std::sync::Arc::clone(auth.store()))
+        });
+        config = config.panel(brocanth_auth::admin::ImpersonatePanel::late(store));
     }
     config
 }
@@ -4812,6 +4865,56 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "auth_otp.digits",
+        help: "Digits in a code, 6 to 10.",
+        flag: true,
+        file: "src/modules/auth_otp.rs",
+        flags: crate::modules::auth_otp::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "auth_otp.ttl_secs",
+        help: "How long a code works, in seconds, 60 to 3600.",
+        flag: true,
+        file: "src/modules/auth_otp.rs",
+        flags: crate::modules::auth_otp::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "auth_otp.max_attempts",
+        help: "Wrong guesses a code survives, 1 to 10.",
+        flag: true,
+        file: "src/modules/auth_otp.rs",
+        flags: crate::modules::auth_otp::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "auth_mfa.require",
+        help: "Who must give a second factor: enrolled, staff or everyone.",
+        flag: true,
+        file: "src/modules/auth_mfa.rs",
+        flags: crate::modules::auth_mfa::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "auth_mfa.alerts",
+        help: "Mail the owner when a sign-in comes from a new network.",
+        flag: true,
+        file: "src/modules/auth_mfa.rs",
+        flags: crate::modules::auth_mfa::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -4980,6 +5083,12 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::auth_screens::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::auth_otp::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::auth_mfa::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::superuser::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -5097,6 +5206,12 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     }
     for (key, value) in crate::modules::auth_screens::MODULE.set {
         code.push((key.path(), *value, "src/modules/auth_screens.rs"));
+    }
+    for (key, value) in crate::modules::auth_otp::MODULE.set {
+        code.push((key.path(), *value, "src/modules/auth_otp.rs"));
+    }
+    for (key, value) in crate::modules::auth_mfa::MODULE.set {
+        code.push((key.path(), *value, "src/modules/auth_mfa.rs"));
     }
     for (key, value) in crate::modules::superuser::MODULE.set {
         code.push((key.path(), *value, "src/modules/superuser.rs"));
@@ -5446,6 +5561,8 @@ fn defaults() -> Vec<(&'static str, String)> {
     let oauth_client = crate::plugins::oauth_client::Settings::default();
     let feed = crate::plugins::feed::Settings::default();
     let auth_screens = crate::plugins::auth_screens::Settings::default();
+    let auth_otp = crate::plugins::auth_otp::Settings::default();
+    let auth_mfa = crate::plugins::auth_mfa::Settings::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         (
@@ -5879,6 +5996,14 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", auth_screens.base_url),
         ),
         ("auth_screens.issuer", format!("{:?}", auth_screens.issuer)),
+        ("auth_otp.digits", format!("{:?}", auth_otp.digits)),
+        ("auth_otp.ttl_secs", format!("{:?}", auth_otp.ttl_secs)),
+        (
+            "auth_otp.max_attempts",
+            format!("{:?}", auth_otp.max_attempts),
+        ),
+        ("auth_mfa.require", format!("{:?}", auth_mfa.require)),
+        ("auth_mfa.alerts", format!("{:?}", auth_mfa.alerts)),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -6105,6 +6230,16 @@ pub fn auth_screens_settings(
     layers.section("auth_screens").map_err(|e| e.to_string())
 }
 
+/// `[auth_otp]`, from every settings layer.
+pub fn auth_otp_settings(layers: &Layers) -> Result<crate::plugins::auth_otp::Settings, String> {
+    layers.section("auth_otp").map_err(|e| e.to_string())
+}
+
+/// `[auth_mfa]`, from every settings layer.
+pub fn auth_mfa_settings(layers: &Layers) -> Result<crate::plugins::auth_mfa::Settings, String> {
+    layers.section("auth_mfa").map_err(|e| e.to_string())
+}
+
 /// Every settings layer on its own, lowest first, then the merged values.
 /// A secret is masked in every layer; its pointer flag shows where it came
 /// from.
@@ -6314,7 +6449,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: e7186462b6698e44
+// brocanth-digest: b9c3db00a7281654
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -7242,6 +7377,94 @@ pub mod auth_lockout {
     }
 }
 
+/// The shape of src/modules/auth_otp.rs.
+pub mod auth_otp {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[auth_otp]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Digits,
+        TtlSecs,
+        MaxAttempts,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Digits => "auth_otp.digits",
+                Key::TtlSecs => "auth_otp.ttl_secs",
+                Key::MaxAttempts => "auth_otp.max_attempts",
+            }
+        }
+    }
+
+    /// What src/modules/auth_otp.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
+/// The shape of src/modules/auth_mfa.rs.
+pub mod auth_mfa {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[auth_mfa]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Require,
+        Alerts,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Require => "auth_mfa.require",
+                Key::Alerts => "auth_mfa.alerts",
+            }
+        }
+    }
+
+    /// What src/modules/auth_mfa.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/superuser.rs.
 pub mod superuser {
     pub use super::{Flag, Flags};
@@ -7325,6 +7548,60 @@ pub mod roles {
     impl Module {
         /// The value of each field the file does not name.
         pub const DEFAULT: Self = Self {
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/impersonate.rs.
+pub mod impersonate {
+    /// The hooks of `impersonate` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `impersonate.banner`: put the impersonation banner, with its stop
+        /// button, after <body> on every HTML page.
+        pub banner: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { banner: true };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.banner {
+                off.push("banner");
+            }
+            off
+        }
+    }
+
+    /// The code `impersonate` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: an Impersonate tab that lists the accounts, each with a
+        /// form that starts acting as it.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/impersonate.rs holds.
+    pub struct Module {
+        /// The hooks that run.
+        pub hooks: Hooks,
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            hooks: Hooks::DEFAULT,
             integrate: Integrate::DEFAULT,
         };
     }
@@ -8992,7 +9269,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: f58cc6c0f5f2265a
+// brocanth-digest: 8b9b38d19df33c95
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -9017,7 +9294,9 @@ pub mod analytics;
 pub mod audit;
 pub mod auth;
 pub mod auth_lockout;
+pub mod auth_mfa;
 pub mod auth_oauth;
+pub mod auth_otp;
 pub mod auth_screens;
 pub mod backoffice;
 pub mod cache;
@@ -9040,6 +9319,7 @@ pub mod flash;
 pub mod gtag;
 pub mod i18n;
 pub mod i18n_routing;
+pub mod impersonate;
 pub mod input;
 pub mod jobs;
 pub mod jobs_memory;
@@ -9111,8 +9391,11 @@ pub const ALL: &[&str] = &[
     "auth-oauth",
     "auth-screens",
     "auth-lockout",
+    "auth-otp",
+    "auth-mfa",
     "superuser",
     "roles",
+    "impersonate",
     "policy",
     "rls",
     "storage",
@@ -9168,7 +9451,7 @@ pub const ALL: &[&str] = &[
     "ci-github",
 ];
 
-// brocanth-digest: 9b6252993d774318
+// brocanth-digest: 0fdfb6ea9b27d150
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -9790,6 +10073,80 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/auth_otp.rs =====
+//! `auth-otp`: sign in with an eight-digit code mailed to the address, under
+//! /account/otp.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [auth_otp]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::auth_otp::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [auth_otp]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Digits, Flag::As("digits")),
+    //   (Key::Digits, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Digits, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
+===== src/modules/auth_mfa.rs =====
+//! `auth-mfa`: who must use a second factor, forced TOTP set-up, recovery
+//! codes, a QR code and login alerts.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [auth_mfa]
+//! in the config file, an environment variable, or a flag.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `auth_mfa.client`: write the client address to the request state, for
+//!   login alerts.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::auth_mfa::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [auth_mfa]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Require, Flag::As("require")),
+    //   (Key::Require, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Require, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
 ===== src/modules/superuser.rs =====
 //! `superuser`: operator accounts that pass every admin check, and a
 //! createsuperuser command.
@@ -9850,6 +10207,39 @@ pub const MODULE: Module = Module {
         // A Roles tab where a superuser defines roles and gives them to
         // accounts, and the owner of a tab gives read or edit on it. Without the
         // `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/impersonate.rs =====
+//! `impersonate`: staff act as a customer, with a banner on every page, the
+//! operator on the session and an audit entry.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! No field turns this hook off, because the module needs it:
+//! - `impersonate.read`: read the session once, and note an impersonation for
+//!   the banner.
+
+use crate::plugins::shape::impersonate::{Hooks, Integrate, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    hooks: Hooks {
+        // `impersonate.banner`: put the impersonation banner, with its stop
+        // button, after <body> on every HTML page.
+        banner: true,
+        ..Hooks::DEFAULT
+    },
+
+    integrate: Integrate {
+        // An Impersonate tab that lists the accounts, each with a form that
+        // starts acting as it. Without the `admin` module this does nothing.
         admin: true,
         ..Integrate::DEFAULT
     },
@@ -11872,6 +12262,25 @@ limit = 20
 base_url = "http://localhost:3000"
 # The name an authenticator app shows beside the code.
 issuer = "My Blog"
+
+[auth_otp]
+# Digits in a code, 6 to 10.
+# Each digit removed divides a guesser's work by ten. Eight digits and five
+# guesses is one chance in twenty million per mail.
+digits = 8
+# How long a code works, in seconds, 60 to 3600.
+ttl_secs = 600
+# Wrong guesses a code survives, 1 to 10.
+max_attempts = 5
+
+[auth_mfa]
+# Who must give a second factor: enrolled, staff or everyone.
+# enrolled: the accounts that turned one on. staff: those, and every
+# superuser or role holder. everyone: every account; one with no factor
+# sets TOTP up before its first session.
+require = "enrolled"
+# Mail the owner when a sign-in comes from a new network.
+alerts = true
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -13533,12 +13942,12 @@ fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
 }
 ===== src/pages/account/elevate.rs =====
 //! `/account/elevate` -- type the password again before a change to the
-//! way this account signs in.
+//! way this account signs in, or before staff act as somebody.
 //!
 //! A right password elevates the session for a few minutes
-//! (`FactorPolicy::elevation_ttl`), then the browser goes back to
-//! `/account/totp`. An account with a second factor cannot elevate with the
-//! password alone.
+//! (`FactorPolicy::elevation_ttl`). An account with a second factor gives
+//! its TOTP code too: a password alone does not elevate it. Then the
+//! browser goes to `then`, a path on this site, or to `/account/totp`.
 
 use brocanth_auth::{AccountHolder, AuthError, FactorPolicy};
 use brocanth_middleware::Level;
@@ -13550,7 +13959,21 @@ use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
 pub struct Password {
     #[check(zod::Text::new().min(1).max(1024))]
     password: String,
+    #[text(max = 16)]
+    code: Option<String>,
+    #[text(max = 512)]
+    then: Option<String>,
 }
+
+/// Where to go once elevated, from the query string.
+#[derive(zod::Entry)]
+pub struct Then {
+    #[text(max = 512)]
+    then: Option<String>,
+}
+
+/// Where a person goes when the form names no page.
+const BACK: &str = "/account/totp";
 
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let auth = screens::services(ctx)?;
@@ -13558,7 +13981,11 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
         screens::flash(ctx, Level::Info, "Sign in first.");
         return Ok(see_other("/account/signin"));
     }
-    again(ctx, "", 200)
+    let then = ctx.query_as::<Then>().ok().and_then(|q| q.then);
+    let then = screens::local_path(then.as_deref())
+        .unwrap_or(BACK)
+        .to_string();
+    again(ctx, &then, "", 200)
 }
 
 pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -13569,32 +13996,63 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     };
     AccountHolder::of(&session)?;
     let Some(form) = screens::form::<Password>(ctx)? else {
-        return again(ctx, "Enter your password.", 422);
+        return again(ctx, BACK, "Enter your password.", 422);
     };
+    // Only a path on this site: a `then` that names another site is how a
+    // form becomes an open redirect.
+    let then = screens::local_path(form.then.as_deref())
+        .unwrap_or(BACK)
+        .to_string();
     let email = screens::email_of(&auth, &session).await?;
-    let proof = match auth.accounts().login(&email, &form.password).await {
+    let mut proof = match auth.accounts().login(&email, &form.password).await {
         Ok(signed) => signed.into_proof(),
-        Err(AuthError::InvalidCredentials) => return again(ctx, "That password is wrong.", 422),
+        Err(AuthError::InvalidCredentials) => {
+            return again(ctx, &then, "That password is wrong.", 422)
+        }
         Err(other) => return Err(other.into()),
     };
     if proof.account() != &session.account {
-        return again(ctx, "That password is wrong.", 422);
+        return again(ctx, &then, "That password is wrong.", 422);
     }
-    let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let mfa = auth.mfa()?;
+    let code: String = form
+        .code
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if !code.is_empty() {
+        match mfa.verify_totp(&session.account, &code).await {
+            Ok(second) => proof = proof.and(second)?,
+            Err(AuthError::InvalidCredentials) => {
+                return again(ctx, &then, "That code is wrong or already used.", 422)
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+    let enrolled = mfa.second_factors(&proof).await?;
     let Some(elevation) = FactorPolicy::recommended().for_elevation(&enrolled, proof) else {
         return again(
             ctx,
-            "This account has a second factor, so a password alone cannot confirm the change.",
+            &then,
+            "This account has two-step sign-in: enter the code your app shows too.",
             403,
         );
     };
     let started = auth.sessions().elevate(&session.id, elevation).await?;
-    Ok(see_other("/account/totp").with_header("set-cookie", started.cookie.to_string()))
+    Ok(see_other(&then).with_header("set-cookie", started.cookie.to_string()))
 }
 
-fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+fn again(ctx: &mut Ctx, then: &str, error: &str, status: u16) -> Result<Response, Error> {
     let csrf = csrf_field(ctx);
-    let mut page = html!(ctx, views::account::screens::Elevate { csrf: &csrf, error })?;
+    let mut page = html!(
+        ctx,
+        views::account::screens::Elevate {
+            csrf: &csrf,
+            then,
+            error
+        }
+    )?;
     page.status = status;
     Ok(page)
 }
@@ -13639,6 +14097,456 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
         "If that address has an account, a link to reset its password is on its way.",
     );
     Ok(see_other("/account/signin"))
+}
+===== src/pages/account/mfa/index.rs =====
+//! `/account/mfa` -- the second factors of this account: whether TOTP is
+//! on, the recovery codes left, and the buttons that change them.
+
+use brocanth_auth::{AccountHolder, FactorKind};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_mfa;
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    show(ctx, &[]).await
+}
+
+/// The page, with `codes` shown once when the page just made them.
+pub async fn show(ctx: &mut Ctx, codes: &[String]) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    // An impersonated session reads no factor of the account it acts for.
+    let holder = AccountHolder::of(&session)?;
+    let mfa = auth.mfa()?;
+    let on = mfa.enrolled(&holder).await?.contains(FactorKind::Totp);
+    let remaining = mfa.recovery_codes_remaining(&holder).await?.to_string();
+    let required = auth_mfa::required(ctx, &auth, &session.account).await?;
+    let csrf = csrf_field(ctx);
+    html!(
+        ctx,
+        views::account::mfa::screens::Factors {
+            csrf: &csrf,
+            on,
+            remaining: &remaining,
+            required,
+            codes,
+        }
+    )
+}
+===== src/pages/account/mfa/off.rs =====
+//! `/account/mfa/off` -- TOTP off, and the recovery codes with it. Refused
+//! for an account the policy holds to a second factor. Asks for a fresh
+//! elevation.
+
+use brocanth_auth::{AccountHolder, AuthError};
+use brocanth_middleware::Level;
+
+use crate::pages::{Ctx, Error, Response};
+use crate::plugins::auth_mfa;
+use crate::plugins::auth_screens::{self as screens, see_other};
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::of(&session)?;
+    if auth_mfa::required(ctx, &auth, &session.account).await? {
+        screens::flash(
+            ctx,
+            Level::Error,
+            "This account must use two-step sign-in, so it stays on.",
+        );
+        return Ok(see_other("/account/mfa"));
+    }
+    match auth.mfa()?.disable_totp(&holder).await {
+        Ok(()) => {
+            screens::flash(ctx, Level::Success, "Two-step sign-in is off.");
+            Ok(see_other("/account/mfa"))
+        }
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate?then=/account/mfa")),
+        Err(other) => Err(other.into()),
+    }
+}
+===== src/pages/account/mfa/recovery.rs =====
+//! `/account/mfa/recovery` -- a new set of recovery codes. The old set
+//! stops working. Asks for a fresh elevation.
+
+use brocanth_auth::{AccountHolder, AuthError};
+use brocanth_middleware::Level;
+
+use crate::pages::{Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, see_other};
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        screens::flash(ctx, Level::Info, "Sign in first.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::of(&session)?;
+    match auth.mfa()?.regenerate_recovery_codes(&holder).await {
+        Ok(fresh) => {
+            let codes: Vec<String> = fresh
+                .codes()
+                .iter()
+                .map(|code| code.as_str().to_string())
+                .collect();
+            super::index::show(ctx, &codes).await
+        }
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate?then=/account/mfa")),
+        Err(other) => Err(other.into()),
+    }
+}
+===== src/pages/account/mfa/screens.rsx =====
+// The markup of the factor pages. `csrf` is the hidden input the CSRF
+// hook minted, and `qr` the SVG this application drew: both are HTML
+// already, so they go in with `{! }`. Nothing else here is raw.
+
+fn Problem(text: &str) -> Element {
+    if !text.is_empty() {
+        <p role="alert">{text}</p>
+    }
+}
+
+fn Codes(codes: &[String]) -> Element {
+    <p>Keep these recovery codes somewhere safe. Each works once, and this page will not show them again.</p>
+    <ul>
+        for code in codes {
+            <li><code>{code}</code></li>
+        }
+    </ul>
+}
+
+pub fn Factors(csrf: &str, on: bool, remaining: &str, required: bool, codes: &[String]) -> Element {
+    <section>
+        <h1>Two-step sign-in</h1>
+        if !codes.is_empty() {
+            <Codes codes={codes} />
+        }
+        if on {
+            <p>Two-step sign-in is on. Recovery codes left: {remaining}.</p>
+            <form method="post" action="/account/mfa/recovery">
+                {! csrf}
+                <button>Make new recovery codes</button>
+            </form>
+            if required {
+                <p>This account must use two-step sign-in, so it stays on.</p>
+            } else {
+                <form method="post" action="/account/mfa/off">
+                    {! csrf}
+                    <button>Turn two-step sign-in off</button>
+                </form>
+            }
+        } else {
+            <p>Two-step sign-in is off.</p>
+            <p><a href="/account/totp">Turn it on with an authenticator app</a></p>
+        }
+    </section>
+}
+
+pub fn Setup(csrf: &str, secret: &str, uri: &str, qr: &str, error: &str, codes: &[String]) -> Element {
+    <section>
+        <h1>Set up two-step sign-in</h1>
+        if !codes.is_empty() {
+            <Codes codes={codes} />
+            <p><a href="/account/code">Continue: enter the next code your app shows</a></p>
+        } else {
+            <p>This account must use two-step sign-in. Set it up to finish signing in.</p>
+            <Problem text={error} />
+            if !qr.is_empty() {
+                <figure>{! qr}</figure>
+            }
+            if !secret.is_empty() {
+                <p>Scan the code, <a href={uri}>open it in the app</a>, or type the key <code>{secret}</code>.</p>
+            }
+            <form method="post" action="/account/mfa/setup">
+                {! csrf}
+                <label>The code the app shows <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+                <button>Turn it on</button>
+            </form>
+        }
+    </section>
+}
+===== src/pages/account/mfa/setup.rs =====
+//! `/account/mfa/setup` -- TOTP for a sign-in the policy will not admit
+//! without it.
+//!
+//! The password passed, and its proof waits sealed in the `auth_pending`
+//! cookie for a few minutes. No session exists yet: the holder is read from
+//! the proof. Once TOTP is on, the person enters the next code at
+//! `/account/code`, which opens the session.
+
+use brocanth_auth::{AccountHolder, AuthError, AuthStore as _, Verified};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_mfa;
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other, PENDING};
+
+#[derive(zod::Entry)]
+pub struct Confirm {
+    #[check(zod::Text::new().min(6).max(16))]
+    code: String,
+}
+
+/// The sign-in waiting in the cookie, or `None`.
+fn pending(ctx: &Ctx, auth: &crate::plugins::auth::Services) -> Option<Verified> {
+    screens::cookie(ctx, PENDING).and_then(|sealed| auth.sessions().unseal_proof(&sealed))
+}
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(proof) = pending(ctx, &auth) else {
+        screens::flash(ctx, Level::Error, "That took too long. Sign in again.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::enrolling(&proof)?;
+    let label = auth
+        .store()
+        .account(proof.account())
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?
+        .and_then(|account| account.email)
+        .map(|email| email.as_str().to_string())
+        .unwrap_or_default();
+    let issuer = screens::screens(ctx)?.issuer().to_string();
+    match auth
+        .mfa()?
+        .begin_totp_enrolment(&holder, &issuer, &label)
+        .await
+    {
+        Ok(enrolment) => {
+            let secret = enrolment.secret.to_base32();
+            let qr = auth_mfa::qr_svg(&enrolment.uri);
+            page(ctx, &secret, &enrolment.uri, &qr, "", &[], 200)
+        }
+        // Set up already, in another tab: the code page finishes.
+        Err(AuthError::AlreadyEnrolled) => Ok(see_other("/account/code")),
+        Err(other) => Err(other.into()),
+    }
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(proof) = pending(ctx, &auth) else {
+        screens::flash(ctx, Level::Error, "That took too long. Sign in again.");
+        return Ok(see_other("/account/signin"));
+    };
+    let holder = AccountHolder::enrolling(&proof)?;
+    let Some(form) = screens::form::<Confirm>(ctx)? else {
+        return page(
+            ctx,
+            "",
+            "",
+            "",
+            "Enter the six digits your app shows.",
+            &[],
+            422,
+        );
+    };
+    match auth
+        .mfa()?
+        .confirm_totp_enrolment(&holder, form.code.trim())
+        .await
+    {
+        Ok(recovery) => {
+            let codes: Vec<String> = recovery
+                .codes()
+                .iter()
+                .map(|code| code.as_str().to_string())
+                .collect();
+            page(ctx, "", "", "", "", &codes, 200)
+        }
+        Err(AuthError::InvalidCredentials) => page(
+            ctx,
+            "",
+            "",
+            "",
+            "That code does not match. Check the clock of your device, or reload for a new key.",
+            &[],
+            422,
+        ),
+        Err(AuthError::AlreadyEnrolled) => Ok(see_other("/account/code")),
+        Err(other) => Err(other.into()),
+    }
+}
+
+fn page(
+    ctx: &mut Ctx,
+    secret: &str,
+    uri: &str,
+    qr: &str,
+    error: &str,
+    codes: &[String],
+    status: u16,
+) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(
+        ctx,
+        views::account::mfa::screens::Setup {
+            csrf: &csrf,
+            secret,
+            uri,
+            qr,
+            error,
+            codes,
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/otp/code.rs =====
+//! `/account/otp/code` -- the code from the mail, then the session.
+//!
+//! The challenge waits in the `auth_otp` cookie. A wrong, spent, expired
+//! or unknown code gets one answer: which it was is what a guesser wants.
+
+use brocanth_auth::{AuthError, OtpChallengeId};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_otp::{self as otp, CHALLENGE};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Presented {
+    #[check(zod::Text::new().min(1).max(32))]
+    code: String,
+}
+
+const WRONG: &str = "That code is wrong, spent or too old. Ask for a new one if it keeps failing.";
+
+pub fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    again(ctx, "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let codes = otp::codes(ctx)?;
+    let Some(challenge) = screens::cookie(ctx, CHALLENGE) else {
+        screens::flash(ctx, Level::Error, "That took too long. Ask for a new code.");
+        return Ok(see_other("/account/otp"));
+    };
+    let Some(form) = screens::form::<Presented>(ctx)? else {
+        return again(ctx, WRONG, 422);
+    };
+    let code: String = form.code.chars().filter(|c| !c.is_whitespace()).collect();
+    let proof = match codes
+        .otp(&auth)?
+        .authenticate(&OtpChallengeId::new(challenge), &code)
+        .await
+    {
+        Ok(proof) => proof,
+        Err(AuthError::InvalidCredentials) => return again(ctx, WRONG, 422),
+        Err(other) => return Err(other.into()),
+    };
+    let answer = screens::admit(ctx, &auth, proof).await?;
+    Ok(answer.with_header("set-cookie", otp::challenge_cookie(&auth, "", 0)))
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let digits = otp::codes(ctx)?.digits().to_string();
+    let mut page = html!(
+        ctx,
+        views::account::otp::screens::Code {
+            csrf: &csrf,
+            digits: &digits,
+            error
+        }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/account/otp/index.rs =====
+//! `/account/otp` -- a sign-in code by mail, if the address has an account.
+
+use brocanth_auth::OtpDelivery;
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse, Response};
+use crate::plugins::auth_otp::{self as otp};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Address {
+    #[check(zod::Text::new().max(254))]
+    email: String,
+}
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let csrf = csrf_field(ctx);
+    html!(ctx, views::account::otp::screens::Ask { csrf: &csrf })
+}
+
+/// The same answer whatever the address: an unknown or malformed one
+/// takes the same path, pays the same hash and gets the same cookie. Only
+/// the mail says which it was, to its owner.
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let codes = otp::codes(ctx)?;
+    let email = screens::form::<Address>(ctx)?
+        .map(|form| form.email)
+        .unwrap_or_default();
+    let requested = codes.otp(&auth)?.request(&email).await?;
+    if let OtpDelivery::Send { email, code, .. } = &requested.delivery {
+        let text = format!(
+            "Your sign-in code is {}.\n\n\
+             It works once, for {} minutes, in the browser that asked for it.\n\
+             If you did not ask for it, ignore this mail: nobody signs in without it.\n",
+            code.as_str(),
+            codes.ttl_secs() / 60
+        );
+        screens::mail(ctx, email.as_str(), "Your sign-in code", text).await?;
+    }
+    screens::flash(
+        ctx,
+        Level::Info,
+        "If that address has an account, a code is on its way.",
+    );
+    let cookie = otp::challenge_cookie(&auth, requested.challenge.as_str(), codes.ttl_secs());
+    Ok(see_other("/account/otp/code").with_header("set-cookie", cookie))
+}
+===== src/pages/account/otp/screens.rsx =====
+// The markup of the code pages. `csrf` is the hidden input the CSRF hook
+// minted for this request, already HTML, so it goes in with `{! }`.
+
+fn Problem(text: &str) -> Element {
+    if !text.is_empty() {
+        <p role="alert">{text}</p>
+    }
+}
+
+pub fn Ask(csrf: &str) -> Element {
+    <section>
+        <h1>Sign in with a code</h1>
+        <form method="post" action="/account/otp">
+            {! csrf}
+            <label>Email <input type="email" name="email" autocomplete="email" required></label>
+            <button>Email me a code</button>
+        </form>
+        <p><a href="/account/signin">Sign in with my password</a></p>
+    </section>
+}
+
+pub fn Code(csrf: &str, digits: &str, error: &str) -> Element {
+    <section>
+        <h1>Enter the code from the mail</h1>
+        <Problem text={error} />
+        <form method="post" action="/account/otp/code">
+            {! csrf}
+            <label>The {digits}-digit code <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+            <button>Sign in</button>
+        </form>
+        <p><a href="/account/otp">Send me a new code</a></p>
+    </section>
 }
 ===== src/pages/account/reset/[token].rs =====
 //! `/account/reset/{token}` -- a new password, from the link in the mail.
@@ -13710,7 +14618,8 @@ fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
 // each page in this directory names its own component.
 //
 // `csrf` is the hidden input the CSRF hook minted for this request. It is
-// HTML already, so it goes in with `{! }`. Nothing else here is raw.
+// HTML already, so it goes in with `{! }`. So is `qr`, the SVG of a QR code
+// this application drew. Nothing else here is raw.
 
 fn Problem(text: &str) -> Element {
     if !text.is_empty() {
@@ -13742,6 +14651,7 @@ pub fn Signin(csrf: &str, email: &str, error: &str) -> Element {
             <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
             <button>Sign in</button>
         </form>
+        <p><a href="/account/otp">Email me a sign-in code</a></p>
         <p><a href="/account/forgot">I forgot my password</a></p>
         <p><a href="/account/signup">Create an account</a></p>
     </section>
@@ -13802,19 +14712,21 @@ pub fn Code(csrf: &str, error: &str) -> Element {
     </section>
 }
 
-pub fn Elevate(csrf: &str, error: &str) -> Element {
+pub fn Elevate(csrf: &str, then: &str, error: &str) -> Element {
     <section>
         <h1>Confirm it is you</h1>
         <Problem text={error} />
         <form method="post" action="/account/elevate">
             {! csrf}
+            <input type="hidden" name="then" value={then}>
             <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+            <label>Code from your app, if this account has two-step sign-in <input name="code" inputmode="numeric" autocomplete="one-time-code"></label>
             <button>Continue</button>
         </form>
     </section>
 }
 
-pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) -> Element {
+pub fn Totp(csrf: &str, secret: &str, uri: &str, qr: &str, error: &str, codes: &[String]) -> Element {
     <section>
         <h1>Two-step sign-in</h1>
         if !codes.is_empty() {
@@ -13826,6 +14738,9 @@ pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) 
             </ul>
         } else {
             <Problem text={error} />
+            if !qr.is_empty() {
+                <figure>{! qr}</figure>
+            }
             if !secret.is_empty() {
                 <p>Add this account to your authenticator app: <a href={uri}>open it in the app</a>, or type the key <code>{secret}</code>.</p>
             }
@@ -14035,7 +14950,7 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let holder = AccountHolder::of(&session)?;
     let mfa = auth.mfa()?;
     if mfa.enrolled(&holder).await?.contains(FactorKind::Totp) {
-        return page(ctx, "", "", ON, &[], 200);
+        return page(ctx, "", "", "", ON, &[], 200);
     }
     let label = screens::email_of(&auth, &session).await?;
     match mfa
@@ -14044,10 +14959,11 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     {
         Ok(enrolment) => {
             let secret = enrolment.secret.to_base32();
-            page(ctx, &secret, &enrolment.uri, "", &[], 200)
+            let qr = crate::plugins::auth_mfa::qr_svg(&enrolment.uri);
+            page(ctx, &secret, &enrolment.uri, &qr, "", &[], 200)
         }
         Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
-        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 200),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", "", ON, &[], 200),
         Err(other) => Err(other.into()),
     }
 }
@@ -14062,6 +14978,7 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     let Some(form) = screens::form::<Confirm>(ctx)? else {
         return page(
             ctx,
+            "",
             "",
             "",
             "Enter the six digits your app shows.",
@@ -14080,10 +14997,11 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
                 .iter()
                 .map(|code| code.as_str().to_string())
                 .collect();
-            page(ctx, "", "", "", &codes, 200)
+            page(ctx, "", "", "", "", &codes, 200)
         }
         Err(AuthError::InvalidCredentials) => page(
             ctx,
+            "",
             "",
             "",
             "That code does not match. Check the clock of your device, or start again.",
@@ -14091,7 +15009,7 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
             422,
         ),
         Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
-        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 409),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", "", ON, &[], 409),
         Err(other) => Err(other.into()),
     }
 }
@@ -14100,6 +15018,7 @@ fn page(
     ctx: &mut Ctx,
     secret: &str,
     uri: &str,
+    qr: &str,
     error: &str,
     codes: &[String],
     status: u16,
@@ -14111,6 +15030,7 @@ fn page(
             csrf: &csrf,
             secret,
             uri,
+            qr,
             error,
             codes,
         }
@@ -14199,6 +15119,171 @@ pub fn handle(_ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
             ("cache-control".to_string(), "max-age=3600".to_string()),
         ],
     ))
+}
+===== src/pages/impersonate/index.rs =====
+//! `/impersonate` -- a member of staff starts acting as an account.
+//!
+//! Needs `impersonate.edit` (a superuser holds it), a session that typed
+//! its password again, a subject that is not staff, and a reason. The
+//! admin's Impersonate tab posts here too, with the account's `id`.
+
+use brocanth_auth::{AccountId, AuthError, AuthStore as _, EmailAddress, Staff};
+use brocanth_middleware::Level;
+
+use crate::pages::{html, views, Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
+
+#[derive(zod::Entry)]
+pub struct Subject {
+    #[text(max = 512)]
+    id: Option<String>,
+    #[text(max = 254)]
+    email: Option<String>,
+    #[check(zod::Text::new().min(1).max(200))]
+    reason: String,
+}
+
+/// The member of staff on this request, when it may impersonate.
+async fn operator(ctx: &Ctx) -> Result<Staff, Error> {
+    match crate::plugins::superuser::staff(ctx).await? {
+        Some(staff) if staff.allows(Staff::IMPERSONATE) => Ok(staff),
+        _ => Err(Error::new(
+            403,
+            format!(
+                "acting as an account needs the permission {}",
+                Staff::IMPERSONATE
+            ),
+        )),
+    }
+}
+
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    operator(ctx).await?;
+    again(ctx, "", 200)
+}
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let staff = operator(ctx).await?;
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        return Ok(see_other("/account/signin"));
+    };
+    let Some(form) = screens::form::<Subject>(ctx)? else {
+        return again(ctx, "Name the account and give a reason.", 422);
+    };
+    let subject = match (form.id, form.email) {
+        (Some(id), _) if !id.is_empty() => Some(AccountId::new(id)),
+        (_, Some(email)) => match EmailAddress::parse(&email) {
+            Ok(address) => auth
+                .store()
+                .account_by_email(&address)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?
+                .map(|account| account.id),
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    let Some(subject) = subject else {
+        return again(ctx, "No account has that address.", 422);
+    };
+    let target = Staff::load(&**auth.store(), &subject).await?;
+    match target {
+        None => return again(ctx, "No account has that address.", 422),
+        Some(target) if target.is_staff() => {
+            return again(ctx, "A member of staff cannot be impersonated.", 422)
+        }
+        Some(_) => {}
+    }
+    match staff
+        .impersonate(&auth, &session, &subject, form.reason.clone())
+        .await
+    {
+        Ok(started) => {
+            crate::plugins::impersonate::record(
+                ctx,
+                "started",
+                &session.account,
+                &subject,
+                &form.reason,
+            );
+            screens::flash(ctx, Level::Info, "You are acting as this account.");
+            Ok(see_other("/").with_header("set-cookie", started.cookie.to_string()))
+        }
+        Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate?then=/impersonate")),
+        Err(other) => Err(other.into()),
+    }
+}
+
+fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+    let csrf = csrf_field(ctx);
+    let mut page = html!(
+        ctx,
+        views::impersonate::screens::Start { csrf: &csrf, error }
+    )?;
+    page.status = status;
+    Ok(page)
+}
+===== src/pages/impersonate/screens.rsx =====
+// The markup of the start page. `csrf` is the hidden input the CSRF hook
+// minted, already HTML, so it goes in with `{! }`.
+
+fn Problem(text: &str) -> Element {
+    if !text.is_empty() {
+        <p role="alert">{text}</p>
+    }
+}
+
+pub fn Start(csrf: &str, error: &str) -> Element {
+    <section>
+        <h1>Act as an account</h1>
+        <p>The session records who you are and why. It cannot change a password, a second factor or a role.</p>
+        <Problem text={error} />
+        <form method="post" action="/impersonate">
+            {! csrf}
+            <label>The account's email <input type="email" name="email" required></label>
+            <label>Reason, such as a ticket <input name="reason" maxlength="200" required></label>
+            <button>Act as this account</button>
+        </form>
+    </section>
+}
+===== src/pages/impersonate/stop.rs =====
+//! `/impersonate/stop` -- the operator stops acting as the account.
+//!
+//! The impersonated session is deleted, and the browser gets the
+//! operator's own session back. A POST, from the banner's button.
+
+use brocanth_auth::AuthError;
+use brocanth_middleware::Level;
+
+use crate::pages::{Ctx, Error, Response};
+use crate::plugins::auth_screens::{self as screens, see_other};
+
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let auth = screens::services(ctx)?;
+    let Some(session) = screens::signed_in(ctx, &auth).await else {
+        return Ok(see_other("/account/signin"));
+    };
+    let Some(marker) = session.impersonation.clone() else {
+        return Ok(see_other("/"));
+    };
+    match auth.sessions().end_impersonation(&session).await {
+        Ok(cookie) => {
+            crate::plugins::impersonate::record(
+                ctx,
+                "stopped",
+                &marker.operator,
+                &session.account,
+                &marker.reason,
+            );
+            screens::flash(ctx, Level::Info, "You are yourself again.");
+            Ok(see_other("/impersonate").with_header("set-cookie", cookie.to_string()))
+        }
+        // The operator's own session ended meanwhile: sign in again.
+        Err(AuthError::NoSession) => Ok(see_other("/account/signin")
+            .with_header("set-cookie", auth.sessions().clearing_cookie().to_string())),
+        Err(other) => Err(other.into()),
+    }
 }
 ===== src/pages/index.rsx =====
 use crate::pages::views::link::Link;
@@ -15709,10 +16794,10 @@ fn actor(_ctx: &Ctx) -> Option<String> {
 //!
 //! # What is not here
 //!
-//! One-time codes and login alerts. Both stores implement their traits
-//! (`OtpStore`, `SignInLocationStore`); an application that wants them
-//! builds them from `auth.store()` and puts them on the context itself.
-//! Second factors are `auth.mfa()`, and `auth-screens` has the TOTP page.
+//! One-time codes and login alerts as pages. `auth.otp()` and
+//! `auth.login_alerts()` build them; the `auth-otp` and `auth-mfa` modules
+//! write the pages and the mail. Second factors are `auth.mfa()`, and
+//! `auth-screens` has the TOTP page.
 
 use std::sync::Arc;
 
@@ -16027,6 +17112,267 @@ mod tests {
             panic!("{e}");
         }
     }
+}
+===== src/plugins/auth_mfa/mod.rs =====
+//! Second factors as a policy: who must give one, the QR code of a new
+//! key, and the mail of a sign-in from a new network.
+//!
+//! The pages are `src/pages/account/mfa/`; the sign-in that asks
+//! [`policy`] is `auth_screens::admit`. Keep two rules when you change
+//! them:
+//!
+//! 1. A page that changes a factor takes an `AccountHolder`: an
+//!    impersonated session cannot build one, and the crate asks it for a
+//!    fresh elevation.
+//! 2. Never show a recovery code twice. The store keeps their digests only.
+
+use std::net::IpAddr;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+use brocanth::plugin_hooks::{
+    Flow, HookRegistrar, HookSource, OnRequest, Request, RequestHook, RequestState,
+};
+use brocanth::plugin_order::{Order, Phase};
+use brocanth_auth::{AccountId, AuthStore as _, FactorPolicy, LoginAlert, Staff};
+
+use crate::pages::{Ctx, Error};
+use crate::plugins::auth::Services;
+
+/// Who must give a second factor, and whether a new network mails the
+/// owner.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[auth_mfa]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// `enrolled`, `staff` or `everyone`.
+    pub require: String,
+    /// Mail the owner when a sign-in comes from a new network.
+    pub alerts: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            require: "enrolled".to_string(),
+            alerts: true,
+        }
+    }
+}
+
+/// Who must give a second factor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Require {
+    /// The accounts that turned one on.
+    Enrolled,
+    /// Those, and every superuser or role holder.
+    Staff,
+    /// Every account.
+    Everyone,
+}
+
+impl Require {
+    /// The setting's word, or `None`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "enrolled" => Some(Self::Enrolled),
+            "staff" => Some(Self::Staff),
+            "everyone" => Some(Self::Everyone),
+            _ => None,
+        }
+    }
+}
+
+/// What a page reads off the context.
+#[derive(Clone, Debug)]
+pub struct Rules {
+    /// Who must give a second factor.
+    pub require: Require,
+    /// Whether a new network mails the owner.
+    pub alerts: bool,
+}
+
+impl ContextItem for Rules {}
+
+/// The address the request came from, as the `client` hook read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientAddress(pub IpAddr);
+
+pub struct AuthMfa {
+    settings: Settings,
+    rules: Option<Rules>,
+}
+
+impl Plugin for AuthMfa {
+    type Config = Settings;
+    type Provides = ProvidesContext<Rules>;
+    const NAME: &'static str = "auth_mfa";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            rules: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let Some(require) = Require::parse(&self.settings.require) else {
+            return Err(PluginError::new(format!(
+                "[auth_mfa] require is {:?}\n\
+                 help: set it to enrolled, staff or everyone",
+                self.settings.require
+            )));
+        };
+        self.rules = Some(Rules {
+            require,
+            alerts: self.settings.alerts,
+        });
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        if let Some(rules) = &self.rules {
+            cx.insert(rules.clone());
+        }
+    }
+}
+
+impl HookSource for AuthMfa {
+    type Families = OnRequest;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        registrar.request(
+            "client",
+            Phase::Identify,
+            Order::new().after_if_present("proxy-headers.read"),
+            Client,
+        );
+        Ok(())
+    }
+}
+
+/// Writes [`ClientAddress`]: what a trusted proxy reported, else the
+/// socket's peer.
+struct Client;
+
+impl RequestHook for Client {
+    fn before_dispatch(
+        &self,
+        request: &mut Request,
+        state: &mut RequestState,
+    ) -> Result<Flow, PluginError> {
+        let forwarded = state
+            .get::<brocanth_middleware::ClientInfo>()
+            .and_then(|info| info.address);
+        if let Some(address) = forwarded.or_else(|| brocanth_middleware::PeerAddress::of(request)) {
+            state.insert(ClientAddress(address));
+        }
+        Ok(Flow::Continue)
+    }
+}
+
+/// The rules, from the context.
+pub fn rules(ctx: &Ctx) -> Result<Rules, Error> {
+    ctx.provided::<Rules, _>().cloned().ok_or_else(|| {
+        Error::new(
+            500,
+            "the second-factor rules are not on this context\nhelp: register the auth_mfa plugin",
+        )
+    })
+}
+
+/// The policy a sign-in of `account` answers to.
+pub async fn policy(
+    ctx: &Ctx,
+    auth: &Services,
+    account: &AccountId,
+) -> Result<FactorPolicy, Error> {
+    policy_for(&rules(ctx)?, auth, account).await
+}
+
+/// The same, from the rules.
+pub async fn policy_for(
+    rules: &Rules,
+    auth: &Services,
+    account: &AccountId,
+) -> Result<FactorPolicy, Error> {
+    let always = match rules.require {
+        Require::Enrolled => false,
+        Require::Everyone => true,
+        Require::Staff => Staff::load(&**auth.store(), account)
+            .await?
+            .is_some_and(|staff| staff.is_staff()),
+    };
+    let policy = FactorPolicy::recommended();
+    Ok(if always {
+        policy.requiring_a_second_factor_always()
+    } else {
+        policy
+    })
+}
+
+/// Whether the policy holds `account` to a second factor.
+pub async fn required(ctx: &Ctx, auth: &Services, account: &AccountId) -> Result<bool, Error> {
+    Ok(policy(ctx, auth, account).await?.second_factor()
+        == brocanth_auth::SecondFactorRequirement::Always)
+}
+
+/// The `otpauth://` link as an SVG QR code, for a page to write with
+/// `{! }`. Empty when the link does not fit in a QR code.
+pub fn qr_svg(uri: &str) -> String {
+    let Ok(code) = qrcode::QrCode::new(uri.as_bytes()) else {
+        return String::new();
+    };
+    let svg = code
+        .render::<qrcode::render::svg::Color<'_>>()
+        .min_dimensions(200, 200)
+        .build();
+    // Without the XML declaration: the SVG goes inside an HTML page.
+    match svg.find("<svg") {
+        Some(start) => svg[start..].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Mails the owner of `account` when this sign-in came from a network it
+/// has not used for ninety days. Not on the first sign-in ever, and not
+/// when the client address is unknown.
+pub async fn alert(ctx: &Ctx, auth: &Services, account: &AccountId) -> Result<(), Error> {
+    if !rules(ctx)?.alerts {
+        return Ok(());
+    }
+    let address = ctx.hooked::<ClientAddress>().map(|a| a.0.to_string());
+    let noted = auth
+        .login_alerts()
+        .note(account, address.as_deref())
+        .await?;
+    let LoginAlert::Unfamiliar {
+        first_ever: false, ..
+    } = noted
+    else {
+        return Ok(());
+    };
+    let Some(email) = auth
+        .store()
+        .account(account)
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?
+        .and_then(|a| a.email)
+    else {
+        return Ok(());
+    };
+    let link = crate::plugins::auth_screens::screens(ctx)?.link("/account/forgot");
+    let text = format!(
+        "Your account was signed into from a network it has not used before.\n\n\
+         If it was you, there is nothing to do. If not, choose a new password now,\n\
+         which ends every session:\n\n{link}\n"
+    );
+    crate::plugins::auth_screens::mail(ctx, email.as_str(), "A new sign-in to your account", text)
+        .await
 }
 ===== src/plugins/auth_oauth/mod.rs =====
 //! Sign-in with a provider: GitHub, Google, Microsoft or GitLab.
@@ -16397,6 +17743,151 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
+===== src/plugins/auth_otp/mod.rs =====
+//! Sign-in by mailed code: the code's length, lifetime and attempt cap,
+//! and the cookie that carries a challenge between the two pages.
+//!
+//! The pages are `src/pages/account/otp/`. Keep two rules when you change
+//! them:
+//!
+//! 1. The page that asks for a code answers alike for every address. Only
+//!    the mail says whether the address has an account.
+//! 2. A rate limit covers `POST /account/otp`. Each request costs an
+//!    argon2id hash and sends a mail.
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
+
+use crate::pages::{Ctx, Error};
+use crate::plugins::auth::{Clock, Services, Store};
+
+/// The cookie that carries the challenge from one page to the next.
+pub const CHALLENGE: &str = "auth_otp";
+
+/// The code: its length, its lifetime and how many wrong guesses it
+/// survives.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[auth_otp]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Digits in a code, 6 to 10.
+    pub digits: i64,
+    /// How long a code works, in seconds, 60 to 3600.
+    pub ttl_secs: i64,
+    /// Wrong guesses a code survives, 1 to 10.
+    pub max_attempts: i64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            digits: 8,
+            ttl_secs: 600,
+            max_attempts: 5,
+        }
+    }
+}
+
+/// What a page reads off the context.
+#[derive(Clone, Debug)]
+pub struct Codes {
+    digits: u32,
+    ttl_secs: i64,
+    max_attempts: u32,
+}
+
+impl ContextItem for Codes {}
+
+impl Codes {
+    /// The one-time code service, with these settings.
+    pub fn otp(
+        &self,
+        auth: &Services,
+    ) -> Result<brocanth_auth::Otp<Store, Clock>, brocanth_auth::AuthError> {
+        auth.otp()?
+            .with_digits(self.digits)?
+            .with_ttl(self.ttl_secs)?
+            .with_max_attempts(self.max_attempts)
+    }
+
+    /// How long a code works, in seconds.
+    pub fn ttl_secs(&self) -> i64 {
+        self.ttl_secs
+    }
+
+    /// Digits in a code.
+    pub fn digits(&self) -> u32 {
+        self.digits
+    }
+}
+
+pub struct AuthOtp {
+    codes: Codes,
+}
+
+impl Plugin for AuthOtp {
+    type Config = Settings;
+    type Provides = ProvidesContext<Codes>;
+    const NAME: &'static str = "auth_otp";
+
+    fn new(config: Settings) -> Self {
+        // Out of range is caught in `before_start`; a negative value reads
+        // as 0 here, which the crate refuses there.
+        let small = |value: i64| u32::try_from(value).unwrap_or(0);
+        Self {
+            codes: Codes {
+                digits: small(config.digits),
+                ttl_secs: config.ttl_secs,
+                max_attempts: small(config.max_attempts),
+            },
+        }
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The same checks the pages make, once, before the first request.
+        let auth = lc.require_service::<Services>()?;
+        if let Err(e) = self.codes.otp(auth) {
+            return Err(PluginError::new(format!(
+                "[auth_otp] {e}\n\
+                 help: set digits (6 to 10), ttl_secs (60 to 3600) and max_attempts \
+                 (1 to 10) under [auth_otp]"
+            )));
+        }
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        cx.insert(self.codes.clone());
+    }
+}
+
+/// The code settings.
+pub fn codes(ctx: &Ctx) -> Result<Codes, Error> {
+    ctx.provided::<Codes, _>().cloned().ok_or_else(|| {
+        Error::new(
+            500,
+            "the one-time code settings are not on this context\n\
+             help: register the auth_otp plugin",
+        )
+    })
+}
+
+/// The `Set-Cookie` value that carries `challenge` to the code page, or
+/// clears it when `challenge` is empty.
+pub fn challenge_cookie(auth: &Services, challenge: &str, ttl_secs: i64) -> String {
+    let secure = if auth.sessions().config().secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let age = if challenge.is_empty() { 0 } else { ttl_secs };
+    format!(
+        "{CHALLENGE}={challenge}; Path=/account/otp; Max-Age={age}; HttpOnly; SameSite=Strict{secure}"
+    )
+}
 ===== src/plugins/auth_screens/mod.rs =====
 //! The account screens' plugin, and what every screen under
 //! `src/pages/account/` shares.
@@ -16411,7 +17902,7 @@ mod tests {
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_auth::{Admission, AuthStore, FactorPolicy, SessionRecord, Verified};
+use brocanth_auth::{Admission, AuthStore, SessionRecord, Verified};
 use brocanth_middleware::{Flash, Level};
 
 use crate::pages::{Ctx, Error, Response, Sent};
@@ -16570,6 +18061,19 @@ pub fn see_other(location: &str) -> Response {
     Response::empty(303).with_header("location", location)
 }
 
+/// `path` when it is a path on this site: one `/`, then no second `/` or
+/// `\`, no scheme and no control character. `None` for anything else, so
+/// a `then` field cannot send a browser to another site.
+pub fn local_path(path: Option<&str>) -> Option<&str> {
+    let path = path?;
+    let local = path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.starts_with("/\\")
+        && !path.contains("://")
+        && !path.chars().any(char::is_control);
+    local.then_some(path)
+}
+
 /// A mail with a plain-text body, through the outbox.
 pub async fn mail(ctx: &Ctx, to: &str, subject: &str, text: String) -> Result<(), Error> {
     let outbox = ctx.provided::<Outbox, _>().cloned().ok_or_else(|| {
@@ -16605,13 +18109,18 @@ pub async fn email_of(auth: &Services, session: &SessionRecord) -> Result<String
 /// or wait for a second factor, or refuse.
 pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Response, Error> {
     let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    // Who owes a second factor: `[auth_mfa] require`.
+    let policy = crate::plugins::auth_mfa::policy(ctx, auth, proof.account()).await?;
     let secure = if auth.sessions().config().secure {
         "; Secure"
     } else {
         ""
     };
-    match FactorPolicy::recommended().admit(&enrolled, proof) {
+    // `auth-otp`: a code mailed to the address stands in for the password.
+    let policy = policy.accepting_mailbox_as_primary();
+    match policy.admit(&enrolled, proof) {
         Admission::Admit(admitted) => {
+            let account = admitted.account().clone();
             // The session the browser had, if any, is replaced: a new
             // identifier at sign-in is the defence against fixation.
             let before = cookie(ctx, &auth.sessions().config().cookie_name)
@@ -16620,6 +18129,8 @@ pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Re
                 .sessions()
                 .begin_with_factors(admitted, before.as_ref())
                 .await?;
+            // A sign-in from a network this account has not used: mail its owner.
+            crate::plugins::auth_mfa::alert(ctx, auth, &account).await?;
             flash(ctx, Level::Success, "You are signed in.");
             Ok(see_other(crate::modules::auth_screens::MODULE.after_sign_in)
                 .with_header("set-cookie", started.cookie.to_string())
@@ -16638,7 +18149,19 @@ pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Re
                 ),
             ))
         }
-        Admission::EnrolmentRequired { .. } | Admission::Insufficient => {
+        Admission::EnrolmentRequired { proof } => {
+            // The policy wants a second factor this account does not have: it
+            // sets one up before the session opens.
+            let ttl = crate::modules::auth_screens::MODULE.pending_secs;
+            let sealed = auth.sessions().seal_proof(&proof, ttl as i64);
+            Ok(see_other("/account/mfa/setup").with_header(
+                "set-cookie",
+                format!(
+                    "{PENDING}={sealed}; Path=/account; Max-Age={ttl}; HttpOnly; SameSite=Strict{secure}"
+                ),
+            ))
+        }
+        Admission::Insufficient => {
             flash(
                 ctx,
                 Level::Error,
@@ -18089,6 +19612,221 @@ mod tests {
         assert_eq!(t::items(Locale::Fr, 1), "1 article");
         assert_eq!(t::greeting(Locale::En, "Ada"), "Hello, Ada!");
     }
+}
+===== src/plugins/impersonate/mod.rs =====
+//! Impersonation: the banner on every page of an impersonated session,
+//! and the note of each start and stop.
+//!
+//! The pages are `src/pages/impersonate/`. The crate refuses an
+//! impersonated session the credentials: a page that changes a password, a
+//! factor or a provider link takes an `AccountHolder`, which such a session
+//! cannot build. Everything else the application lets the customer do, the
+//! operator can do too: guard it with `brocanth-policy`.
+
+use std::sync::{Arc, OnceLock};
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::NoContext;
+use brocanth::plugin_hooks::{
+    AsyncRequestHook, BodyShape, Both, Flow, HookRegistrar, HookSource, OnAsyncRequest, OnResponse,
+    Request, RequestState, ResponseHead, ResponseHook,
+};
+use brocanth::plugin_order::{Order, Phase};
+use brocanth::plugin_routes::BoxFuture;
+use brocanth_auth::{AccountId, AuthStore as _};
+
+use crate::pages::Ctx;
+use crate::plugins::auth::Services;
+
+/// What the banner says, noted by the `read` hook.
+#[derive(Clone, Debug)]
+pub struct Acting {
+    /// The account the operator acts as: its address, or its id.
+    pub subject: String,
+    /// The reason the operator typed.
+    pub reason: String,
+}
+
+/// Nothing to set: who may act is a role, and how long an impersonated
+/// session lives is `brocanth_auth::SessionConfig::impersonation_timeout`.
+#[derive(Clone, Debug, Default)]
+pub struct Settings {}
+
+pub struct Impersonate {
+    /// The auth services, set in `before_start`: with accounts in Postgres
+    /// they exist only from then, and the hooks are installed before.
+    services: Arc<OnceLock<Services>>,
+}
+
+impl Plugin for Impersonate {
+    type Config = Settings;
+    type Provides = NoContext;
+    const NAME: &'static str = "impersonate";
+    const INSTALLS_HOOKS: bool = true;
+
+    fn new(_config: Settings) -> Self {
+        Self {
+            services: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        let services = lc.require_service::<Services>()?.clone();
+        let _ = self.services.set(services);
+        Ok(())
+    }
+}
+
+impl HookSource for Impersonate {
+    type Families = Both<OnAsyncRequest, OnResponse>;
+
+    fn install_hooks(&self, registrar: &mut HookRegistrar<'_>) -> Result<(), PluginError> {
+        let read = Read {
+            services: Arc::clone(&self.services),
+        };
+        registrar.request_async("read", Phase::Identify, Order::new(), read);
+        registrar.response("banner", Phase::Identify, Order::new(), Banner);
+        Ok(())
+    }
+}
+
+/// Reads the session a request carries, and notes [`Acting`] when an
+/// operator opened it. One read of the store, and only with a cookie.
+struct Read {
+    services: Arc<OnceLock<Services>>,
+}
+
+impl AsyncRequestHook for Read {
+    fn before_dispatch<'a>(
+        &'a self,
+        request: &'a mut Request,
+        state: &'a mut RequestState,
+    ) -> BoxFuture<'a, Result<Flow, PluginError>> {
+        Box::pin(async move {
+            let (Some(auth), Some(cookies)) = (
+                self.services.get(),
+                request
+                    .headers()
+                    .get("cookie")
+                    .and_then(|value| value.to_str().ok()),
+            ) else {
+                return Ok(Flow::Continue);
+            };
+            let Ok(session) = auth.sessions().from_cookie_header(cookies).await else {
+                return Ok(Flow::Continue);
+            };
+            let Some(marker) = &session.impersonation else {
+                return Ok(Flow::Continue);
+            };
+            let subject = auth
+                .store()
+                .account(&session.account)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|account| account.email)
+                .map_or_else(|| session.account.to_string(), |email| email.to_string());
+            state.insert(Acting {
+                subject,
+                reason: marker.reason.clone(),
+            });
+            Ok(Flow::Continue)
+        })
+    }
+}
+
+/// Puts the banner after `<body ...>` in an HTML page of an impersonated
+/// session.
+struct Banner;
+
+impl ResponseHook for Banner {
+    fn on_headers(
+        &self,
+        _request: &Request,
+        _head: &mut ResponseHead,
+        _body: BodyShape<'_>,
+        _state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn on_body(
+        &self,
+        _request: &Request,
+        head: &mut ResponseHead,
+        body: &mut Vec<u8>,
+        state: &mut RequestState,
+    ) -> Result<(), PluginError> {
+        let Some(acting) = state.get::<Acting>() else {
+            return Ok(());
+        };
+        let html = head
+            .headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"));
+        if !html {
+            return Ok(());
+        }
+        let Some(open) = find(body, b"<body") else {
+            return Ok(());
+        };
+        let Some(end) = body[open..].iter().position(|b| *b == b'>') else {
+            return Ok(());
+        };
+        let csrf = state
+            .get::<brocanth_middleware::CsrfToken>()
+            .map(|token| token.hidden_field())
+            .unwrap_or_default();
+        let banner = format!(
+            "<aside aria-label=\"Impersonation\" role=\"status\"><p>You are acting as \
+             <strong>{}</strong>: {}</p><form method=\"post\" action=\"/impersonate/stop\">\
+             {csrf}<button>Stop acting as this account</button></form></aside>",
+            escape(&acting.subject),
+            escape(&acting.reason)
+        );
+        let at = open + end + 1;
+        body.splice(at..at, banner.into_bytes());
+        Ok(())
+    }
+}
+
+/// Where `needle` starts in `haystack`, ignoring ASCII case.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Text for HTML.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Notes a start or a stop as an entry in the change history: the
+/// operator is the actor, the subject is the row, the reason is the label.
+pub fn record(ctx: &Ctx, what: &str, operator: &AccountId, subject: &AccountId, reason: &str) {
+    let Some(trail) = ctx.provided::<brocanth_audit::Trail, _>() else {
+        return;
+    };
+    trail.record(brocanth_audit::Entry {
+        id: 0,
+        at: trail.now(),
+        actor: Some(operator.to_string()),
+        source: "impersonate".to_string(),
+        table: "brocanth_auth_sessions".to_string(),
+        row: subject.to_string(),
+        label: format!("{what}: {reason}"),
+        kind: if what == "started" {
+            brocanth_audit::Kind::Created
+        } else {
+            brocanth_audit::Kind::Deleted
+        },
+        fields: Vec::new(),
+    });
 }
 ===== src/plugins/jobs/mod.rs =====
 //! Background jobs, as this application registers them.
@@ -23374,8 +25112,11 @@ request.
 - `auth-oauth`  sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client
 - `auth-screens`  sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account
 - `auth-lockout`  locks an account for minutes after too many wrong passwords
+- `auth-otp`  sign in with an eight-digit code mailed to the address, under /account/otp
+- `auth-mfa`  who must use a second factor, forced TOTP set-up, recovery codes, a QR code and login alerts
 - `superuser`  operator accounts that pass every admin check, and a createsuperuser command
 - `roles`  roles that grant permissions, stored with the accounts, for staff and the admin
+- `impersonate`  staff act as a customer, with a banner on every page, the operator on the session and an audit entry
 - `policy`  typed predicates over an entity's columns; no ORM, no driver, no core
 - `rls`  Postgres row-level security declared in Rust; `rls make` writes the migration
 - `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
@@ -24392,6 +26133,51 @@ development and tests: `brocanth check --deploy` refuses it. Run
 `brocanth remove oauth-client-memory` before production; the tokens then
 go to Postgres.
 
+## Sign-in by mailed code
+
+`src/pages/account/otp/` asks for a code by mail and checks it; the
+code's length, lifetime and attempts are `[auth_otp]`, read in
+`src/plugins/auth_otp/mod.rs`. The session opens through
+`auth_screens::admit`, which takes a mailed code as the primary factor.
+
+Rules when you change them:
+
+- Answer alike for every address on `/account/otp`. Say which it was
+  only in the mail.
+- Keep a rate limit on `POST /account/otp`: each request hashes and
+  mails.
+- Never put the code in a link, a log line or the page.
+
+## Second factors
+
+Who must give a second factor is `[auth_mfa] require` (`enrolled`,
+`staff`, `everyone`); `auth_mfa::policy` reads it at each sign-in, in
+`auth_screens::admit`. The factor pages are `src/pages/account/mfa/`.
+
+Rules when you change them:
+
+- Change a factor only through a call that takes an `AccountHolder`.
+  Never build one with `without_a_session` in a page.
+- Open a session only with the `Admitted` the policy gives. Never skip
+  `admit` for a sign-in path you add.
+- Show recovery codes once, on the page that made them.
+
+## Impersonation
+
+Staff with `impersonate.edit` act as a customer at `/impersonate` (and
+from the admin's Impersonate tab); `/impersonate/stop` ends it. The
+session keeps both identities, and a banner on every HTML page says so.
+
+Rules:
+
+- A page that changes a password, a second factor or a provider link
+  takes an `AccountHolder`; an impersonated session cannot build one.
+- Anything else an impersonated session can do. Guard money, deletion
+  and other one-way actions with `brocanth-policy`, reading
+  `session.impersonation`.
+- Never impersonate a member of staff, and never clear
+  `session.impersonation`: stopping deletes the session.
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -24416,7 +26202,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: decd52198c12acf2 -->
+<!-- brocanth-digest: 67dcd9bb417c2505 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -24428,7 +26214,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "superuser", "roles", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "markdown", "robots", "sitemap", "content", "feed", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "auth-otp", "auth-mfa", "superuser", "roles", "impersonate", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "markdown", "robots", "sitemap", "content", "feed", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
@@ -24595,7 +26381,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/auth_screens.rs", "src/pages/account/code.rs", "src/pages/account/elevate.rs", "src/pages/account/forgot.rs", "src/pages/account/reset/[token].rs", "src/pages/account/screens.rsx", "src/pages/account/signin.rs", "src/pages/account/signout.rs", "src/pages/account/signup.rs", "src/pages/account/totp.rs", "src/pages/account/verify/[token].rs", "src/plugins/auth_screens/"]
 config = ["auth_screens"]
 crates = []
-adapted_to = ["auth-lockout", "db"]
+adapted_to = ["auth-lockout", "auth-otp", "auth-mfa", "db"]
 
 [modules.auth-lockout]
 version = "0.1.0"
@@ -24604,6 +26390,22 @@ files = ["src/modules/auth_lockout.rs", "src/plugins/auth_lockout.rs"]
 config = []
 crates = []
 adapted_to = []
+
+[modules.auth-otp]
+version = "0.1.0"
+kind = ["routes", "enhancer"]
+files = ["src/modules/auth_otp.rs", "src/pages/account/otp/code.rs", "src/pages/account/otp/index.rs", "src/pages/account/otp/screens.rsx", "src/plugins/auth_otp/"]
+config = ["auth_otp"]
+crates = []
+adapted_to = ["db"]
+
+[modules.auth-mfa]
+version = "0.1.0"
+kind = ["routes", "middleware", "enhancer"]
+files = ["src/modules/auth_mfa.rs", "src/pages/account/mfa/index.rs", "src/pages/account/mfa/off.rs", "src/pages/account/mfa/recovery.rs", "src/pages/account/mfa/screens.rsx", "src/pages/account/mfa/setup.rs", "src/plugins/auth_mfa/"]
+config = ["auth_mfa"]
+crates = ["qrcode"]
+adapted_to = ["db"]
 
 [modules.superuser]
 version = "0.1.0"
@@ -24620,6 +26422,14 @@ files = ["src/modules/roles.rs", "src/plugins/roles/"]
 config = []
 crates = ["brocanth-auth"]
 adapted_to = []
+
+[modules.impersonate]
+version = "0.1.0"
+kind = ["routes", "middleware", "enhancer"]
+files = ["src/modules/impersonate.rs", "src/pages/impersonate/index.rs", "src/pages/impersonate/screens.rsx", "src/pages/impersonate/stop.rs", "src/plugins/impersonate/"]
+config = []
+crates = ["brocanth-auth"]
+adapted_to = ["audit", "db"]
 
 [modules.policy]
 version = "0.1.0"
@@ -25045,4 +26855,4 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: 79f152458bd785d7
+# brocanth-digest: 98ee4e8ebced1c24

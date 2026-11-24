@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 79 modules. Each name links to its own page
+what to build next. There are 85 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
