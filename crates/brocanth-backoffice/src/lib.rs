@@ -21,7 +21,12 @@
 //! ```
 //!
 //! [`Json`] puts a JSON codec between the two ends, so a test proves that
-//! every call and answer crosses a wire. The wire itself comes later.
+//! every call and answer crosses a wire.
+//!
+//! **The wire** ([`wire`], feature `wire`, on by default). The contract
+//! over HTTP: the application serves it with a [`wire::WireServer`], and
+//! the backoffice binary reads its rows through a [`wire::WireClient`].
+//! Each request is signed with a service secret both binaries share.
 //!
 //! **The second binary** ([`gate`]). A project with the `backoffice` module
 //! builds `src/bin/backoffice.rs`, which runs the application itself and
@@ -44,6 +49,8 @@ pub mod gate;
 pub mod json;
 #[cfg(feature = "runtime")]
 pub mod server;
+#[cfg(feature = "wire")]
+pub mod wire;
 
 /// What `brocanth create` writes for `backoffice`. Only the CLI reads it.
 #[cfg(feature = "scaffold")]

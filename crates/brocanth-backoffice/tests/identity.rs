@@ -18,6 +18,7 @@ use brocanth_admin::model::{ModelDescriptor, PrimaryKey, Value};
 use brocanth_admin::policy::{AllowAllUnsafeForDevelopment, Principal};
 use brocanth_admin::{discover, Admin, AdminConfig, Discovery, ListQuery};
 use brocanth_admin_model::{admin_source, DbIdentity};
+use brocanth_backoffice::wire::{ServiceSecret, WireClient, WireServer};
 use brocanth_backoffice::{Claim, Contracted, InProcess, Json};
 use brocanth_db::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use brocanth_model::sea_orm::{
@@ -129,6 +130,12 @@ impl Forced {
     /// from the claim the call carried. The identity function reads the
     /// `Claim`, not the session type: that is what crosses the contract.
     fn data_side(&self) -> InProcess {
+        InProcess::new(self.source())
+    }
+
+    /// The admin's source as the staff member's identity, built from the
+    /// claim the call carried.
+    fn source(&self) -> SharedData {
         let member = self.member.clone();
         let source = Models::new(self.login.clone()).as_identity(move |principal| {
             let user = principal
@@ -137,19 +144,14 @@ impl Forced {
                 .unwrap_or_default();
             DbIdentity::new().role(&member).set("user_id", user)
         });
-        InProcess::new(Arc::new(source))
+        Arc::new(source)
     }
 
     /// The admin's end: the request's principal is a staff id, and the
     /// claim carries it.
     fn admin_side(&self) -> SharedData {
         Contracted::new(Json::new(self.data_side()))
-            .claim(
-                |principal: &Principal<'_>| match principal.downcast::<i64>() {
-                    Some(id) => Claim::staff(id.to_string(), false, ["post.edit"]),
-                    None => Claim::anonymous(),
-                },
-            )
+            .claim(staff_claim)
             .shared()
     }
 
@@ -163,6 +165,15 @@ impl Forced {
             let _ = self.admin.execute_unprepared(&statement).await;
         }
         let _ = self.admin.close().await;
+    }
+}
+
+/// The claim of a staff id, with the grant the data side checks on the
+/// wire.
+fn staff_claim(principal: &Principal<'_>) -> Claim {
+    match principal.downcast::<i64>() {
+        Some(id) => Claim::staff(id.to_string(), false, ["post.edit"]),
+        None => Claim::anonymous(),
     }
 }
 
@@ -333,5 +344,101 @@ async fn the_admin_lists_only_the_rows_of_the_staff_member_who_asks() {
     assert!(html.contains("eight"), "{html}");
     assert!(!html.contains("also seven"), "{html}");
 
+    db.drop_all().await;
+}
+
+/// The admin's end over HTTP: the application's half serves the source on
+/// a socket, on this runtime, which owns the pool's connections.
+async fn over_the_wire(db: &Forced) -> (SharedData, WireServer, brocanth_server::Stopper) {
+    let secret = ServiceSecret::parse("a-service-secret-of-thirty-two-bytes-or-more").unwrap();
+    let server = WireServer::new(db.source(), secret.clone());
+    let listening = brocanth_server::Server::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let base = format!("http://{}", listening.local_addr().expect("an address"));
+    let stopper = listening.stopper();
+    let serving = server.clone();
+    tokio::spawn(listening.run(move |request| {
+        let server = serving.clone();
+        async move { server.handle(request).await }
+    }));
+    let client = WireClient::connect(&base, secret)
+        .await
+        .expect("it connects");
+    let data = Contracted::over(client.shared())
+        .claim(staff_claim)
+        .shared();
+    (data, server, stopper)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_the_wire_each_call_and_transaction_runs_as_the_claims_identity() {
+    let Some(db) = Forced::new().await else {
+        return;
+    };
+    let (data, server, stopper) = over_the_wire(&db).await;
+    let model = post(&*data);
+    static SEVEN: i64 = 7;
+    static EIGHT: i64 = 8;
+    let seven = as_staff(&data, &SEVEN);
+    let eight = as_staff(&data, &EIGHT);
+
+    let count = |data: SharedData| {
+        let model = model.clone();
+        async move { data.count(&model, everything(), Scope::Unscoped).await }
+    };
+    assert_eq!(count(Arc::clone(&seven)).await.unwrap(), 2);
+    assert_eq!(count(Arc::clone(&eight)).await.unwrap(), 1);
+    // Nobody: the wire's data side refuses the claim before the database
+    // sees it.
+    assert!(count(Arc::clone(&data)).await.is_err());
+    let eights = PrimaryKey::single("id", 3);
+    assert!(seven
+        .fetch(&model, &eights, Scope::Unscoped)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A transaction held by the server between requests, as 7: the row the
+    // policy's WITH CHECK refuses ends it, and nothing is kept.
+    let mut tx = seven.begin().await.expect("a transaction as 7");
+    tx.insert(
+        &model,
+        &[
+            ("author_id".into(), Value::Int(7)),
+            ("title".into(), Value::from("kept?")),
+        ],
+    )
+    .await
+    .expect("7 may write its own row");
+    let refused = tx
+        .insert(
+            &model,
+            &[
+                ("author_id".into(), Value::Int(8)),
+                ("title".into(), Value::from("forged")),
+            ],
+        )
+        .await;
+    assert!(refused.is_err(), "a row for 8 breaks the policy");
+    tx.rollback().await.ok();
+    assert_eq!(server.open_transactions(), 0);
+    assert_eq!(count(Arc::clone(&seven)).await.unwrap(), 2);
+
+    let mut tx = seven.begin().await.expect("a transaction as 7");
+    tx.insert(
+        &model,
+        &[
+            ("author_id".into(), Value::Int(7)),
+            ("title".into(), Value::from("kept")),
+        ],
+    )
+    .await
+    .expect("7 may write its own row");
+    tx.commit().await.expect("a commit");
+    assert_eq!(count(Arc::clone(&seven)).await.unwrap(), 3);
+    assert_eq!(count(eight).await.unwrap(), 1);
+
+    stopper.stop();
     db.drop_all().await;
 }

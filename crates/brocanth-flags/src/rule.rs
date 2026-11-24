@@ -133,6 +133,7 @@ impl Actor {
 /// A flag with no row is off. That is the safe default for code that has
 /// shipped before anybody turned it on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rule {
     /// On for everyone.
     pub on: bool,

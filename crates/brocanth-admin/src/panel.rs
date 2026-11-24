@@ -336,3 +336,58 @@ impl Panel for Page {
         (self.render)(&request)
     }
 }
+
+/// A panel's data, sent to another process as JSON text
+/// (docs/backoffice.md §7.6, P2).
+///
+/// A panel crate that can move to the backoffice service puts its data
+/// behind a trait of its own, with owned serde types. For the wire it
+/// implements [`PanelServe`](remote::PanelServe) over that trait (the data
+/// side), and that trait over any [`PanelWire`](remote::PanelWire) (the
+/// backoffice's end). `brocanth-backoffice` carries the text between the
+/// two. The text is JSON, so this crate needs no serde.
+pub mod remote {
+    use async_trait::async_trait;
+
+    use crate::policy::{Level, Principal};
+
+    /// The backoffice's end: sends one call of a panel's data contract to
+    /// the process that holds the data.
+    #[async_trait]
+    pub trait PanelWire: Send + Sync + 'static {
+        /// Sends `call`, the JSON text of `tab`'s own call type, for `who`.
+        /// The answer is the JSON text of `tab`'s answer type.
+        ///
+        /// # Errors
+        ///
+        /// What failed, as text with a `help:` line: the transport, the
+        /// data side's grant check, or the data side itself.
+        async fn send(
+            &self,
+            who: &Principal<'_>,
+            tab: &str,
+            call: String,
+        ) -> Result<String, String>;
+    }
+
+    /// The data side of one panel: decodes a call, names the level it
+    /// needs, and runs it.
+    #[async_trait]
+    pub trait PanelServe: Send + Sync + 'static {
+        /// The level `call` needs on the panel's tab: `read` for a read,
+        /// `edit` for a write. The server checks the caller's grant with
+        /// it before [`PanelServe::serve`].
+        ///
+        /// # Errors
+        ///
+        /// When `call` does not decode.
+        fn level(&self, call: &str) -> Result<Level, String>;
+
+        /// Runs `call` for `who`, and answers the JSON text of the answer.
+        ///
+        /// # Errors
+        ///
+        /// When `call` does not decode, or the data side fails.
+        async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String>;
+    }
+}

@@ -13,11 +13,16 @@ readme = "README.md"
 # that proves each call crosses a wire, and the `Gate` that keeps each
 # binary to its own paths. docs/backoffice.md §7.
 #
+# `wire` (default): the contract over HTTP (docs/backoffice.md §7.5). The
+# server half answers in the application, the client half calls from the
+# backoffice binary. Both halves are one feature, because both binaries
+# compile the same generated plugin file.
+#
 # `scaffold`: the module `brocanth create` offers under the key
 # `backoffice`. Only the CLI asks for it, with `default-features = false`,
 # so it links no admin and no serde.
 [features]
-default = ["runtime"]
+default = ["runtime", "wire"]
 runtime = [
     "dep:brocanth-admin",
     "dep:brocanth-policy",
@@ -25,6 +30,16 @@ runtime = [
     "dep:serde_json",
     "dep:async-trait",
     "dep:thiserror",
+]
+wire = [
+    "runtime",
+    "dep:brocanth",
+    "dep:brocanth-server",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:getrandom",
+    "dep:reqwest",
+    "dep:tokio",
 ]
 scaffold = ["dep:brocanth-scaffold"]
 
@@ -43,6 +58,29 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 thiserror = { version = "2", optional = true }
+
+# `wire`: the request and response types the server half answers with, and
+# the verb they carry.
+brocanth = { workspace = true, optional = true }
+brocanth-server = { workspace = true, optional = true }
+# The request signature (W4): HMAC-SHA256, the versions `brocanth-auth`
+# and `brocanth-webhooks` take. `verify_slice` compares in constant time.
+hmac = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+# The nonce of each request and the id of each held transaction.
+getrandom = { version = "0.4", optional = true }
+# The client half. The features every other crate in the workspace takes:
+# rustls, no system TLS stack.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+], optional = true }
+# The held transactions' timeout and the reaper, and the small runtime the
+# client connects on when the admin builds synchronously (W8).
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "time",
+    "sync",
+], optional = true }
 
 # Optional, and off. See the `scaffold` feature.
 brocanth-scaffold = { workspace = true, optional = true }
@@ -66,8 +104,13 @@ sea-orm = { version = "=2.0.4", default-features = false, features = [
     "with-uuid",
     "macros",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# A wire test serves the application's half on a real socket.
+brocanth-server = { workspace = true }
+# The flags panel through the wire (§7.6).
+brocanth-flags = { workspace = true, features = ["admin"] }
 # The module, generated into a project by the CLI's generator, and its
 # goldens. A cycle through dev-dependencies, which cargo allows.
 brocanth-backoffice = { path = ".", features = ["scaffold"] }
