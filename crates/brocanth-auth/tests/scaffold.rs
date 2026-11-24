@@ -5,7 +5,9 @@
 //! `tests/golden/<name>.txt`. Bless with `BROCANTH_BLESS=1`; build each
 //! project and run its tests too with `BROCANTH_BUILD=1`.
 
-use brocanth_auth::scaffold::{Auth, AuthLockout, AuthOauth, AuthScreens, Roles, Superuser};
+use brocanth_auth::scaffold::{
+    Auth, AuthLockout, AuthMfa, AuthOauth, AuthOtp, AuthScreens, Roles, Superuser,
+};
 use brocanth_scaffold::testing;
 use brocanth_scaffold::Module;
 
@@ -16,6 +18,8 @@ const MODULES: &[&'static dyn Module] = &[
     &Roles,
     &AuthScreens,
     &AuthLockout,
+    &AuthOtp,
+    &AuthMfa,
 ];
 
 /// What `auth-screens` needs, and the config file.
@@ -234,4 +238,54 @@ fn roles_need_a_superuser() {
     let refused = brocanth_cli::testing::generate("my-blog", &["auth", "roles"], MODULES)
         .expect_err("roles without superuser is refused");
     assert!(refused.contains("superuser"), "{refused}");
+}
+
+/// Sign-in by mailed code: two pages, the setting section, and the policy
+/// line in the screens' sign-in.
+#[test]
+fn a_mailed_code_signs_in_through_the_screens() {
+    let mut picks = SCREENS.to_vec();
+    picks.push("auth-otp");
+    let files = shape("auth-otp", &picks);
+    let admit = file(&files, "src/plugins/auth_screens/mod.rs");
+    assert!(admit.contains(".accepting_mailbox_as_primary()"), "{admit}");
+    assert!(file(&files, "src/pages/account/screens.rsx").contains("href=\"/account/otp\""));
+    let markup = file(&files, "src/pages/account/otp/screens.rsx");
+    assert_eq!(
+        markup.matches("<form method=\"post\"").count(),
+        markup.matches("{! csrf}").count()
+    );
+    assert!(file(&files, "config/development.toml").contains("[auth_otp]"));
+    assert!(file(&files, "src/plugins/auth_otp/mod.rs").contains("mod tests"));
+}
+
+/// Second factors as a policy: the hook, the pages, the QR code on the
+/// TOTP page, and the policy in the screens' sign-in.
+#[test]
+fn second_factors_follow_the_policy_setting() {
+    let mut picks = SCREENS.to_vec();
+    picks.push("auth-mfa");
+    let files = shape("auth-mfa", &picks);
+    let admit = file(&files, "src/plugins/auth_screens/mod.rs");
+    assert!(admit.contains("auth_mfa::policy(ctx, auth"), "{admit}");
+    assert!(admit.contains("/account/mfa/setup"), "{admit}");
+    assert!(admit.contains("auth_mfa::alert("), "{admit}");
+    assert!(file(&files, "src/pages/account/totp.rs").contains("auth_mfa::qr_svg"));
+    assert!(file(&files, "Cargo.toml").contains("qrcode"));
+    let markup = file(&files, "src/pages/account/mfa/screens.rsx");
+    assert_eq!(
+        markup.matches("<form method=\"post\"").count(),
+        markup.matches("{! csrf}").count()
+    );
+    assert!(file(&files, "config/development.toml").contains("[auth_mfa]"));
+}
+
+/// Without the two modules the screens keep the plain policy.
+#[test]
+fn without_them_the_screens_keep_the_plain_policy() {
+    let files = brocanth_cli::testing::generate("my-blog", SCREENS, MODULES)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let admit = file(&files, "src/plugins/auth_screens/mod.rs");
+    assert!(admit.contains("FactorPolicy::recommended()"));
+    assert!(!admit.contains("auth_mfa") && !admit.contains("mailbox"));
 }

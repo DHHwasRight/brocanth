@@ -115,6 +115,9 @@ enum HolderProof {
     Session(Option<UnixTime>),
     /// From [`AccountHolder::without_a_session`]: no request, no thief.
     NoSession,
+    /// From [`AccountHolder::enrolling`]: a credential checked minutes ago,
+    /// on the way to a session.
+    FreshProof,
 }
 
 impl AccountHolder {
@@ -149,6 +152,34 @@ impl AccountHolder {
         }
     }
 
+    /// Reads the holder out of a sign-in that the policy sent to
+    /// enrolment: the proof [`Admission::EnrolmentRequired`] handed back.
+    ///
+    /// The policy demands a second factor this account does not have, so
+    /// no session opens and [`AccountHolder::of`] has nothing to read. The
+    /// proof is the next best thing, and a better one than an elevated
+    /// session: a credential checked in this sign-in, not minutes into a
+    /// session somebody may have stolen. It counts as fresh, so the holder
+    /// may enrol a factor and nothing else of what an elevation unlocks
+    /// matters before the session exists. Carry the proof between the two
+    /// requests sealed ([`Verified::seal`]), so it expires.
+    ///
+    /// [`Admission::EnrolmentRequired`]: crate::mfa::Admission::EnrolmentRequired
+    /// [`Verified::seal`]: crate::mfa::Verified::seal
+    ///
+    /// # Errors
+    /// Returns [`AuthError::InvalidCredentials`] for a proof that proves
+    /// nothing.
+    pub fn enrolling(proof: &crate::mfa::Verified) -> Result<Self, AuthError> {
+        if proof.kinds().is_empty() {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Ok(Self {
+            account: proof.account().clone(),
+            proof: HolderProof::FreshProof,
+        })
+    }
+
     /// Whose account it is.
     pub fn account(&self) -> &AccountId {
         &self.account
@@ -159,7 +190,7 @@ impl AccountHolder {
     /// cookie to steal.
     pub fn elevation_is_fresh(&self, now: UnixTime, max_age: UnixTime) -> bool {
         match self.proof {
-            HolderProof::NoSession => true,
+            HolderProof::NoSession | HolderProof::FreshProof => true,
             HolderProof::Session(Some(at)) => now - at < max_age,
             HolderProof::Session(None) => false,
         }

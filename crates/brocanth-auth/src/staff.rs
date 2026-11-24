@@ -42,7 +42,7 @@
 //! gets no staff rights, the subject's or the operator's. Otherwise an
 //! operator with one narrow role who impersonates a superuser becomes one.
 //! [`Staff::impersonate`] also refuses a staff subject and asks the
-//! operator for the `accounts.impersonate` permission.
+//! operator for the `impersonate.edit` permission.
 
 use std::collections::BTreeSet;
 
@@ -183,8 +183,14 @@ impl Staff {
             .await
     }
 
-    /// The permission [`Staff::impersonate`] asks for.
-    pub const IMPERSONATE: &'static str = "accounts.impersonate";
+    /// The permission [`Staff::impersonate`] asks for: `edit` on the
+    /// `impersonate` resource, the RBAC key of the admin's Impersonate tab.
+    ///
+    /// A level on a resource, like every other permission the admin reads,
+    /// so the roles tab can hand it out: a superuser gives
+    /// `impersonate.owner` to a support lead, who gives `impersonate.edit`
+    /// to the support staff and nothing more.
+    pub const IMPERSONATE: &'static str = "impersonate.edit";
 
     /// The account's address, or its id when it has none. For a screen.
     pub fn name(&self) -> String {

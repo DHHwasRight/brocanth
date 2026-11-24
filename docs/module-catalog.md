@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 76 modules. Each name links to its own page
+what to build next. There are 78 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -103,6 +103,8 @@ nothing holds this page.
 | [`jobs-memory`](modules/jobs-memory.md) | The queue in this process's memory; for development and tests, gone at restart |  |  | part of `jobs`, off until you tick it | `check --deploy` refuses it |
 | [`mail`](modules/mail.md) | Send mail through SMTP, or to the log or a folder in development |  |  |  | with `jobs`: `deliver_later` goes on the `mail` queue |
 | [`auth-lockout`](modules/auth-lockout.md) | Locks an account for minutes after too many wrong passwords |  |  | part of `auth`, off until you tick it | with `auth-screens`: sign-in counts wrong passwords |
+| [`auth-otp`](modules/auth-otp.md) | Sign in with an eight-digit code mailed to the address, under /account/otp |  |  | part of `auth`, off until you tick it | needs `auth-screens`, `mail`; the mailed code stands in for the password |
+| [`auth-mfa`](modules/auth-mfa.md) | Who must use a second factor, forced TOTP set-up, recovery codes, a QR code and login alerts |  |  | part of `auth`, off until you tick it | needs `auth-screens`; `[auth_mfa] require` is enrolled, staff or everyone |
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
 | [`roles`](modules/roles.md) | Roles that grant permissions, stored with the accounts, for staff and the admin |  |  | needs `superuser`: only a superuser gives a role, and `superuser` reads the signed-in member of staff |  |

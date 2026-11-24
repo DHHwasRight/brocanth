@@ -662,6 +662,7 @@ pub enum SecondFactorRequirement {
 pub struct FactorPolicy {
     second_factor: SecondFactorRequirement,
     recovery_code_elevates: bool,
+    mailbox_is_primary: bool,
     elevation_ttl: i64,
 }
 
@@ -672,8 +673,31 @@ impl FactorPolicy {
         Self {
             second_factor: SecondFactorRequirement::WhenEnrolled,
             recovery_code_elevates: false,
+            mailbox_is_primary: false,
             elevation_ttl: DEFAULT_ELEVATION_TTL,
         }
+    }
+
+    /// Lets a code mailed to the account's address stand in for the
+    /// primary factor of a sign-in: [`FactorKind::EmailOtp`] alone opens a
+    /// session for an account with no second factor, and asks for one from
+    /// an account that has one.
+    ///
+    /// Off by default, because whether a mailbox is a primary credential is
+    /// a decision about the product, not about cryptography (see
+    /// [`crate::otp::Otp::authenticate`]). A password reset by mail already
+    /// makes it one in practice, which is the case for turning this on. The
+    /// mailed code is never also counted as the second factor: an account
+    /// with TOTP still gives its TOTP code.
+    #[must_use]
+    pub const fn accepting_mailbox_as_primary(mut self) -> Self {
+        self.mailbox_is_primary = true;
+        self
+    }
+
+    /// Whether a mailed code stands in for the primary factor.
+    pub fn mailbox_is_primary(&self) -> bool {
+        self.mailbox_is_primary
     }
 
     /// Demands a second factor from every account.
@@ -755,8 +779,14 @@ impl FactorPolicy {
                 factors: satisfied,
             });
         }
+        // The kinds that count as the second factor. A mailed code that
+        // stands in for the primary one is not also the second.
+        let mut second = satisfied.of_class(FactorClass::Second);
         if !satisfied.any_of_class(FactorClass::Primary) {
-            return Admission::Insufficient;
+            if !(self.mailbox_is_primary && satisfied.contains(FactorKind::EmailOtp)) {
+                return Admission::Insufficient;
+            }
+            second = second.without(FactorKind::EmailOtp);
         }
         let owes_a_second = match self.second_factor {
             SecondFactorRequirement::Always => true,
@@ -765,7 +795,7 @@ impl FactorPolicy {
                     || enrolled_kinds.any_of_class(FactorClass::Standalone)
             }
         };
-        if !owes_a_second || satisfied.any_of_class(FactorClass::Second) {
+        if !owes_a_second || !second.is_empty() {
             return Admission::Admit(Admitted {
                 account: proof.account,
                 factors: satisfied,

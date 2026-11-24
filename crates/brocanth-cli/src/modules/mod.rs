@@ -135,6 +135,11 @@ pub const ALL: &[&dyn Module] = &[
     // Wrong passwords counted per account, from the same crate. Off with
     // its parent: a lock costs the owner minutes.
     &brocanth_auth::scaffold::AuthLockout,
+    // Sign-in by a code mailed to the address, and second factors as a
+    // policy, from the same crate. Off with their parent: each needs the
+    // screens, and each changes how somebody signs in.
+    &brocanth_auth::scaffold::AuthOtp,
+    &brocanth_auth::scaffold::AuthMfa,
     // The people who operate the application: superusers, who pass every
     // admin check, and roles that grant permissions.
     &brocanth_auth::scaffold::Superuser,

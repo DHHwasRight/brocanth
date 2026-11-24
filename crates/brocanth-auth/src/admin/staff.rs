@@ -352,7 +352,7 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
 }
 
 /// `jobs.edit` as `("jobs", Level::Edit)`, or `None` for a permission that
-/// is not a level on a resource, such as `accounts.impersonate`.
+/// is not a level on a resource, such as `reports.export`.
 fn split(permission: &str) -> Option<(&str, Level)> {
     let (resource, level) = permission.rsplit_once('.')?;
     Some((resource, Level::parse(level)?))
@@ -527,7 +527,7 @@ mod tests {
         assert!(superuser.may_grant("cache", Level::Owner));
         assert!(!Grantor::default().may_grant("jobs", Level::Read));
         assert_eq!(split("jobs.edit"), Some(("jobs", Level::Edit)));
-        assert_eq!(split("accounts.impersonate"), None);
+        assert_eq!(split("reports.export"), None);
         assert!(valid_resource("oauth-connections"));
         assert!(!valid_resource("Jobs") && !valid_resource("a.b") && !valid_resource(""));
     }

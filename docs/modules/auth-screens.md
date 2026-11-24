@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/auth_screens.rs`. A setting is re
 | Provides | none |
 | Requires | none |
 | Uses | `PgPool` (a Postgres pool): accounts are in Postgres, so the generated end-to-end test is left out |
-| Adapts to | [`auth-lockout`](auth-lockout.md): sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock |
+| Adapts to | [`auth-lockout`](auth-lockout.md): sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock; [`auth-otp`](auth-otp.md): sign-in links to the mailed-code page, and a mailed code stands in for the password; [`auth-mfa`](auth-mfa.md): `[auth_mfa] require` decides who owes a second factor, a sign-in that owes one it lacks sets it up first, a sign-in from a new network mails the owner, and the TOTP page draws a QR code |
 | Contributes | `AgentsSection` `auth-screens`: which pages the account screens own, and how they are changed |
 | Collects | none |
 | Exports | `sign_in_posts` (`/account/signin`, `/account/code`, `/account/elevate`): the POST paths that check a password or a code: the sign-in form first, then the second factor and the password check before a sensitive change |
@@ -68,10 +68,23 @@ Slots:
 | `/account/reset/{token}` | the form | sets the new password, ends every session |
 | `/account/verify/{token}` | a button | confirms the address |
 | `/account/totp` | a new key and its `otpauth://` link | confirms the key, shows the recovery codes once |
+| `/account/elevate` | the form; `?then=` names the page to go back to | checks the password, and the TOTP code when the account has one, then elevates the session |
 
 With [`auth-lockout`](auth-lockout.md), sign-in goes through the lockout:
 it counts wrong passwords and mails the owner when an account locks. A
 reset lifts the lock.
+
+With [`auth-otp`](auth-otp.md), the sign-in form links to
+`/account/otp`, and `admit` takes a mailed code as the primary factor.
+
+With [`auth-mfa`](auth-mfa.md), `admit` asks `[auth_mfa] require` who
+owes a second factor, sends a sign-in that must enrol to
+`/account/mfa/setup`, and mails the owner of a sign-in from a new network.
+`/account/totp` draws a QR code.
+
+`src/plugins/auth_screens/testing.rs` (with the store in memory) is the
+browser the tests of every account module drive: one application, one
+cookie jar, the CSRF token.
 
 ## Module file
 
@@ -115,6 +128,10 @@ Section `[auth_screens]`. Environment variable: `$<APP>_AUTH_SCREENS__<KEY>`. Fl
   password passed and the code has not. `Sessions::seal_proof` signs the
   proof with the session key. `Path=/account` keeps the cookie off every
   other request. A page never holds the key.
+- **An elevation goes back to `then`, a path on this site.** A `then`
+  with a scheme, `//` or `/\` is ignored, so the form is no open
+  redirect. An account with TOTP gives its code on the same form: the
+  policy does not elevate it on a password alone.
 - **No generated test with Postgres.** With `jobs` or `cache`, accounts are
   in Postgres, and a test of the pages would need a database.
 

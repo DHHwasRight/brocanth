@@ -37,10 +37,13 @@
 //! own `main`, where the decision is visible — which is what §8 asks for
 //! everywhere else too.
 //!
-//! Two of them are methods instead of fields: [`Auth::mfa`] and
-//! [`Auth::lockout`] exist only when `S` implements the trait, so they add no
-//! bound to `AuthConfig`. Each is cheap to build, so a page builds one per
-//! request.
+//! Four of them are methods instead of fields: [`Auth::mfa`],
+//! [`Auth::lockout`], [`Auth::otp`] and [`Auth::login_alerts`] exist only
+//! when `S` implements the trait, so they add no bound to `AuthConfig`. Each
+//! is cheap to build, so a page builds one per request. `otp` and
+//! `login_alerts` are methods for a second reason: they need the hasher and
+//! the signing key, which `AuthConfig` took by value and nothing else hands
+//! out.
 //!
 //! [`Mfa`]: crate::mfa::Mfa
 //! [`Otp`]: crate::otp::Otp
@@ -63,6 +66,7 @@ use brocanth::plugin_api::{Lifecycle, MiddlewareCatalog, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
 
 use crate::accounts::Accounts;
+use crate::alerts::LoginAlerts;
 use crate::clock::Clock;
 use crate::error::AuthError;
 use crate::http_client::HttpClient;
@@ -70,12 +74,13 @@ use crate::linking::Linking;
 use crate::lockout::{Lockout, LockoutPolicy};
 use crate::mfa::Mfa;
 use crate::oauth::{ClientConfig, OauthClient};
+use crate::otp::Otp;
 use crate::password::Passwords;
 use crate::providers::Provider;
 use crate::secret_key::SecretKey;
 use crate::session::{SessionConfig, Sessions, SigningKey};
 use crate::storage::AuthStore;
-use crate::storage::{LockoutStore, MfaStore};
+use crate::storage::{LockoutStore, MfaStore, OtpStore, SignInLocationStore};
 
 /// One provider, configured for this application.
 #[derive(Clone, Debug)]
@@ -120,6 +125,11 @@ struct Inner<S: AuthStore, H: HttpClient, C: Clock> {
     providers: Vec<ConfiguredProvider>,
     /// Seals TOTP secrets at rest, when set. See [`Auth::with_totp_key`].
     totp_key: Option<SecretKey>,
+    /// The hasher, for [`Auth::otp`]: a code is hashed as a password is.
+    passwords: Arc<Passwords>,
+    /// The signing key, for [`Auth::login_alerts`]: it keys the network
+    /// digest a login alert stores.
+    signing_key: SigningKey,
 }
 
 /// The context item: everything a handler needs, behind one `Arc`.
@@ -165,6 +175,41 @@ impl<S: LockoutStore, H: HttpClient, C: Clock> Auth<S, H, C> {
     }
 }
 
+impl<S: OtpStore + MfaStore, H: HttpClient, C: Clock> Auth<S, H, C> {
+    /// One-time codes over the same store, clock and hasher as the rest,
+    /// at the defaults `otp` computes: eight digits, five attempts, ten
+    /// minutes. Change them with [`Otp::with_digits`] and its siblings.
+    ///
+    /// Not a field, for the reason [`Auth::mfa`] is not one. Each call
+    /// draws the sentinel account an unknown address is charged to, so
+    /// build one per request.
+    ///
+    /// # Errors
+    /// Fails when the OS has no randomness.
+    pub fn otp(&self) -> Result<Otp<S, C>, AuthError> {
+        Otp::new(
+            self.0.store.clone(),
+            self.0.clock.clone(),
+            self.0.passwords.clone(),
+        )
+    }
+}
+
+impl<S: SignInLocationStore, H: HttpClient, C: Clock> Auth<S, H, C> {
+    /// Login alerts over the same store and clock, keyed with the session
+    /// signing key, with a ninety-day memory.
+    ///
+    /// Not a field, for the reason [`Auth::mfa`] is not one. It holds no
+    /// state of its own, so build one per request.
+    pub fn login_alerts(&self) -> LoginAlerts<S, C> {
+        LoginAlerts::new(
+            self.0.store.clone(),
+            self.0.clock.clone(),
+            self.0.signing_key.clone(),
+        )
+    }
+}
+
 impl<S: AuthStore, H: HttpClient, C: Clock> std::fmt::Debug for Auth<S, H, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Auth")
@@ -204,6 +249,8 @@ impl<S: AuthStore, H: HttpClient, C: Clock> Auth<S, H, C> {
             oauth,
             providers: config.providers,
             totp_key: None,
+            passwords: config.passwords,
+            signing_key: config.signing_key,
         })))
     }
 

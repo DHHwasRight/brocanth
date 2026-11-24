@@ -82,6 +82,8 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`auth-oauth`](auth-oauth.md) | sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Routes, Enhancer | auth |
 | [`auth-screens`](auth-screens.md) | sign-up, sign-in, sign-out, reset, verify and TOTP pages under /account | Routes, Enhancer | auth |
 | [`auth-lockout`](auth-lockout.md) | locks an account for minutes after too many wrong passwords | Enhancer | auth |
+| [`auth-otp`](auth-otp.md) | sign in with an eight-digit code mailed to the address, under /account/otp | Routes, Enhancer | auth |
+| [`auth-mfa`](auth-mfa.md) | who must use a second factor, forced TOTP set-up, recovery codes, a QR code and login alerts | Routes, Middleware, Enhancer | auth |
 | [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
 | [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |

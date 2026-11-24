@@ -66,6 +66,14 @@ impl Module for AuthScreens {
             "auth-lockout",
             "sign-in counts wrong passwords and mails the owner of a locked account; a reset lifts the lock",
         )
+        .adapts_to(
+            "auth-otp",
+            "sign-in links to the mailed-code page, and a mailed code stands in for the password",
+        )
+        .adapts_to(
+            "auth-mfa",
+            "`[auth_mfa] require` decides who owes a second factor, a sign-in that owes one it lacks sets it up first, a sign-in from a new network mails the owner, and the TOTP page draws a QR code",
+        )
         .asked_in("doors", "Sign-up, sign-in and reset pages")
         // Pages, so routes and not settings. A reader (the rate-limit
         // example) reads them here and copies nothing.
@@ -95,10 +103,17 @@ impl Module for AuthScreens {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let with_test = !uses_postgres(project);
         s.file(
             "src/plugins/auth_screens/mod.rs",
-            plugin_rs(project, !uses_postgres(project)),
+            plugin_rs(project, with_test),
         );
+        if with_test {
+            s.file(
+                "src/plugins/auth_screens/testing.rs",
+                TESTING_RS.to_string(),
+            );
+        }
         s.at(Slot::PluginsMod).line("pub mod auth_screens;");
         configurable(
             s,
@@ -120,9 +135,11 @@ impl Module for AuthScreens {
             ],
         );
         let lockout = project.has("auth-lockout");
+        let mfa = project.has("auth-mfa");
         for (path, text) in PAGES {
             let text = match *path {
-                "src/pages/account/signin.rs" if lockout => with_lockout(
+                "src/pages/account/totp.rs" if mfa => swap(text, &[(QR_PLAIN, QR_MFA)]),
+                "src/pages/account/signin.rs" if lockout => swap(
                     text,
                     &[
                         (
@@ -133,13 +150,18 @@ impl Module for AuthScreens {
                     ],
                 ),
                 "src/pages/account/reset/[token].rs" if lockout => {
-                    with_lockout(text, &[(RESET_PLAIN, RESET_LOCKOUT)])
+                    swap(text, &[(RESET_PLAIN, RESET_LOCKOUT)])
                 }
                 _ => text.to_string(),
             };
             s.file(*path, text);
         }
-        s.file("src/pages/account/screens.rsx", SCREENS_RSX.to_string());
+        let markup = if project.has("auth-otp") {
+            swap(SCREENS_RSX, &[(SIGNIN_LINKS, SIGNIN_LINKS_OTP)])
+        } else {
+            SCREENS_RSX.to_string()
+        };
+        s.file("src/pages/account/screens.rsx", markup);
         for route in ROUTES {
             s.at(Slot::PagesRoutes).line(*route);
         }
@@ -170,6 +192,12 @@ fn plugin_rs(project: &Project, with_test: bool) -> String {
         .replace("\"@ISSUER@\"", &format!("{:?}", project.title))
         .replace("@AFTER@", &module_ref("auth-screens", "after_sign_in"))
         .replace("@PENDING@", &module_ref("auth-screens", "pending_secs"));
+    if project.has("auth-mfa") {
+        out = swap(&out, super::mfa::ADMIT_SWAPS);
+    }
+    if project.has("auth-otp") {
+        out = swap(&out, super::otp::ADMIT_SWAPS);
+    }
     if project.has("auth-lockout") {
         out.push_str(LOCKED_MAIL_RS);
     }
@@ -184,20 +212,38 @@ fn plugin_rs(project: &Project, with_test: bool) -> String {
     out
 }
 
-/// `page` with each plain text swapped for its locked one. Panics when a
-/// plain text is not in it, so a change to a page that misses the swap
-/// fails every test.
-fn with_lockout(page: &str, swaps: &[(&str, &str)]) -> String {
+/// `page` with each plain text swapped for the text another module wants
+/// there. Panics when a plain text is not in it, so a change to a page that
+/// misses the swap fails every test.
+pub(super) fn swap(page: &str, swaps: &[(&str, &str)]) -> String {
     swaps
         .iter()
         .fold(page.to_string(), |page, (plain, locked)| {
             assert!(
                 page.contains(plain),
-                "the page lost the text the lockout swaps: {plain}"
+                "the page lost the text a module swaps: {plain}"
             );
             page.replacen(plain, locked, 1)
         })
 }
+
+/// The QR code of the TOTP page, without and with `auth-mfa`.
+const QR_PLAIN: &str = "            // No QR code: the `auth-mfa` module draws one.
+            let qr = String::new();
+";
+
+/// `auth-mfa` draws the `otpauth://` link as a QR code.
+const QR_MFA: &str = "            let qr = crate::plugins::auth_mfa::qr_svg(&enrolment.uri);
+";
+
+/// The links under the sign-in form, without and with `auth-otp`.
+const SIGNIN_LINKS: &str = "        <p><a href=\"/account/forgot\">I forgot my password</a></p>
+";
+
+/// With `auth-otp`, a person with no password at hand asks for a code.
+const SIGNIN_LINKS_OTP: &str = "        <p><a href=\"/account/otp\">Email me a sign-in code</a></p>
+        <p><a href=\"/account/forgot\">I forgot my password</a></p>
+";
 
 /// The password check of the sign-in page, without and with the lockout.
 const SIGNIN_PLAIN: &str =
@@ -271,7 +317,7 @@ const PLUGIN_RS: &str = r#"//! The account screens' plugin, and what every scree
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_auth::{Admission, AuthStore, FactorPolicy, SessionRecord, Verified};
+use brocanth_auth::{Admission, AuthStore, SessionRecord, Verified};
 use brocanth_middleware::{Flash, Level};
 
 use crate::pages::{Ctx, Error, Response, Sent};
@@ -427,6 +473,19 @@ pub fn see_other(location: &str) -> Response {
     Response::empty(303).with_header("location", location)
 }
 
+/// `path` when it is a path on this site: one `/`, then no second `/` or
+/// `\`, no scheme and no control character. `None` for anything else, so
+/// a `then` field cannot send a browser to another site.
+pub fn local_path(path: Option<&str>) -> Option<&str> {
+    let path = path?;
+    let local = path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.starts_with("/\\")
+        && !path.contains("://")
+        && !path.chars().any(char::is_control);
+    local.then_some(path)
+}
+
 /// A mail with a plain-text body, through the outbox.
 pub async fn mail(ctx: &Ctx, to: &str, subject: &str, text: String) -> Result<(), Error> {
     let outbox = ctx.provided::<Outbox, _>().cloned().ok_or_else(|| {
@@ -462,12 +521,13 @@ pub async fn email_of(auth: &Services, session: &SessionRecord) -> Result<String
 /// or wait for a second factor, or refuse.
 pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Response, Error> {
     let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let policy = brocanth_auth::FactorPolicy::recommended();
     let secure = if auth.sessions().config().secure {
         "; Secure"
     } else {
         ""
     };
-    match FactorPolicy::recommended().admit(&enrolled, proof) {
+    match policy.admit(&enrolled, proof) {
         Admission::Admit(admitted) => {
             // The session the browser had, if any, is replaced: a new
             // identifier at sign-in is the defence against fixation.
@@ -511,214 +571,17 @@ pub async fn admit(ctx: &mut Ctx, auth: &Services, proof: Verified) -> Result<Re
 /// every form, every token, and the answers a stranger must not tell apart.
 const TEST_RS: &str = r##"
 #[cfg(test)]
+pub mod testing;
+
+#[cfg(test)]
 mod tests {
     use brocanth::routing::Verb;
-    use brocanth_server::{Body, Request, Response};
+    use brocanth_server::Request;
 
-    use crate::plugins::auth::Services;
-
-    const PASSWORD: &str = "correct horse battery";
-
-    /// One application and one cookie jar: what a browser keeps between
-    /// requests. Each `Browser` builds its own application, so each has its
-    /// own memory store.
-    struct Browser {
-        app: crate::app::App,
-        jar: Vec<(String, String)>,
-        /// The CSRF cookie's name, as the first page set it.
-        csrf_cookie: String,
-    }
-
-    impl Browser {
-        async fn new() -> Self {
-            let mut browser = Self {
-                app: crate::app::build().expect("the application builds"),
-                jar: Vec::new(),
-                csrf_cookie: String::new(),
-            };
-            let first = browser.get("/account/signup").await;
-            assert_eq!(first.status, 200);
-            // The cookie's name depends on `[csrf] cookie` and on `Secure`,
-            // so find the cookie that holds the form's token.
-            let token = csrf_token(&text(&first)).expect("a CSRF field");
-            browser.csrf_cookie = browser
-                .jar
-                .iter()
-                .find(|(_, value)| *value == token)
-                .map(|(key, _)| key.clone())
-                .expect("a CSRF cookie");
-            browser
-        }
-
-        /// The CSRF token, as the cookie holds it.
-        fn csrf(&self) -> String {
-            self.cookie(&self.csrf_cookie).expect("a CSRF cookie")
-        }
-
-        fn auth(&self) -> Services {
-            self.app.core.context().get::<Services, _>().clone()
-        }
-
-        fn cookie(&self, name: &str) -> Option<String> {
-            self.jar
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.clone())
-        }
-
-        fn set_cookie(&mut self, name: &str, value: &str) {
-            self.jar.retain(|(key, _)| key != name);
-            self.jar.push((name.to_string(), value.to_string()));
-        }
-
-        async fn send(&mut self, mut request: Request) -> Response {
-            if !self.jar.is_empty() {
-                let line: Vec<String> = self.jar.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                request = request.with_header("cookie", &line.join("; "));
-            }
-            let response = crate::app::handle(&self.app, request).await;
-            for (name, line) in response.headers() {
-                if !name.eq_ignore_ascii_case("set-cookie") {
-                    continue;
-                }
-                let pair = line.split(';').next().unwrap_or_default();
-                let Some((key, value)) = pair.split_once('=') else {
-                    continue;
-                };
-                self.jar.retain(|(k, _)| k != key);
-                if !value.is_empty() && !line.contains("Max-Age=0") {
-                    self.jar.push((key.to_string(), value.to_string()));
-                }
-            }
-            response
-        }
-
-        async fn get(&mut self, path: &str) -> Response {
-            self.send(Request::new(Verb::Get, path)).await
-        }
-
-        /// A form post with the CSRF field, as the page's form sends it.
-        async fn post(&mut self, path: &str, form: &str) -> Response {
-            let token = self.csrf();
-            self.post_raw(path, &format!("{}={token}&{form}", csrf_field()))
-                .await
-        }
-
-        async fn post_raw(&mut self, path: &str, body: &str) -> Response {
-            let (path, query) = path.split_once('?').unwrap_or((path, ""));
-            let mut request = Request::new(Verb::Post, path)
-                .with_header("content-type", "application/x-www-form-urlencoded");
-            request.query = query.to_string();
-            request.body = body.to_string().into();
-            self.send(request).await
-        }
-
-        /// The page a redirect points at, as the browser asks for it next.
-        async fn follow(&mut self, response: &Response) -> String {
-            assert_eq!(response.status, 303, "a redirect");
-            let location = response.header("location").expect("a location").to_string();
-            let page = self.get(&location).await;
-            text(&page)
-        }
-
-        async fn sign_up(&mut self, email: &str) -> Response {
-            self.post("/account/signup", &credentials(email, PASSWORD))
-                .await
-        }
-
-        async fn sign_in(&mut self, email: &str, password: &str) -> Response {
-            self.post("/account/signin", &credentials(email, password))
-                .await
-        }
-
-        /// Whether the jar holds a session.
-        fn signed_in(&self) -> bool {
-            let name = self.auth().sessions().config().cookie_name.clone();
-            self.cookie(&name).is_some()
-        }
-    }
-
-    fn credentials(email: &str, password: &str) -> String {
-        format!(
-            "email={}&password={}",
-            email.replace('@', "%40"),
-            password.replace(' ', "+")
-        )
-    }
-
-    fn text(response: &Response) -> String {
-        match &response.body {
-            Body::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-            Body::Stream(_) => panic!("a page, not a stream"),
-        }
-    }
-
-    /// The name of the form's CSRF field: the default, which the config
-    /// file is written with.
-    fn csrf_field() -> String {
-        brocanth_middleware::CsrfConfig::default().field
-    }
-
-    /// The value of the first CSRF field in a page, as the hook drew it:
-    /// masked with a fresh pad on each response.
-    fn csrf_value(page: &str) -> Option<&str> {
-        let marker = format!(r#"name="{}" value=""#, csrf_field());
-        let start = page.find(&marker)? + marker.len();
-        let len = page[start..].find('"')?;
-        Some(&page[start..start + len])
-    }
-
-    /// The token inside the page's CSRF field: hex of a pad, then hex of
-    /// the pad XOR the token.
-    fn csrf_token(page: &str) -> Option<String> {
-        let sent = csrf_value(page)?;
-        let bytes: Vec<u8> = (0..sent.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(sent.get(i..i + 2)?, 16).ok())
-            .collect::<Option<_>>()?;
-        let (pad, masked) = bytes.split_at(bytes.len() / 2);
-        let token: String = pad
-            .iter()
-            .zip(masked)
-            .map(|(p, m)| format!("{:02x}", p ^ m))
-            .collect();
-        Some(token)
-    }
-
-    /// The page with the value of each CSRF field blanked: the pad
-    /// differs on each response, so two pages compare without it.
-    fn without_csrf(page: &str) -> String {
-        let mut page = page.to_string();
-        while let Some(value) = csrf_value(&page).filter(|value| !value.is_empty()) {
-            page = page.replacen(&format!(r#"value="{value}""#), r#"value="""#, 1);
-        }
-        page
-    }
-
-    /// The `<p role="alert">` of a form drawn again.
-    fn alert(response: &Response) -> String {
-        let body = text(response);
-        let start = body.find(r#"<p role="alert">"#).expect("an alert");
-        let rest = &body[start..];
-        rest[..rest.find("</p>").expect("closed")].to_string()
-    }
-
-    /// A reset token, as the link in the reset mail carries it.
-    async fn reset_token(browser: &Browser, email: &str) -> String {
-        match browser
-            .auth()
-            .accounts()
-            .request_password_reset(email)
-            .await
-            .expect("a reset")
-            .outcome
-        {
-            brocanth_auth::accounts::ResetOutcome::Issue { token, .. } => {
-                token.secret().to_string()
-            }
-            _ => panic!("{email} has an account"),
-        }
-    }
+    use super::testing::{
+        alert, credentials, csrf_field, csrf_token, reset_token, text, without_csrf, Browser,
+        PASSWORD,
+    };
 
     const POSTS: &[&str] = &[
         "/account/signup",
@@ -1046,6 +909,27 @@ mod tests {
         assert_eq!(post.header("location"), Some("/account/signin"));
     }
 
+    /// `then` on the elevation form goes back to a page of this site, and
+    /// to nowhere else.
+    #[tokio::test]
+    async fn an_elevation_goes_back_only_to_a_page_of_this_site() {
+        let mut browser = Browser::new().await;
+        browser.sign_up("ada@example.com").await;
+        browser.sign_in("ada@example.com", PASSWORD).await;
+        let password = format!("password={}", PASSWORD.replace(' ', "+"));
+        for (then, lands) in [
+            ("%2Faccount%2Fsignout", "/account/signout"),
+            ("https%3A%2F%2Fevil.example", "/account/totp"),
+            ("%2F%2Fevil.example", "/account/totp"),
+            ("%2F%5Cevil.example", "/account/totp"),
+        ] {
+            let answered = browser
+                .post("/account/elevate", &format!("{password}&then={then}"))
+                .await;
+            assert_eq!(answered.header("location"), Some(lands), "{then}");
+        }
+    }
+
     /// Two-step sign-in, from turning it on to a replayed code.
     #[tokio::test]
     async fn a_second_factor_is_asked_for_and_a_wrong_or_spent_code_is_refused() {
@@ -1147,6 +1031,221 @@ mod tests {
 @LOCKOUT@}
 "##;
 
+/// The browser the tests of every account module drive.
+const TESTING_RS: &str = r##"//! A browser for the account screens' tests: one application, one cookie
+//! jar, and the CSRF token a form carries.
+//!
+//! Compiled for tests only. The tests of each account module use it, and
+//! each uses a part, so an unused helper is not a warning here.
+#![allow(dead_code)]
+
+use brocanth::routing::Verb;
+use brocanth_server::{Body, Request, Response};
+
+use crate::plugins::auth::Services;
+
+pub const PASSWORD: &str = "correct horse battery";
+
+/// One application and one cookie jar: what a browser keeps between
+/// requests. Each `Browser` builds its own application, so each has its
+/// own memory store.
+pub struct Browser {
+    app: crate::app::App,
+    jar: Vec<(String, String)>,
+    /// The CSRF cookie's name, as the first page set it.
+    csrf_cookie: String,
+}
+
+impl Browser {
+    pub async fn new() -> Self {
+        let mut browser = Self {
+            app: crate::app::build().expect("the application builds"),
+            jar: Vec::new(),
+            csrf_cookie: String::new(),
+        };
+        let first = browser.get("/account/signup").await;
+        assert_eq!(first.status, 200);
+        // The cookie's name depends on `[csrf] cookie` and on `Secure`,
+        // so find the cookie that holds the form's token.
+        let token = csrf_token(&text(&first)).expect("a CSRF field");
+        browser.csrf_cookie = browser
+            .jar
+            .iter()
+            .find(|(_, value)| *value == token)
+            .map(|(key, _)| key.clone())
+            .expect("a CSRF cookie");
+        browser
+    }
+
+    /// The CSRF token, as the cookie holds it.
+    pub fn csrf(&self) -> String {
+        self.cookie(&self.csrf_cookie).expect("a CSRF cookie")
+    }
+
+    pub fn auth(&self) -> Services {
+        self.app.core.context().get::<Services, _>().clone()
+    }
+
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        self.jar
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    }
+
+    pub fn set_cookie(&mut self, name: &str, value: &str) {
+        self.jar.retain(|(key, _)| key != name);
+        self.jar.push((name.to_string(), value.to_string()));
+    }
+
+    pub async fn send(&mut self, mut request: Request) -> Response {
+        if !self.jar.is_empty() {
+            let line: Vec<String> = self.jar.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            request = request.with_header("cookie", &line.join("; "));
+        }
+        let response = crate::app::handle(&self.app, request).await;
+        for (name, line) in response.headers() {
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                continue;
+            }
+            let pair = line.split(';').next().unwrap_or_default();
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            self.jar.retain(|(k, _)| k != key);
+            if !value.is_empty() && !line.contains("Max-Age=0") {
+                self.jar.push((key.to_string(), value.to_string()));
+            }
+        }
+        response
+    }
+
+    pub async fn get(&mut self, path: &str) -> Response {
+        self.send(Request::new(Verb::Get, path)).await
+    }
+
+    /// A form post with the CSRF field, as the page's form sends it.
+    pub async fn post(&mut self, path: &str, form: &str) -> Response {
+        let token = self.csrf();
+        self.post_raw(path, &format!("{}={token}&{form}", csrf_field()))
+            .await
+    }
+
+    pub async fn post_raw(&mut self, path: &str, body: &str) -> Response {
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        let mut request = Request::new(Verb::Post, path)
+            .with_header("content-type", "application/x-www-form-urlencoded");
+        request.query = query.to_string();
+        request.body = body.to_string().into();
+        self.send(request).await
+    }
+
+    /// The page a redirect points at, as the browser asks for it next.
+    pub async fn follow(&mut self, response: &Response) -> String {
+        assert_eq!(response.status, 303, "a redirect");
+        let location = response.header("location").expect("a location").to_string();
+        let page = self.get(&location).await;
+        text(&page)
+    }
+
+    pub async fn sign_up(&mut self, email: &str) -> Response {
+        self.post("/account/signup", &credentials(email, PASSWORD))
+            .await
+    }
+
+    pub async fn sign_in(&mut self, email: &str, password: &str) -> Response {
+        self.post("/account/signin", &credentials(email, password))
+            .await
+    }
+
+    /// Whether the jar holds a session.
+    pub fn signed_in(&self) -> bool {
+        let name = self.auth().sessions().config().cookie_name.clone();
+        self.cookie(&name).is_some()
+    }
+}
+
+pub fn credentials(email: &str, password: &str) -> String {
+    format!(
+        "email={}&password={}",
+        email.replace('@', "%40"),
+        password.replace(' ', "+")
+    )
+}
+
+pub fn text(response: &Response) -> String {
+    match &response.body {
+        Body::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Body::Stream(_) => panic!("a page, not a stream"),
+    }
+}
+
+/// The name of the form's CSRF field: the default, which the config
+/// file is written with.
+pub fn csrf_field() -> String {
+    brocanth_middleware::CsrfConfig::default().field
+}
+
+/// The value of the first CSRF field in a page, as the hook drew it:
+/// masked with a fresh pad on each response.
+pub fn csrf_value(page: &str) -> Option<&str> {
+    let marker = format!(r#"name="{}" value=""#, csrf_field());
+    let start = page.find(&marker)? + marker.len();
+    let len = page[start..].find('"')?;
+    Some(&page[start..start + len])
+}
+
+/// The token inside the page's CSRF field: hex of a pad, then hex of
+/// the pad XOR the token.
+pub fn csrf_token(page: &str) -> Option<String> {
+    let sent = csrf_value(page)?;
+    let bytes: Vec<u8> = (0..sent.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(sent.get(i..i + 2)?, 16).ok())
+        .collect::<Option<_>>()?;
+    let (pad, masked) = bytes.split_at(bytes.len() / 2);
+    let token: String = pad
+        .iter()
+        .zip(masked)
+        .map(|(p, m)| format!("{:02x}", p ^ m))
+        .collect();
+    Some(token)
+}
+
+/// The page with the value of each CSRF field blanked: the pad
+/// differs on each response, so two pages compare without it.
+pub fn without_csrf(page: &str) -> String {
+    let mut page = page.to_string();
+    while let Some(value) = csrf_value(&page).filter(|value| !value.is_empty()) {
+        page = page.replacen(&format!(r#"value="{value}""#), r#"value="""#, 1);
+    }
+    page
+}
+
+/// The `<p role="alert">` of a form drawn again.
+pub fn alert(response: &Response) -> String {
+    let body = text(response);
+    let start = body.find(r#"<p role="alert">"#).expect("an alert");
+    let rest = &body[start..];
+    rest[..rest.find("</p>").expect("closed")].to_string()
+}
+
+/// A reset token, as the link in the reset mail carries it.
+pub async fn reset_token(browser: &Browser, email: &str) -> String {
+    match browser
+        .auth()
+        .accounts()
+        .request_password_reset(email)
+        .await
+        .expect("a reset")
+        .outcome
+    {
+        brocanth_auth::accounts::ResetOutcome::Issue { token, .. } => token.secret().to_string(),
+        _ => panic!("{email} has an account"),
+    }
+}
+"##;
+
 /// With `auth-lockout`: the lock, seen through the sign-in page.
 const LOCKOUT_TEST_RS: &str = r#"
     #[tokio::test]
@@ -1195,7 +1294,8 @@ const SCREENS_RSX: &str = r#"// The markup of the account screens. One file, so 
 // each page in this directory names its own component.
 //
 // `csrf` is the hidden input the CSRF hook minted for this request. It is
-// HTML already, so it goes in with `{! }`. Nothing else here is raw.
+// HTML already, so it goes in with `{! }`. So is `qr`, the SVG of a QR code
+// this application drew. Nothing else here is raw.
 
 fn Problem(text: &str) -> Element {
     if !text.is_empty() {
@@ -1287,19 +1387,21 @@ pub fn Code(csrf: &str, error: &str) -> Element {
     </section>
 }
 
-pub fn Elevate(csrf: &str, error: &str) -> Element {
+pub fn Elevate(csrf: &str, then: &str, error: &str) -> Element {
     <section>
         <h1>Confirm it is you</h1>
         <Problem text={error} />
         <form method="post" action="/account/elevate">
             {! csrf}
+            <input type="hidden" name="then" value={then}>
             <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+            <label>Code from your app, if this account has two-step sign-in <input name="code" inputmode="numeric" autocomplete="one-time-code"></label>
             <button>Continue</button>
         </form>
     </section>
 }
 
-pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) -> Element {
+pub fn Totp(csrf: &str, secret: &str, uri: &str, qr: &str, error: &str, codes: &[String]) -> Element {
     <section>
         <h1>Two-step sign-in</h1>
         if !codes.is_empty() {
@@ -1311,6 +1413,9 @@ pub fn Totp(csrf: &str, secret: &str, uri: &str, error: &str, codes: &[String]) 
             </ul>
         } else {
             <Problem text={error} />
+            if !qr.is_empty() {
+                <figure>{! qr}</figure>
+            }
             if !secret.is_empty() {
                 <p>Add this account to your authenticator app: <a href={uri}>open it in the app</a>, or type the key <code>{secret}</code>.</p>
             }
@@ -1734,7 +1839,7 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let holder = AccountHolder::of(&session)?;
     let mfa = auth.mfa()?;
     if mfa.enrolled(&holder).await?.contains(FactorKind::Totp) {
-        return page(ctx, "", "", ON, &[], 200);
+        return page(ctx, "", "", "", ON, &[], 200);
     }
     let label = screens::email_of(&auth, &session).await?;
     match mfa
@@ -1743,10 +1848,12 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     {
         Ok(enrolment) => {
             let secret = enrolment.secret.to_base32();
-            page(ctx, &secret, &enrolment.uri, "", &[], 200)
+            // No QR code: the `auth-mfa` module draws one.
+            let qr = String::new();
+            page(ctx, &secret, &enrolment.uri, &qr, "", &[], 200)
         }
         Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
-        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 200),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", "", ON, &[], 200),
         Err(other) => Err(other.into()),
     }
 }
@@ -1761,6 +1868,7 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     let Some(form) = screens::form::<Confirm>(ctx)? else {
         return page(
             ctx,
+            "",
             "",
             "",
             "Enter the six digits your app shows.",
@@ -1779,10 +1887,11 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
                 .iter()
                 .map(|code| code.as_str().to_string())
                 .collect();
-            page(ctx, "", "", "", &codes, 200)
+            page(ctx, "", "", "", "", &codes, 200)
         }
         Err(AuthError::InvalidCredentials) => page(
             ctx,
+            "",
             "",
             "",
             "That code does not match. Check the clock of your device, or start again.",
@@ -1790,7 +1899,7 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
             422,
         ),
         Err(AuthError::ElevationRequired) => Ok(see_other("/account/elevate")),
-        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", ON, &[], 409),
+        Err(AuthError::AlreadyEnrolled) => page(ctx, "", "", "", ON, &[], 409),
         Err(other) => Err(other.into()),
     }
 }
@@ -1799,6 +1908,7 @@ fn page(
     ctx: &mut Ctx,
     secret: &str,
     uri: &str,
+    qr: &str,
     error: &str,
     codes: &[String],
     status: u16,
@@ -1810,6 +1920,7 @@ fn page(
             csrf: &csrf,
             secret,
             uri,
+            qr,
             error,
             codes,
         }
@@ -1820,12 +1931,12 @@ fn page(
 "#;
 
 const ELEVATE_RS: &str = r#"//! `/account/elevate` -- type the password again before a change to the
-//! way this account signs in.
+//! way this account signs in, or before staff act as somebody.
 //!
 //! A right password elevates the session for a few minutes
-//! (`FactorPolicy::elevation_ttl`), then the browser goes back to
-//! `/account/totp`. An account with a second factor cannot elevate with the
-//! password alone.
+//! (`FactorPolicy::elevation_ttl`). An account with a second factor gives
+//! its TOTP code too: a password alone does not elevate it. Then the
+//! browser goes to `then`, a path on this site, or to `/account/totp`.
 
 use brocanth_auth::{AccountHolder, AuthError, FactorPolicy};
 use brocanth_middleware::Level;
@@ -1837,7 +1948,21 @@ use crate::plugins::auth_screens::{self as screens, csrf_field, see_other};
 pub struct Password {
     #[check(zod::Text::new().min(1).max(1024))]
     password: String,
+    #[text(max = 16)]
+    code: Option<String>,
+    #[text(max = 512)]
+    then: Option<String>,
 }
+
+/// Where to go once elevated, from the query string.
+#[derive(zod::Entry)]
+pub struct Then {
+    #[text(max = 512)]
+    then: Option<String>,
+}
+
+/// Where a person goes when the form names no page.
+const BACK: &str = "/account/totp";
 
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     let auth = screens::services(ctx)?;
@@ -1845,7 +1970,11 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
         screens::flash(ctx, Level::Info, "Sign in first.");
         return Ok(see_other("/account/signin"));
     }
-    again(ctx, "", 200)
+    let then = ctx.query_as::<Then>().ok().and_then(|q| q.then);
+    let then = screens::local_path(then.as_deref())
+        .unwrap_or(BACK)
+        .to_string();
+    again(ctx, &then, "", 200)
 }
 
 pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -1856,32 +1985,63 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     };
     AccountHolder::of(&session)?;
     let Some(form) = screens::form::<Password>(ctx)? else {
-        return again(ctx, "Enter your password.", 422);
+        return again(ctx, BACK, "Enter your password.", 422);
     };
+    // Only a path on this site: a `then` that names another site is how a
+    // form becomes an open redirect.
+    let then = screens::local_path(form.then.as_deref())
+        .unwrap_or(BACK)
+        .to_string();
     let email = screens::email_of(&auth, &session).await?;
-    let proof = match auth.accounts().login(&email, &form.password).await {
+    let mut proof = match auth.accounts().login(&email, &form.password).await {
         Ok(signed) => signed.into_proof(),
-        Err(AuthError::InvalidCredentials) => return again(ctx, "That password is wrong.", 422),
+        Err(AuthError::InvalidCredentials) => {
+            return again(ctx, &then, "That password is wrong.", 422)
+        }
         Err(other) => return Err(other.into()),
     };
     if proof.account() != &session.account {
-        return again(ctx, "That password is wrong.", 422);
+        return again(ctx, &then, "That password is wrong.", 422);
     }
-    let enrolled = auth.mfa()?.second_factors(&proof).await?;
+    let mfa = auth.mfa()?;
+    let code: String = form
+        .code
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if !code.is_empty() {
+        match mfa.verify_totp(&session.account, &code).await {
+            Ok(second) => proof = proof.and(second)?,
+            Err(AuthError::InvalidCredentials) => {
+                return again(ctx, &then, "That code is wrong or already used.", 422)
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+    let enrolled = mfa.second_factors(&proof).await?;
     let Some(elevation) = FactorPolicy::recommended().for_elevation(&enrolled, proof) else {
         return again(
             ctx,
-            "This account has a second factor, so a password alone cannot confirm the change.",
+            &then,
+            "This account has two-step sign-in: enter the code your app shows too.",
             403,
         );
     };
     let started = auth.sessions().elevate(&session.id, elevation).await?;
-    Ok(see_other("/account/totp").with_header("set-cookie", started.cookie.to_string()))
+    Ok(see_other(&then).with_header("set-cookie", started.cookie.to_string()))
 }
 
-fn again(ctx: &mut Ctx, error: &str, status: u16) -> Result<Response, Error> {
+fn again(ctx: &mut Ctx, then: &str, error: &str, status: u16) -> Result<Response, Error> {
     let csrf = csrf_field(ctx);
-    let mut page = html!(ctx, views::account::screens::Elevate { csrf: &csrf, error })?;
+    let mut page = html!(
+        ctx,
+        views::account::screens::Elevate {
+            csrf: &csrf,
+            then,
+            error
+        }
+    )?;
     page.status = status;
     Ok(page)
 }

@@ -130,6 +130,26 @@ const PLUGINS: &[Row] = &[
         registered: || names(&brocanth_middleware::FlashPlugin::new(Default::default())),
     },
     Row {
+        key: "auth-mfa",
+        ty: "crate::plugins::auth_mfa::AuthMfa",
+        registered: || {
+            written(
+                &[
+                    "auth",
+                    "auth-screens",
+                    "rsx",
+                    "input",
+                    "middleware",
+                    "middleware-csrf",
+                    "mail",
+                    "flash",
+                    "auth-mfa",
+                ],
+                "src/plugins/auth_mfa/mod.rs",
+            )
+        },
+    },
+    Row {
         key: "logging",
         ty: "crate::plugins::logging::Logging",
         registered: || written(&["logging"], "src/plugins/logging/mod.rs"),

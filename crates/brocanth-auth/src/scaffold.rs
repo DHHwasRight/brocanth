@@ -77,12 +77,16 @@ use brocanth_scaffold::{
 };
 
 mod lockout;
+mod mfa;
 mod oauth;
+mod otp;
 mod screens;
 mod staff;
 
 pub use lockout::AuthLockout;
+pub use mfa::AuthMfa;
 pub use oauth::AuthOauth;
+pub use otp::AuthOtp;
 pub use screens::AuthScreens;
 pub use staff::{Roles, Superuser};
 
