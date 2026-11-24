@@ -1607,11 +1607,24 @@ pub enum Slot {
     /// the module's default needs it: `jobs` with `jobs-memory` creates no
     /// tables, so it writes none.
     ConfigChecks,
+    /// `build.rs`, the body of `main`: one statement or block per module
+    /// that checks or compiles files at build time.
+    ///
+    /// The generator writes `build.rs` when this slot has a line, and
+    /// rewrites it on `add` and `remove`, as it does `src/main.rs`. A
+    /// module does not write `build.rs` itself: two modules that compile
+    /// files (`i18n` its catalogs, `content` its collections) would clash
+    /// on the file. A block may declare an item it needs, such as a
+    /// `#[path]` module, inside its own braces.
+    ///
+    /// A crate the block calls goes in `[build-dependencies]`, through
+    /// [`Dep::for_build`].
+    BuildMain,
 }
 
 impl Slot {
     /// Every slot, in declaration order.
-    pub const ALL: [Slot; 22] = [
+    pub const ALL: [Slot; 23] = [
         Slot::AppUses,
         Slot::AppPlugins,
         Slot::AppSetup,
@@ -1634,6 +1647,7 @@ impl Slot {
         Slot::NodeDependencies,
         Slot::AgentsSections,
         Slot::ConfigChecks,
+        Slot::BuildMain,
     ];
 
     /// The contribution Kind whose entries land in this slot, by name: a
@@ -1681,7 +1695,8 @@ impl Slot {
             | Slot::GitIgnore
             | Slot::AgentsSections
             | Slot::ConfigChecks
-            | Slot::MainMods => &[],
+            | Slot::MainMods
+            | Slot::BuildMain => &[],
         }
     }
 }
@@ -1711,6 +1726,7 @@ impl fmt::Display for Slot {
             Slot::NodeDependencies => "package.json",
             Slot::AgentsSections => "AGENTS.md",
             Slot::ConfigChecks => "src/commands/mod.rs (config_checks)",
+            Slot::BuildMain => "build.rs (main)",
         };
         f.write_str(name)
     }

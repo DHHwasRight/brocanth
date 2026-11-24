@@ -5,8 +5,9 @@
 //! - `locales/en.toml` and `locales/fr.toml`, the catalogs. English is the
 //!   default and has every key. French is there so that negotiation has
 //!   something to choose from on the first run.
-//! - `build.rs`, which compiles `locales/` into `$OUT_DIR/i18n.rs`. A
-//!   catalog error stops the build with its file, line and column.
+//! - a step in `build.rs` (`Slot::BuildMain`), which compiles `locales/`
+//!   into `$OUT_DIR/i18n.rs`. A catalog error stops the build with its
+//!   file, line and column.
 //! - `src/plugins/i18n/mod.rs`, which includes the generated code, names the
 //!   plugin, and gives a page the locale: `i18n::locale(ctx)`.
 //! - [`I18nHook`](crate::I18nHook), registered with its settings. It
@@ -88,7 +89,7 @@ impl Module for I18n {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let gtag = project.has("gtag");
-        s.file("build.rs", BUILD_RS);
+        s.at(Slot::BuildMain).block(BUILD_STEP.to_string());
         s.file(
             "locales/en.toml",
             format!("{EN}{}", if gtag { GTAG_EN } else { "" }),
@@ -312,16 +313,13 @@ fn settings() -> Vec<Setting> {
     ]
 }
 
-const BUILD_RS: &str = r#"//! Written by `brocanth`. Compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`,
-//! which `src/plugins/i18n/mod.rs` includes.
-//!
-//! The second argument is the default catalog: every other one is checked
-//! against it, and a key it lacks is a build error. A key a translation
-//! lacks is a warning, and that locale shows the default's text.
-
-fn main() {
+/// The step `build.rs` runs for the catalogs, inside its `main`.
+const BUILD_STEP: &str = r#"    // -- i18n: compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`, which
+    // `src/plugins/i18n/mod.rs` includes. The second argument is the
+    // default catalog: every other one is checked against it, and a key it
+    // lacks is a build error. A key a translation lacks is a warning, and
+    // that locale shows the default's text.
     brocanth_i18n::build::compile("locales", "en").unwrap_or_else(|e| panic!("{e}"));
-}
 "#;
 
 const EN: &str = r#"# The default catalog. Every key is here; `build.rs` names this file.

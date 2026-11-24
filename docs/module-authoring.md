@@ -1071,6 +1071,26 @@ names both modules. Do not write `package.json` with `s.file`: the
 generator refuses it, because a second node module would clash on the
 file.
 
+### 3.5a Every category: `Slot::BuildMain`
+
+One block inside `fn main()` of the project's `build.rs`, for a module that
+checks or compiles files before the crate: `i18n` compiles its catalogs,
+`content` checks its posts. The generator writes `build.rs` when the slot
+has a line, owns it like `src/main.rs`, and rewrites it on `add` and
+`remove`. A module never writes `build.rs` with `s.file`: two such modules
+would clash on the file, and `create` refuses it. Start the block with a
+`// -- <key>:` comment. An item the step needs, such as a `#[path]` module,
+goes inside the block's own braces. A crate the step calls is a
+`Dep::for_build`.
+
+```rust
+s.at(Slot::BuildMain).block(
+    "    // -- i18n: compiles `locales/*.toml` into `$OUT_DIR/i18n.rs`.\n    \
+     brocanth_i18n::build::compile(\"locales\", \"en\").unwrap_or_else(|e| panic!(\"{e}\"));\n"
+        .to_string(),
+);
+```
+
 ### 3.6 Every category: `Slot::AgentsSections`
 
 One `##` section in `AGENTS.md`, for a rule a coding agent must follow in

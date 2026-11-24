@@ -59,6 +59,9 @@ pub fn kind(path: &str) -> Kind {
         // `Response`, `Ctx` and the error contract, which are the
         // developer's to change.
         "src/plugins/mod.rs" | "src/commands/mod.rs" => Kind::Owned,
+        // The build steps of the modules (`Slot::BuildMain`): each one
+        // follows from the module list, like `src/main.rs`'s `mod` lines.
+        "build.rs" => Kind::Owned,
         // The module list and the types the module files fill. Each module
         // file beside the list is the developer's.
         "src/modules/mod.rs" | "src/plugins/shape.rs" => Kind::Owned,

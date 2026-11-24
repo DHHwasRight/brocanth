@@ -1318,6 +1318,24 @@ fn scaffold_files(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>>
         files.push(("package.json".to_string(), package_json(a, &built)));
     }
 
+    // The build script, from the modules that check or compile files at
+    // build time. One file for all of them, so `i18n` and `content` do not
+    // clash on it.
+    if !built.slot_is_empty(Slot::BuildMain) {
+        if let Some((taken, _)) = files.iter().find(|(p, _)| p == "build.rs") {
+            return Err(vec![Diagnostic::error(
+                "module",
+                format!(
+                    "a module writes {taken}, which the scaffold writes from `Slot::BuildMain`"
+                ),
+            )
+            .help(
+                "write the module's build step into `Slot::BuildMain` instead of the file",
+            )]);
+        }
+        files.push(("build.rs".to_string(), build_rs(&built)));
+    }
+
     // The brief goes last because it is the one file about all the others,
     // and the listing `create` prints reads in this order.
     files.push((
@@ -1785,6 +1803,22 @@ fn commands_mod_rs(a: &Answers, built: &Built) -> String {
     out
 }
 
+/// `build.rs`, from [`Slot::BuildMain`]: each module's build step, in
+/// the order the modules contribute.
+fn build_rs(built: &Built) -> String {
+    let mut out = String::from(
+        "//! The build script: what this project checks or compiles before the\n\
+         //! crate itself. Each step below belongs to one module and says which.\n\
+         //! A step that fails stops the build with the file to fix and a `help:`\n\
+         //! line.\n\nfn main() {\n",
+    );
+    for line in built.slot(Slot::BuildMain) {
+        out.push_str(line);
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// `config_checks`, from [`Slot::ConfigChecks`]: the entries of the
 /// `ConfigCheck` contribution point, each under a comment that names the
 /// module. The comment also keeps rustfmt from folding a short list onto
@@ -2178,7 +2212,7 @@ fn needs_serde(a: &Answers, built: &Built) -> bool {
 fn serde_dep(picked: &mut Vec<Dep>, for_config: bool) -> Option<Dep> {
     let asked = picked
         .iter()
-        .position(|dep| dep.name == "serde")
+        .position(|dep| dep.name == "serde" && !dep.build)
         .map(|at| picked.remove(at));
     if !for_config {
         return asked;
