@@ -80,7 +80,7 @@ custom format is an edit. See `docs/modules/logging.md`.
 
 | Repository | What it is | brocanth | State |
 |---|---|---|---|
-| `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | the route table knows this (`RouteMatch::allow`) | open, and better here than in Gorilla: the table is complete at build time. Needs a decision; see G10 in `docs/framework-gaps.md` |
+| `gorilla/mux` → `CORSMethodMiddleware` | fills `Access-Control-Allow-Methods` from the routes actually registered for a path | `CorsConfig::route_verbs`, a function over the route table (`Router::allow_for`) | **built**, 2026-11-24 (§4) |
 | `gorilla/csrf` | a token in a session, a hidden field, a check on unsafe verbs | `Csrf`, in this crate | **written**: a double-submit cookie, live in a generated project with `middleware-csrf` (§5) |
 | `gorilla/securecookie` | signed, optionally encrypted cookie values | `brocanth-auth` signs session cookies | present in one place, not offered as a primitive |
 | `gorilla/sessions` | a session store behind a cookie | the `sessions` module | present |
@@ -103,6 +103,26 @@ Gorilla has to ask the router at request time which methods a path has.
 Here the route table is complete when the binary is built, so the allowed
 methods for a path are known before the first request — and so is the
 answer to a preflight for a path that exists with the wrong verb.
+
+Built, 2026-11-24. `Cors` runs before dispatch and cannot name the
+project's table, so `CorsConfig::route_verbs` takes a function from a path
+to its verbs. The generated registration (commented, like the other four)
+passes one over `pages::router()`:
+`.route_verbs(move |path| pages.allow_for(path))`. Without the function, a
+preflight answers `CorsConfig::methods` for every path, as before.
+
+- **Decision: the allowed verbs are `CorsConfig::methods` intersected with
+  the route's verbs.** Reason: the configuration stays the ceiling, so a
+  new `DELETE` page is not open to other origins by accident.
+- **Decision: a preflight for a verb the route lacks, or for a path with
+  no route, gets no `Access-Control-Allow-*` header.** Reason: the browser
+  then refuses the real request, as it does for a verb outside the list,
+  and says why in its console. The response hook skips every preflight, so
+  it cannot put `Access-Control-Allow-Origin` back on one that was refused.
+
+Tests: the unit tests in `crates/brocanth-middleware/src/cors.rs`, and
+`crates/brocanth-middleware/tests/cors.rs`, a `TestClient` over a GET-only
+page and a GET + DELETE page.
 
 ## 5. CSRF
 

@@ -1547,9 +1547,13 @@ macro_rules! register {
 
         // A browser on another origin. Name the origins: a wildcard with
         // credentials is refused at startup, because a browser refuses it.
+        // A preflight answers the verbs of the path's page that `methods`
+        // also allows; a verb the page lacks gets no permission.
+        // let pages = crate::pages::router().map_err(|e| e.to_string())?;
         // let builder = builder.plugin_hooking(
         //     <brocanth_middleware::Cors as brocanth::plugin_api::Plugin>::new(
-        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
+        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"])
+        //             .route_verbs(move |path| pages.allow_for(path)),
         //     ),
         // );
 
@@ -2760,7 +2764,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 5e898e6a75e0e3d0
+// brocanth-digest: 41c4d470882f70b8
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.

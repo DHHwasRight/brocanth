@@ -17,7 +17,7 @@ Log Format or panic recovery. This crate does not have them
 | `MethodOverride` | `method-override` | `rewrite` (request) | A `DELETE`, `PUT` or `PATCH` sent from an HTML form, through `_method` or `X-HTTP-Method-Override`. Only a POST is overridden. |
 | `CanonicalHost` | `canonical-host` | `redirect` (request) | One host. Any other host gets a redirect that keeps the path. |
 | `ContentTypes` | `content-types` | `check` (request) | 415 before a handler parses a body of the wrong type. |
-| `Cors` | `cors` | `preflight` (request), `mark` (response) | A browser on another origin. A wildcard with credentials stops the build. |
+| `Cors` | `cors` | `preflight` (request), `mark` (response) | A browser on another origin. A wildcard with credentials stops the build. With `route_verbs`, a preflight answers the verbs of the route inside `methods`. |
 | `Csrf` | `csrf` | `check` (request), `mint` (response) | A form post this application handed out. A double-submit cookie. |
 | `DpSwap` | `dp-swap` | `read` (request), `vary` (response) | dp-swap's `DP-*` request headers, `Vary`, typed response directives and out-of-band fragments (module `dp`). |
 | `SecurityHeaders` | `security_headers` | `set` (response) | HSTS (over HTTPS only), `nosniff`, `Referrer-Policy`, framing, a CSP that allows dp-swap's scripts by hash, `Permissions-Policy`. |

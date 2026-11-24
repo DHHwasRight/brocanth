@@ -122,7 +122,7 @@ pub use conditional_get::{etag_for, http_date, ConditionalGet, ConditionalGetCon
 #[cfg(feature = "runtime")]
 pub use content_types::{ContentTypes, ContentTypesConfig};
 #[cfg(feature = "runtime")]
-pub use cors::{Cors, CorsConfig, Origins};
+pub use cors::{Cors, CorsConfig, Origins, RouteVerbs};
 #[cfg(feature = "runtime")]
 pub use csrf::{Csrf, CsrfConfig, CsrfToken};
 #[cfg(feature = "runtime")]

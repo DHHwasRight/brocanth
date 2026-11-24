@@ -159,9 +159,13 @@ const REGISTRATIONS: &str = r#"
 
         // A browser on another origin. Name the origins: a wildcard with
         // credentials is refused at startup, because a browser refuses it.
+        // A preflight answers the verbs of the path's page that `methods`
+        // also allows; a verb the page lacks gets no permission.
+        // let pages = crate::pages::router().map_err(|e| e.to_string())?;
         // let builder = builder.plugin_hooking(
         //     <brocanth_middleware::Cors as brocanth::plugin_api::Plugin>::new(
-        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"]),
+        //         brocanth_middleware::CorsConfig::from(["https://app.example.com"])
+        //             .route_verbs(move |path| pages.allow_for(path)),
         //     ),
         // );
 "#;
