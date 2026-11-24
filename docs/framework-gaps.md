@@ -469,7 +469,7 @@ because the argument is still why each one matters.
 | G7 | no migration diffing | **done**: `brocanth migrate make` diffs the models against `migrations/schema.json` by stable field id and writes a SeaORM migration, renames included. It applies nothing. See `docs/migrations.md` |
 | G8 | the cache is key/value only | **done**: tags on `Cache` (`set_tagged`, `invalidate_tag`), `route::RouteCache`, `CacheExt::fragment`, and `TagInvalidator` from model changes. See `docs/cache.md` |
 | G9 | i18n, fixtures, a shell, prefetch, `check --deploy` | **done**: `brocanth-i18n` (see `docs/i18n.md`; the `i18n` module adds it), fixtures, `brocanth dbshell`, `dp-prefetch` and `brocanth check --deploy` (see `docs/tooling.md`) |
-| G10 | **no middleware anybody can name** | **started**: 15 of Gorilla's 16 pieces are built (audit 2026-11-22, below). Open: `CORSMethodMiddleware`, which waits on a decision. See the G10 section and `docs/middleware.md` |
+| G10 | **no middleware anybody can name** | **done** (2026-11-24): all 16 of Gorilla's pieces are built. `CORSMethodMiddleware` is `CorsConfig::route_verbs`, and a panic reaches the `errors` module as `Origin::Panic`. See the G10 section and `docs/middleware.md` |
 | G11 | **a handler cannot read a body** | **done**: `Ctx` carries the request, `brocanth-input` turns it into a struct. See `docs/input.md` |
 | G12 | **the document cannot say what a page takes** | **done**: the handler's signature says it, `pages!` emits the table, and the same table is a command-line client. See `docs/surface.md` |
 | G13 | **a template engine is a special case, not a module** | **done**: `Slot::PagesRenderers`, and `jt` attached through it with a manifest, a dependency and one block. A project can hold two engines over one page tree. Sixteen `rsx` branches remain in `create.rs` for seams that do not exist yet. See `docs/modules.md` |
@@ -693,12 +693,15 @@ G10 is done when each piece is built or declined with a reason.
 | `gorilla/schema` | `brocanth-input` (G11) | built |
 | `gorilla/websocket` | `brocanth_server::websocket`, `realtime-websocket` | built |
 | security headers, rate limit, conditional GET, flash | `src/security_headers.rs`, `src/rate_limit/`, `src/conditional_get.rs`, `src/flash.rs` | built; beyond Gorilla |
-| `mux.CORSMethodMiddleware` | none | **open** |
+| `mux.CORSMethodMiddleware` | `src/cors.rs`: `CorsConfig::route_verbs` | built, 2026-11-24 |
 
 The finding under this gap, "no shipped crate implements `HookSource`", is
 also stale: about twenty crates and generated plugins install hooks now.
 
-**What is left.** One piece of the Gorilla set, and one limit found on the
+**Done, 2026-11-24.** Each piece is built. The two items below were the
+last ones, and both are built with the owner's decisions.
+
+**What was left.** One piece of the Gorilla set, and one limit found on the
 way that is not a Gorilla piece. A third limit was small and is built.
 
 1. **`CORSMethodMiddleware`: `Access-Control-Allow-Methods` from the route
@@ -714,7 +717,16 @@ way that is not a Gorilla piece. A third limit was small and is built.
    headers, so the browser refuses it, as it does today for a verb outside
    the list. G10 is done when this is built.
    **Owner decision, 2026-11-24:** intersect, and no `Access-Control-Allow-*`
-   headers on a preflight for a verb the route lacks. To build.
+   headers on a preflight for a verb the route lacks.
+   **Built, 2026-11-24.** `CorsConfig::route_verbs` takes the function. A
+   path with no route is refused the same way. The response hook now skips
+   every preflight: through the whole pipeline it used to add
+   `Access-Control-Allow-Origin` back to a refused one. The generated
+   registration (commented) passes `move |path| pages.allow_for(path)`
+   over `pages::router()`. Tested in the unit tests of
+   `crates/brocanth-middleware/src/cors.rs` and in
+   `crates/brocanth-middleware/tests/cors.rs`, a `TestClient` over a
+   GET-only page and a GET + DELETE page.
 2. **A panic does not reach the `errors` module.** Size: half a day, but it
    changes the generated `handle` and the `errors` contract. The net
    answers a bare 500 that the response hooks see; `error.rsx` and the
@@ -726,7 +738,18 @@ way that is not a Gorilla piece. A third limit was small and is built.
    `Origin::Panic`, and render `error.rsx` with no request state.
    **Owner decision, 2026-11-24:** as recommended. On a panic, render the
    `errors` 500 page with no request state, and call the reporters with
-   the panic message and the path only. To build.
+   the panic message and the path only.
+   **Built, 2026-11-24.** With `errors`, the generated `handle` answers a
+   panic with `pages::panicked`: the nearest `error.rsx` with a 500, from a
+   context that `plugins::errors::panic_context` builds with the verb, the
+   path, the `accept` header and the application's providers, and no
+   request state. The reporters hear `Origin::Panic` with the message and
+   the path; `method` is empty. Without `errors`, the plain 500 is
+   unchanged. Tested in the generated `src/plugins/errors/mod.rs`
+   (`a_panic_answers_the_500_page_and_reaches_the_reporters`, and the
+   plain 500 for a JSON client), built by
+   `crates/brocanth-errors/tests/scaffold.rs` under `BROCANTH_BUILD=1`.
+   Decision and reason in `docs/modules/errors.md`.
 3. **`SharedRateLimit` behind `Bridge`: done, 2026-11-22.** `Bridge` called
    `App::begin` and `App::run`, which are a compile error for an
    application with an `AsyncRequestHook`. Both of its arms now call
