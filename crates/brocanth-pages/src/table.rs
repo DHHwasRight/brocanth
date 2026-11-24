@@ -73,8 +73,9 @@ pub struct Words {
     /// Call `crate::pages::mounted`, for routes a module contributed.
     pub mounts: bool,
     /// Send a page's failure to `crate::pages::caught`, with the nearest
-    /// `not-found.rsx` and `error.rsx`, and emit `not_found` for a path no
-    /// route matched.
+    /// `not-found.rsx` and `error.rsx`, emit `not_found` for a path no
+    /// route matched, and `panicked`, which sends a panic to
+    /// `crate::pages::caught_panic`.
     pub errors: bool,
 }
 

@@ -66,10 +66,11 @@ request hooks, the chain and the page inside
 500, and the response hooks and `after_dispatch` still see it, so a
 response hook can rewrite what the 500 says and `logging` writes its line.
 `Bridge`, for a hand-written `main`, has the same net. PLAN.md ADR 8
-records it; the CLI's golden builds test it with a page that panics. One
-limit: the `errors` module's `error.rsx` and its reporters do not hear a
-panic, because the net answers before `catching` can. See G10 in
-`docs/framework-gaps.md`.
+records it; the CLI's golden builds test it with a page that panics. With
+the `errors` module, the 500 is its page: the nearest `error.rsx`, from a
+context with no request state, and the reporters hear `Origin::Panic` with
+the panic message and the path (2026-11-24). See
+`docs/modules/errors.md` for the decision and its reason.
 
 The three logging handlers were one question, not three: whether the
 `logging` module's line becomes a format choice. It did. `format` is

@@ -74,6 +74,16 @@ adds its reporter to the `Reporters` service in `after_config`. The
 `report` hook (on) tells the reporters about a hook's failure too; turn
 it off in `src/modules/errors.rs`.
 
+A panic in a request hook, the chain or a page reaches this module too.
+The generated `handle` catches it (PLAN.md ADR 8) and calls
+`pages::panicked` with a context from `plugins::errors::panic_context`:
+the verb, the path, the `accept` header and the application's providers.
+The answer is the nearest `error.rsx` with a 500, the development page in
+a debug build, or the plain 500 for a client that does not read HTML. The
+reporters hear `Origin::Panic` with the panic message and the path; the
+`method` field is empty. Without this module a panic answers a plain
+`Internal Server Error`, as before.
+
 With [`i18n-routing`](i18n-routing.md), its tests ask under `/en`, which
 the redirect leaves alone.
 
@@ -91,6 +101,17 @@ production file cannot leak a stack of internals.
 
 **Decision: the development page is outside the layouts.** The layout can
 be what failed.
+
+**Decision (2026-11-24): a panic renders the 500 page with no request
+state, and the reporters hear the panic message and the path only, as
+`Origin::Panic`.** Reason: a panic can stop a hook halfway through a write
+to the request state. Handing the panic to the page's error path would let
+an error page, a layout or a provider read that half-written state, which
+is what the panic net refuses to do (PLAN.md ADR 8). So the page context
+holds no state and no provider built from it: a layout that reads the
+session sees none. The generated tests put a panicking page in the table
+and check the 500 page, the report, and that no other request header
+reaches the page.
 
 ## Read more
 

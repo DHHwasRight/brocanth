@@ -2448,7 +2448,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
          /// response hooks still see it: a logger that never saw the 500 would\n\
          /// not be a logger. Without the net the panic unwinds into the\n\
          /// server's connection task and the client gets a closed socket with\n\
-         /// no status. The net catches nothing under `panic = \"abort\"`.\n\
+         /// no status. The net catches nothing under `panic = \"abort\"`.@PANIC_DOC@\n\
          pub async fn handle(app: &App, request: brocanth_server::Request) -> brocanth_server::Response {\n\
         \x20   let Ok(mut request) = brocanth_server::bridge::to_core(request) else {\n\
         \x20       // The path and the query do not make a URI. The table was not\n\
@@ -2468,7 +2468,7 @@ fn app_rs(a: &Answers, built: &Built) -> String {
         \x20       Err(payload) => {\n\
         \x20           let message = brocanth_server::bridge::panic_message(&*payload);\n\
         \x20           plugins::say!(error, \"a request panicked: {message}\"; %message);\n\
-        \x20           Ok(sent(Response::new(500, \"Internal Server Error\")))\n\
+        @PANIC_ANSWER@\n\
         \x20       }\n\
         \x20   };\n\
         \x20   let response = app.core.finish(&mut request, &mut state, outcome);\n\
@@ -2554,16 +2554,38 @@ fn app_rs(a: &Answers, built: &Built) -> String {
     } else {
         "Response::new(404, \"Not Found\"),".to_string()
     };
-    out.replace(
-        "@CTX@",
-        &format!(
-            "Ctx::new(verb, path, matched.params())\n\
+    // With `errors`, a panic is the `errors` 500 page, from a context built
+    // fresh: no request state, because the panic may have left it
+    // half-written (PLAN.md ADR 8).
+    let (panic_doc, panic_answer) = if a.has("errors") {
+        (
+            "\n\
+             ///\n\
+             /// With `errors`, the 500 is the nearest `error.rsx`, and the reporters\n\
+             /// hear the panic message and the path. The page gets a context with no\n\
+             /// request state: the panic may have stopped a hook halfway through a\n\
+             /// write, and nothing reads what it left.",
+            "\x20           let mut ctx = plugins::errors::panic_context(&request, app.core.context());\n\
+             \x20           Ok(sent(pages::panicked(&mut ctx, message)))",
+        )
+    } else {
+        (
+            "",
+            "\x20           Ok(sent(Response::new(500, \"Internal Server Error\")))",
+        )
+    };
+    out.replace("@PANIC_DOC@", panic_doc)
+        .replace("@PANIC_ANSWER@", panic_answer)
+        .replace(
+            "@CTX@",
+            &format!(
+                "Ctx::new(verb, path, matched.params())\n\
              \x20               .with_plugins(app.core.context_for(request, state))\n\
              \x20               .with_state(std::mem::take(state))\n\
              \x20               .sent(\n{deeper}\x20               )"
-        ),
-    )
-    .replace("@NOT_FOUND@", &not_found)
+            ),
+        )
+        .replace("@NOT_FOUND@", &not_found)
 }
 
 /// The grace period, `serve`, and the stop that follows it, in `src/app.rs`.

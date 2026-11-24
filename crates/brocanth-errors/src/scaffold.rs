@@ -125,7 +125,7 @@ fn plugin_rs(project: &Project) -> String {
 
 const PAGES_ITEMS: &str = "/// What `pages!(\"src/pages\", errors)` expands to: every page goes \
 through\n/// `catching`, and a failure through `caught`. See `src/plugins/errors/mod.rs`.\n\
-pub use crate::plugins::errors::{catching, caught@CAUGHT@, ErrorPage};\n";
+pub use crate::plugins::errors::{catching, caught, caught_panic@CAUGHT@, ErrorPage};\n";
 
 const PLUGIN_RS: &str = r#"//! Written by `brocanth`. What a failure becomes.
 //!
@@ -137,9 +137,16 @@ const PLUGIN_RS: &str = r#"//! Written by `brocanth`. What a failure becomes.
 //!
 //! A 5xx is logged and told to every reporter. A debug build shows the
 //! cause on a page of its own; a release build never does.
+//!
+//! A panic reaches [`caught_panic`] through `pages::panicked`, which
+//! `src/app.rs` calls with a context from [`panic_context`]: no request
+//! state, because the panic may have left it half-written.
 
 use std::sync::Arc;
 
+use brocanth::plugin_context::Context;
+use brocanth::plugin_hooks::Request;
+use brocanth::routing::{Params, Verb};
 use brocanth_errors::{Origin, Report, Reporters};
 
 use crate::pages::{Ctx, Error, Handler, Response};
@@ -183,37 +190,94 @@ pub fn caught(
     not_found: Option<ErrorPage>,
     failed: Option<ErrorPage>,
 ) -> Result<Response, Error> {
-    let reporters = ctx.provided::<Reporters, _>().cloned();
     if error.status >= 500 {
-        if let Some(reporters) = &reporters {
-            let method = ctx.verb.to_string();
-            reporters.report(&Report {
-                status: error.status,
-                message: &error.message,
-                method: &method,
-                path: &ctx.path,
-                origin: Origin::Page,
-            });
-        }
+        let method = ctx.verb.to_string();
+        report(ctx, error.status, &error.message, &method, Origin::Page);
     }
+    if plain(ctx, &error) {
+        return Err(error);
+    }
+    if error.status >= 500 {
+        let (status, message) = (error.status, &error.message);
+        crate::plugins::say!(error, "error {status}: {message}"; status, %message);
+    }
+    Ok(shown(ctx, error, not_found, failed))
+}
+
+/// The context the page for a panic gets: the verb, the path and the
+/// `accept` header of the request, and the providers of the application.
+///
+/// Not the request state, and not a provider built from it. A panic can
+/// stop a hook halfway through a write, and a page that read that state
+/// would read something no hook finished (PLAN.md ADR 8).
+pub fn panic_context(request: &Request, plugins: Context<crate::plugins::Installed>) -> Ctx {
+    let verb = Verb::from_http(request.method()).unwrap_or(Verb::Get);
+    let accept = request
+        .headers()
+        .get("accept")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| vec![("accept".to_string(), value.to_string())])
+        .unwrap_or_default();
+    Ctx::new(verb, request.uri().path(), Params::empty())
+        .with_plugins(plugins)
+        .sent("", Vec::new(), accept)
+}
+
+/// What a panic becomes: the nearest `error.rsx` with a 500.
+///
+/// The reporters hear the panic message and the path, with
+/// `Origin::Panic` and no method. A client that does not read HTML gets the
+/// plain 500. `src/app.rs` has logged the panic already.
+pub fn caught_panic(ctx: &mut Ctx, message: &str, failed: Option<ErrorPage>) -> Response {
+    report(ctx, 500, message, "", Origin::Panic);
+    let error = Error::new(500, message);
+    if plain(ctx, &error) {
+        return Response::new(500, "Internal Server Error");
+    }
+    shown(ctx, error, None, failed)
+}
+
+/// Tells every reporter about a 5xx.
+fn report(ctx: &Ctx, status: u16, message: &str, method: &str, origin: Origin) {
+    if let Some(reporters) = ctx.provided::<Reporters, _>() {
+        reporters.report(&Report {
+            status,
+            message,
+            method,
+            path: &ctx.path,
+            origin,
+        });
+    }
+}
+
+/// Whether the failure keeps the plain answer: an error that names its own
+/// `content-type` is for a program, and so is a client that does not read
+/// HTML.
+fn plain(ctx: &Ctx, error: &Error) -> bool {
     let typed = error
         .headers
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("content-type"));
-    if typed || !brocanth_errors::accepts_html(ctx.header("accept")) {
-        return Err(error);
-    }
+    typed || !brocanth_errors::accepts_html(ctx.header("accept"))
+}
 
+/// The page for a failure: the development page for a 5xx in a debug
+/// build, else the nearest error page, else the plain page.
+fn shown(
+    ctx: &mut Ctx,
+    error: Error,
+    not_found: Option<ErrorPage>,
+    failed: Option<ErrorPage>,
+) -> Response {
     let caught = Caught::new(error.status, &error.message, &ctx.path);
     if error.status >= 500 {
-        let (status, message) = (error.status, &error.message);
-        crate::plugins::say!(error, "error {status}: {message}"; status, %message);
+        let reporters = ctx.provided::<Reporters, _>();
         // A release binary never shows the cause, whatever the setting.
-        if cfg!(debug_assertions) && reporters.as_ref().is_some_and(Reporters::details) {
+        if cfg!(debug_assertions) && reporters.is_some_and(Reporters::details) {
             let method = ctx.verb.to_string();
             let page =
                 brocanth_errors::development_page(&caught, &error.message, &method, ctx.headers());
-            return Ok(answer(page, error));
+            return answer(page, error);
         }
     }
 
@@ -232,7 +296,7 @@ pub fn caught(
         }
         None => brocanth_errors::plain_page(&caught),
     };
-    Ok(answer(body, error))
+    answer(body, error)
 }
 
 /// A page with the error's status, and the headers it carried: a
@@ -247,13 +311,18 @@ fn answer(body: String, error: Error) -> Response {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use brocanth::routing::Verb;
+    use brocanth::plugin_routes::BoxFuture;
+    use brocanth::routing::{Router, Verb};
     use brocanth_errors::{Report, Reporter, Reporters};
     use brocanth_server::{Request, Response};
 
-    /// A path no route answers, and one whose page fails with a 500.
+    use crate::pages::{Ctx, Error, Handler};
+
+    /// A path no route answers, one whose page fails with a 500, and one
+    /// whose page panics.
     const MISSING: &str = "@UNDER@/nowhere";
     const BROKEN: &str = "@UNDER@/users/x";
+    const PANICS: &str = "@UNDER@/boom";
 
     fn body(response: &Response) -> String {
         let bytes = response.body.bytes().expect("a whole body");
@@ -310,6 +379,81 @@ mod tests {
             "{}",
             body(&response)
         );
+    }
+
+    /// A page that panics. The generator writes none, so the test puts one
+    /// in place of the table `pages::router` builds.
+    fn boom(_ctx: &mut Ctx) -> BoxFuture<'_, Result<crate::pages::Response, Error>> {
+        panic!("the page broke")
+    }
+
+    fn panicking() -> crate::app::App {
+        let mut app = crate::app::build().expect("the application builds");
+        let mut table = Router::builder();
+        table
+            .route("/boom", Verb::Get, Box::new(boom) as Handler)
+            .expect("a route");
+        app.router = table.build().expect("a table");
+        app
+    }
+
+    struct Panics(Arc<Mutex<Vec<String>>>);
+
+    impl Reporter for Panics {
+        fn report(&self, report: &Report<'_>) {
+            if let Ok(mut heard) = self.0.lock() {
+                heard.push(format!(
+                    "{:?} {} [{}] {}: {}",
+                    report.origin, report.status, report.method, report.path, report.message
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panic_answers_the_500_page_and_reaches_the_reporters() {
+        let app = panicking();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let cx = app.core.context();
+        let reporters: &Reporters = cx.get();
+        reporters.add(Panics(Arc::clone(&heard)));
+
+        let request = Request::new(Verb::Get, PANICS)
+            .with_header("accept", "text/html")
+            .with_header("x-trace", "a-value-the-page-never-reads");
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 500);
+        let html = body(&response);
+        assert!(
+            response
+                .header("content-type")
+                .is_some_and(|t| t.starts_with("text/html")),
+            "{html}"
+        );
+        assert!(html.contains("Internal Server Error"), "{html}");
+        // The message and the path, and no method: the panic may have left
+        // the request half-written, so nothing else is read.
+        assert_eq!(
+            *heard.lock().expect("lock"),
+            ["Panic 500 [] /boom: the page broke"]
+        );
+        // The page gets the path and the `accept` header, and no other
+        // header: a debug build lists what it was given.
+        assert!(!html.contains("a-value-the-page-never-reads"), "{html}");
+        assert_eq!(
+            html.contains("the page broke"),
+            cfg!(debug_assertions),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_that_reads_json_keeps_the_plain_500_for_a_panic() {
+        let app = panicking();
+        let request = Request::new(Verb::Get, PANICS).with_header("accept", "application/json");
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 500);
+        assert_eq!(body(&response), "Internal Server Error");
     }
 }
 "#;

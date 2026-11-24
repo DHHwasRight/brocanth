@@ -122,7 +122,8 @@ impl Caught {
         )
     }
 
-    /// The emitted items: one function per error page, and `not_found`.
+    /// The emitted items: one function per error page, `not_found` and
+    /// `panicked`.
     pub fn items(&self) -> TokenStream2 {
         let pages = self.dirs.iter().enumerate().flat_map(|(index, dir)| {
             let mut out = Vec::new();
@@ -200,14 +201,24 @@ impl Caught {
 
             #under
 
+            /// The nearest `not-found.rsx` and `error.rsx` above a path
+            /// that has no page file to ask. A tree with error pages at its
+            /// root alone does not read the path.
+            #[allow(unused_variables)]
+            fn __nearest(
+                ctx: &crate::pages::Ctx,
+            ) -> (
+                Option<crate::pages::ErrorPage>,
+                Option<crate::pages::ErrorPage>,
+            ) {
+                #choice
+            }
+
             /// The answer for a path no route matched: the nearest
             /// `not-found.rsx` above the path, inside its layouts.
             /// `src/app.rs` calls it.
             pub fn not_found(ctx: &mut crate::pages::Ctx) -> crate::pages::Response {
-                let pages: (
-                    Option<crate::pages::ErrorPage>,
-                    Option<crate::pages::ErrorPage>,
-                ) = #choice;
+                let pages = __nearest(ctx);
                 crate::pages::caught(
                     ctx,
                     crate::pages::Error::new(404, "Not Found"),
@@ -215,6 +226,14 @@ impl Caught {
                     pages.1,
                 )
                 .unwrap_or_else(crate::pages::IntoResponse::into_response)
+            }
+
+            /// The answer for a panic: the nearest `error.rsx` above the
+            /// path, inside its layouts, with a 500. `src/app.rs` calls it
+            /// with a context that holds no request state.
+            pub fn panicked(ctx: &mut crate::pages::Ctx, message: &str) -> crate::pages::Response {
+                let pages = __nearest(ctx);
+                crate::pages::caught_panic(ctx, message, pages.1)
             }
         }
     }
@@ -417,6 +436,11 @@ mod tests {
         let out = caught.items().to_string();
         assert!(!out.contains("__under"), "no directory to test: {out}");
         assert!(out.contains("pub fn not_found"), "{out}");
+        assert!(out.contains("pub fn panicked"), "{out}");
+        assert!(
+            out.contains("caught_panic (ctx , message , pages . 1)"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

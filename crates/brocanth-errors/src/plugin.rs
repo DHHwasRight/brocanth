@@ -17,6 +17,11 @@ pub enum Origin {
     Page,
     /// A plugin's hook failed, before or after the page.
     Hook,
+    /// A request hook, the chain or the page panicked. The report holds the
+    /// panic message and the path, and `method` is empty: the panic may have
+    /// left the request state half-written, so nothing else is read
+    /// (PLAN.md ADR 8).
+    Panic,
 }
 
 /// One 5xx, as a reporter hears it.
@@ -28,14 +33,14 @@ pub struct Report<'a> {
     pub status: u16,
     /// The cause: what the page's error or the hook's error said.
     pub message: &'a str,
-    /// The request's method: `GET`.
+    /// The request's method: `GET`. Empty for [`Origin::Panic`].
     pub method: &'a str,
     /// The request's path, with no query.
     pub path: &'a str,
     pub origin: Origin,
 }
 
-/// The hook a module implements to hear about every 5xx.
+/// The hook a module implements to hear about every 5xx and every panic.
 ///
 /// A reporter sends the failure somewhere a person reads it: an error
 /// tracker, a mail to the team, a chat channel. It runs on the request's

@@ -92,8 +92,11 @@ reporters.add(Stderr);
 assert_eq!(reporters.len(), 1);
 ```
 
-A reporter hears every 5xx: a page's error (`Origin::Page`) and a hook's
-error (`Origin::Hook`). It runs on the request's thread, so it must not
+A reporter hears every 5xx: a page's error (`Origin::Page`), a hook's
+error (`Origin::Hook`) and a panic (`Origin::Panic`). A panic report holds
+the panic message and the path only, and its `method` is empty: the panic
+may have left the request state half-written, so the generated `handle`
+reads none of it. A reporter runs on the request's thread, so it must not
 wait: give the report to a channel or a job and return.
 
 ## Settings
