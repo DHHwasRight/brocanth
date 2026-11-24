@@ -42,11 +42,14 @@ It starts on `MemoryStore`. With `jobs` or `cache` in the project, it uses
 `PgStore` and turns on the `postgres` feature. It writes no provider, no
 second factor and no sign-in page.
 
-Two modules from this crate go beside it, off until you tick them:
+Modules from this crate go beside it, off until you tick them:
 
 ```text
 brocanth add auth-screens   # sign-up, sign-in, reset, verify and TOTP pages
 brocanth add auth-lockout   # an account locks for minutes after wrong passwords
+brocanth add auth-otp       # sign in with a code mailed to the address
+brocanth add auth-mfa       # who must use a second factor, recovery codes, login alerts
+brocanth add impersonate    # staff act as a customer, with a banner (needs superuser)
 ```
 
 `auth-screens` needs `rsx`, `input`, `middleware-csrf`, `mail` and
@@ -171,9 +174,9 @@ let _ = app;
 A handler then reads it with `let auth: &Auth<_, _, _> = cx.extract();`
 and calls `auth.accounts()`, `auth.sessions()`, `auth.linking()` or
 `auth.oauth()`. Second factors, one-time codes, login alerts and the
-lockout each need their own store trait. `auth.mfa()` and
-`auth.lockout(policy)` build `Mfa` and `Lockout` when the store has the
-trait. An application builds `Otp` or `LoginAlerts` from the same `Arc<S>`.
+lockout each need their own store trait. `auth.mfa()`, `auth.lockout(policy)`,
+`auth.otp()` and `auth.login_alerts()` build `Mfa`, `Lockout`, `Otp` and
+`LoginAlerts` when the store has the trait.
 
 ## Testing
 

@@ -144,6 +144,9 @@ pub const ALL: &[&dyn Module] = &[
     // admin check, and roles that grant permissions.
     &brocanth_auth::scaffold::Superuser,
     &brocanth_auth::scaffold::Roles,
+    // Staff act as a customer: a banner, the operator on the session, an
+    // audit entry. Needs the staff and the screens.
+    &brocanth_auth::scaffold::Impersonate,
     // The rule algebra. `after("model")` and not `needs`: a condition
     // inverts into a broadcast key as well as a `WHERE`, so requiring an
     // ORM would refuse a project that broadcasts and stores nothing.

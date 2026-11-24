@@ -6,7 +6,7 @@
 //! project and run its tests too with `BROCANTH_BUILD=1`.
 
 use brocanth_auth::scaffold::{
-    Auth, AuthLockout, AuthMfa, AuthOauth, AuthOtp, AuthScreens, Roles, Superuser,
+    Auth, AuthLockout, AuthMfa, AuthOauth, AuthOtp, AuthScreens, Impersonate, Roles, Superuser,
 };
 use brocanth_scaffold::testing;
 use brocanth_scaffold::Module;
@@ -20,6 +20,7 @@ const MODULES: &[&'static dyn Module] = &[
     &AuthLockout,
     &AuthOtp,
     &AuthMfa,
+    &Impersonate,
 ];
 
 /// What `auth-screens` needs, and the config file.
@@ -288,4 +289,30 @@ fn without_them_the_screens_keep_the_plain_policy() {
     let admit = file(&files, "src/plugins/auth_screens/mod.rs");
     assert!(admit.contains("FactorPolicy::recommended()"));
     assert!(!admit.contains("auth_mfa") && !admit.contains("mailbox"));
+}
+
+/// Impersonation: the hooking plugin, two pages, the admin tab behind its
+/// integration, and the audit entry with `audit`.
+#[test]
+fn staff_act_as_a_customer_with_a_banner() {
+    let mut picks = SCREENS.to_vec();
+    picks.extend(["superuser", "roles", "admin", "impersonate"]);
+    let files = shape("impersonate", &picks);
+    let plugins = file(&files, "src/plugins/mod.rs");
+    assert!(
+        plugins.contains("ImpersonatePanel::late(store)"),
+        "the admin tab"
+    );
+    assert!(plugins.contains("crate::plugins::impersonate::Impersonate"));
+    let plugin = file(&files, "src/plugins/impersonate/mod.rs");
+    assert!(plugin.contains("mod tests"));
+    assert!(
+        !plugin.contains("brocanth_audit"),
+        "no audit without `audit`"
+    );
+    let markup = file(&files, "src/pages/impersonate/screens.rsx");
+    assert_eq!(
+        markup.matches("<form method=\"post\"").count(),
+        markup.matches("{! csrf}").count()
+    );
 }

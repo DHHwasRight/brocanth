@@ -54,11 +54,10 @@
 //!   names `brocanth-auth` into one dependency line.
 //! * **No page, no one-time code, no login alert.** The pages (sign-up,
 //!   sign-in, reset, verify, TOTP) are the child module `auth-screens`.
-//!   One-time codes and login alerts have no module yet; the stores
-//!   implement their traits, so an application builds them from
-//!   `auth.store()`.
+//!   One-time codes are the child `auth-otp`; the second-factor policy and
+//!   login alerts are the child `auth-mfa`.
 //! * **No impersonation.** It is an operator tool and it needs an operator:
-//!   a second account with a privilege this application has not defined yet.
+//!   the module `impersonate`, which needs `superuser`.
 //!
 //! # Where the store lives
 //!
@@ -76,6 +75,7 @@ use brocanth_scaffold::{
     Category, Dep, Manifest, Module, PgPool, Project, Scaffold, SessionCookie, Setting, Slot,
 };
 
+mod impersonate;
 mod lockout;
 mod mfa;
 mod oauth;
@@ -83,6 +83,7 @@ mod otp;
 mod screens;
 mod staff;
 
+pub use impersonate::Impersonate;
 pub use lockout::AuthLockout;
 pub use mfa::AuthMfa;
 pub use oauth::AuthOauth;
@@ -554,10 +555,10 @@ fn plugin_rs(project: &Project) -> String {
 //!
 //! # What is not here
 //!
-//! One-time codes and login alerts. Both stores implement their traits
-//! (`OtpStore`, `SignInLocationStore`); an application that wants them
-//! builds them from `auth.store()` and puts them on the context itself.
-//! Second factors are `auth.mfa()`, and `auth-screens` has the TOTP page.
+//! One-time codes and login alerts as pages. `auth.otp()` and
+//! `auth.login_alerts()` build them; the `auth-otp` and `auth-mfa` modules
+//! write the pages and the mail. Second factors are `auth.mfa()`, and
+//! `auth-screens` has the TOTP page.
 
 use std::sync::Arc;
 

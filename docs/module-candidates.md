@@ -45,7 +45,7 @@ Built after these: `markdown` ([page](modules/markdown.md)), `content`
 ([page](modules/content.md)) and `feed` ([page](modules/feed.md)).
 
 Next: `image`,
-`auth-otp` and `auth-mfa`, `debug-toolbar`, `impersonate`,
+~~`auth-otp` and `auth-mfa`~~ (built), `debug-toolbar`, ~~`impersonate`~~ (built),
 `notifications`, `ci-security` (`cargo audit`), `humanize`.
 
 **Needs a decision first:** `storage-s3`. It is high value, but PLAN.md §4
@@ -148,7 +148,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `attachments` | A file column on a model: attach, purge, variants by name | FileField, ImageField; `has_one_attached` | no | Enhancer | M | 4 | Joins `storage` and `model`; admin file widget needs it |
 | `sanitize` | Allow-list HTML sanitizer (ammonia) as a template filter | bleach / nh3; `sanitize` helper | yes (`sanitize`) | Renderer | S | 4 | Needed before any user HTML or Markdown reaches a page |
 | `rich-text` | Rich text field: an editor island, sanitized storage, attachments | django-ckeditor-5, Wagtail RichText; Action Text (Trix) | no | Renderer | L | 3 | Needs `sanitize` and `attachments`; one JS island |
-| `impersonate` | Staff signs in as a user, with a banner and an audit line | django-hijack; pretender, devise_masquerade | partly: `brocanth-auth/src/impersonation.rs`, no module | Routes | S | 3 | Logic exists; needs an admin button and a banner |
+| `impersonate` | Staff signs in as a user, with a banner and an audit line | django-hijack; pretender, devise_masquerade | yes (`impersonate`) | Routes | S | 3 | Built: admin tab, banner hook, audit entry |
 | `notifications` | In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |
 | `feeds` | RSS and Atom from a list | contrib.syndication; `atom_feed` builder | yes (`feed`: Atom from the `content` collection) | Routes | S | 3 | **Built** ([page](modules/feed.md)). Atom only; a feed over a database query is not built |
 | `redirects` | Old-URL to new-URL table, checked on 404 | contrib.redirects, django-redirects; – | no | Middleware | S | 3 | Keeps SEO after URL changes; admin edits rows |
@@ -198,7 +198,7 @@ Rank = value first, then effort, then what it unblocks.
 14. **`flags`** (M, 4). Flipper / waffle with an admin panel.
 15. **`admin-actions`** (M, 4). Bulk actions with a confirm page, then inlines.
 
-Next after these: `debug-toolbar`, `storage-s3` with `attachments`, `impersonate`,
+Next after these: `debug-toolbar`, `storage-s3` with `attachments`, ~~`impersonate`~~ (built),
 `notifications`, `ci-security`, `humanize`.
 
 ## Next.js and PocketBase scan
@@ -261,10 +261,10 @@ HTML-first Rust app.
 | `mail` | `Mailer` trait, SMTP or memory backend, settings, a dev outbox page | resend, react-email; PB mailer + SMTP settings (P43) | partly: `brocanth-mail` crate exists, no module, auth does not call it | Enhancer | S | 5 | Reset and verify flows are scaffolded and cannot deliver mail |
 | `mail-templates` (part of `mail`) | rsx email templates with typed placeholders, text alternative, `/dev/mail` preview | react-email; PB templates `{APP_NAME}` `{TOKEN}` `{OTP}` | no | Renderer | M | 4 | Every auth flow needs one; rsx already renders HTML |
 | `auth-oauth` | Scaffold provider login: GitHub, Google, Apple, OIDC; callback route; account linking | next-auth, better-auth, Clerk; PB OAuth2 (P20) | partly: `brocanth-auth/src/oauth/*` written; `auth` writes "No OAuth provider" | Routes | M | 5 | Most requested auth feature; code is done, only the scaffold is missing |
-| `auth-otp` | Email one-time code / magic link login, with an enumeration defence | Auth.js email provider, Clerk; PB OTP (P21) | partly: `otp.rs` written, not scaffolded | Routes | S | 4 | Passwordless login is common; needs `mail` |
-| `auth-mfa` | TOTP second factor, enrollment and challenge screens, recovery codes | Clerk, better-auth 2FA; PB MFA (P22) | partly: `mfa.rs`, `totp.rs` written, not scaffolded | Routes | M | 4 | The type system already prevents a skipped factor; expose it |
-| `auth-impersonate` | Staff sign in as a user, with a banner and restricted actions | Clerk impersonation; PB impersonate (P24) | partly: `impersonation.rs`, not scaffolded | Enhancer | S | 3 | Support teams need it; small once the admin exists |
-| `auth-alerts` | Email on login from a new device | PB auth alerts (P47) | partly: `alerts.rs`, not scaffolded | Enhancer | S | 2 | Needs `mail`; nice, not urgent |
+| `auth-otp` | Email one-time code / magic link login, with an enumeration defence | Auth.js email provider, Clerk; PB OTP (P21) | yes (`auth-otp`) | Routes | S | 4 | Built: a code, not a link; needs `mail` |
+| `auth-mfa` | TOTP second factor, enrollment and challenge screens, recovery codes | Clerk, better-auth 2FA; PB MFA (P22) | yes (`auth-mfa`, with the TOTP pages of `auth-screens`) | Routes | M | 4 | Built: the policy is `[auth_mfa] require` |
+| `auth-impersonate` | Staff sign in as a user, with a banner and restricted actions | Clerk impersonation; PB impersonate (P24) | yes (key `impersonate`) | Enhancer | S | 3 | Built |
+| `auth-alerts` | Email on login from a new device | PB auth alerts (P47) | yes, in `auth-mfa` (`[auth_mfa] alerts`) | Enhancer | S | 2 | Built: a new /24 or /48 mails the owner |
 | `superuser` | Operator accounts apart from app users; `createsuperuser` command; admin policy uses them | PB `_superusers` (P50), `superuser upsert` CLI (P39) | partly: admin defaults to `DenyAll`; no operator account or command | Enhancer | S | 4 | Without it every new admin needs a hand-written policy |
 | `api-tokens` | Personal access tokens / API keys: hashed, scoped, revocable, `Authorization: Bearer` | Clerk M2M, Unkey, better-auth api-key plugin; PB API auth tokens | no | Middleware | M | 4 | `openapi` + `client` exist; machine callers have no credential |
 | `orgs` | Organizations, members, roles, invitations; policy subject carries the org | Clerk Organizations, better-auth organization plugin | no | Enhancer | L | 4 | Every B2B SaaS needs tenancy; fits `brocanth-policy` `Exists` |
@@ -341,8 +341,8 @@ Ranked by value per effort, then by what each unblocks. "Partly" counts as
     panel. The client needs no SDK.
 12. **`error-tracking`** (S, 4). Sentry-protocol reports from `ErrorHook`.
     `@sentry/nextjs` has 16.6M downloads a week.
-13. **`auth-otp` + `auth-mfa`** (S+M, 4). Passwordless login and TOTP. The
-    code is written. They need `mail` first.
+13. ~~**`auth-otp` + `auth-mfa`**~~ (S+M, 4). Built, with login alerts in
+    `auth-mfa` and `impersonate` beside them.
 14. ~~**`markdown` + `content`**~~ (M, 4). Built, with `feed`. Not built:
     a `.md` file as a route, tag pages, a second collection by generator.
 15. **`image`** (M, 4). A resize and format endpoint for `assets/`, with

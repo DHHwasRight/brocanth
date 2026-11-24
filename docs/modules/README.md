@@ -86,6 +86,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`auth-mfa`](auth-mfa.md) | who must use a second factor, forced TOTP set-up, recovery codes, a QR code and login alerts | Routes, Middleware, Enhancer | auth |
 | [`superuser`](superuser.md) | operator accounts that pass every admin check, and a createsuperuser command | Enhancer |  |
 | [`roles`](roles.md) | roles that grant permissions, stored with the accounts, for staff and the admin | Enhancer |  |
+| [`impersonate`](impersonate.md) | staff act as a customer, with a banner on every page, the operator on the session and an audit entry | Routes, Middleware, Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`rls`](rls.md) | Postgres row-level security declared in Rust; `rls make` writes the migration | Enhancer |  |
 | [`storage`](storage.md) | uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3 | Enhancer, Middleware |  |

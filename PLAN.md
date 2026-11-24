@@ -538,6 +538,16 @@ top of the five to seven months §7 already budgets for the model layer.
 10. The `policy!` macro, deliberately late, after a real application has used
     the algebra, so the syntax is informed rather than imitated.
 
+Status of item 7: built. Three modules over `brocanth-auth`'s flows:
+`auth-otp` (sign-in by an eight-digit mailed code; the mailbox stands in
+for the password through `FactorPolicy::accepting_mailbox_as_primary`),
+`auth-mfa` (`[auth_mfa] require` decides who owes a second factor, a
+sign-in that owes one it lacks sets TOTP up first, recovery codes, a QR
+code, and login alerts by mail from a new network), and `impersonate`
+(staff with `impersonate.edit` act as a customer from `/impersonate` or the
+admin tab, a banner on every page, an audit entry with `audit`). Each has
+a page in `docs/modules/` with its decisions.
+
 Status of item 10: built. `brocanth_policy::policy!` (the `macro` feature,
 crate `brocanth-policy-macros`) declares an entity with typed columns and its
 rules, and expands to the hand-written `Column`, `Entity` and `Policy` impls.

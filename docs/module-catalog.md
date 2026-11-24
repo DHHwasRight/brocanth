@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 78 modules. Each name links to its own page
+what to build next. There are 79 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -108,6 +108,7 @@ nothing holds this page.
 | [`model`](modules/model.md) | SeaORM, validations, migrations, over the `db` pool | Middleware, Renderer |  | needs `db`: the ORM runs over the pool the `db` plugin opens, and without `db` there is none |  |
 | [`realtime`](modules/realtime.md) | One write is a map lookup, not a query per subscriber. `realtime-sse` and `realtime-websocket` carry it to a browser | Middleware |  |  |  |
 | [`roles`](modules/roles.md) | Roles that grant permissions, stored with the accounts, for staff and the admin |  |  | needs `superuser`: only a superuser gives a role, and `superuser` reads the signed-in member of staff |  |
+| [`impersonate`](modules/impersonate.md) | Staff act as a customer, with a banner on every page, the operator on the session and an audit entry |  |  | off | needs `superuser`, `auth-screens`; with `admin`: an Impersonate tab; with `audit`: an entry per start and stop |
 | [`storage`](modules/storage.md) | Uploads on a local disk, addressed by content hash; no object store and no S3 | Middleware |  |  |  |
 | [`webhooks`](modules/webhooks.md) | Signed webhooks in both directions; pick a direction below |  |  |  |  |
 | [`webhooks-out`](modules/webhooks-out.md) | Signed outgoing webhooks: endpoints and a delivery log in Postgres, retries through jobs |  |  | part of `webhooks`, off until you tick it; needs `db`: the endpoints and the log are rows; `jobs`: a delivery is a job | with `admin`: a deliveries tab |

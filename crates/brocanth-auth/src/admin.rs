@@ -61,8 +61,10 @@ use crate::identity::{Account, AccountId};
 use crate::session::Privilege;
 use crate::storage::{AccountDirectory, SessionRecord, StoreError};
 
+pub mod impersonate;
 mod staff;
 
+pub use impersonate::{ImpersonatePanel, IMPERSONATE_KEY};
 pub use staff::{permission, MemberRow, RoleRow, RolesCtx, RolesPanel, StaffPolicy, ROLES_KEY};
 
 /// The panel's stylesheet, built from `style/panel.css`. Inlined by every

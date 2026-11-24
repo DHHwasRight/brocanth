@@ -150,6 +150,27 @@ const PLUGINS: &[Row] = &[
         },
     },
     Row {
+        key: "impersonate",
+        ty: "crate::plugins::impersonate::Impersonate",
+        registered: || {
+            written(
+                &[
+                    "auth",
+                    "auth-screens",
+                    "rsx",
+                    "input",
+                    "middleware",
+                    "middleware-csrf",
+                    "mail",
+                    "flash",
+                    "superuser",
+                    "impersonate",
+                ],
+                "src/plugins/impersonate/mod.rs",
+            )
+        },
+    },
+    Row {
         key: "logging",
         ty: "crate::plugins::logging::Logging",
         registered: || written(&["logging"], "src/plugins/logging/mod.rs"),
