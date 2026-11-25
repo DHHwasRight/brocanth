@@ -61,6 +61,7 @@ brocanth-i18n = { workspace = true, features = ["scaffold"] }
 brocanth-openapi = { path = "../brocanth-openapi", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-robots = { workspace = true, features = ["scaffold"] }
 brocanth-sanitize = { path = "../brocanth-sanitize", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-humanize = { path = "../brocanth-humanize", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-markdown = { workspace = true, features = ["scaffold"] }
 brocanth-content = { workspace = true, features = ["scaffold"] }
 # Lists: one paginator.

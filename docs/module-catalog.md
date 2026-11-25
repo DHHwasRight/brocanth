@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 86 modules. Each name links to its own page
+what to build next. There are 87 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -52,11 +52,12 @@ nothing holds this page.
 | [`webhooks-in`](modules/webhooks-in.md) | `POST /webhooks/{source}`: signature, replay window, idempotency key, then a typed handler; before the CSRF check |  |  | part of `webhooks`, ticked with its parent | with `db`: the idempotency keys are rows |
 | [`backoffice`](modules/backoffice.md) | The admin as a service of its own: a second binary that serves only the admin | External |  | needs `admin`: it serves the admin from a second binary, so there is nothing to serve without it |  |
 
-### Renderer (8)
+### Renderer (9)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`errors`](modules/errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Middleware |  |  | a client that does not read HTML keeps the plain answer |
+| [`humanize`](modules/humanize.md) | Readable values for a page: "3 minutes ago", 1.5 MB, 2nd, 1,234; no dependency |  |  |  | with `i18n`: the request's locale and CLDR grouping |
 | [`jt`](modules/jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Routes |  |  | static-site safe |
 | [`meta`](modules/meta.md) | A title, a description, a canonical URL and Open Graph tags for each page | Enhancer |  |  | static-site safe; no canonical URL until `base_url` is set |
 | [`rsx`](modules/rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String |  |  |  | static-site safe |

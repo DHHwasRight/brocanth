@@ -951,6 +951,7 @@ dependencies = [
  "brocanth-filters",
  "brocanth-flags",
  "brocanth-gtag",
+ "brocanth-humanize",
  "brocanth-i18n",
  "brocanth-input",
  "brocanth-jobs",
@@ -1134,6 +1135,16 @@ dependencies = [
  "brocanth-test",
  "http",
  "serde",
+]
+
+[[package]]
+name = "brocanth-humanize"
+version = "0.1.0"
+dependencies = [
+ "brocanth-cli",
+ "brocanth-humanize",
+ "brocanth-i18n",
+ "brocanth-scaffold",
 ]
 
 [[package]]

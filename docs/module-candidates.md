@@ -152,7 +152,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `notifications` | In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |
 | `feeds` | RSS and Atom from a list | contrib.syndication; `atom_feed` builder | yes (`feed`: Atom from the `content` collection) | Routes | S | 3 | **Built** ([page](modules/feed.md)). Atom only; a feed over a database query is not built |
 | `redirects` | Old-URL to new-URL table, checked on 404 | contrib.redirects, django-redirects; – | no | Middleware | S | 3 | Keeps SEO after URL changes; admin edits rows |
-| `humanize` | `time_ago`, `intcomma`, `filesizeformat`, pluralize, number and currency formats | contrib.humanize; ActionView number and date helpers | no | Renderer | S | 3 | Small helpers every page uses; locale from `i18n` |
+| `humanize` | **Built** ([page](modules/humanize.md)). `time_ago`, `intcomma`, `filesizeformat`, pluralize, number and currency formats | contrib.humanize; ActionView number and date helpers | no | Renderer | S | 3 | Small helpers every page uses; locale from `i18n` |
 | `slugs` | Unique slug column, history of old slugs, redirect | django-autoslug; friendly_id | no | Enhancer | S | 3 | Readable URLs are an HTML-first habit |
 | `soft-delete` | `deleted_at`, default exclusion, restore | django-safedelete, model-utils; discard, paranoia | no | Enhancer | S | 3 | Common; must stay a `policy` condition, not a filter after load |
 | `encrypted-fields` | Encrypt a column at rest, deterministic option for lookup | django-fernet-fields; `encrypts` | no | Enhancer | M | 3 | Compliance; key comes from `config` secrets |

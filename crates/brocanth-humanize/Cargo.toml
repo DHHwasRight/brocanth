@@ -1,0 +1,36 @@
+[package]
+name = "brocanth-humanize"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Readable values for a page: \"3 minutes ago\", file sizes, ordinals and grouped numbers, in the request's language."
+
+# No dependency by default. The phrases and the rules are small tables in
+# this crate, so a page that writes "3 minutes ago" links no locale data.
+# With `i18n`, numbers are grouped by CLDR through the formats the `i18n`
+# module already compiled in, so a page and its catalog group alike.
+[dependencies]
+brocanth-i18n = { workspace = true, features = ["runtime"], optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `humanize`. Optional and off: only the CLI asks for it.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-humanize = { path = ".", features = ["i18n", "scaffold"] }
+# `tests/scaffold.rs`: the module, generated into a project by the CLI's own
+# generator. A cycle through dev-dependencies, as in `brocanth-robots`.
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+# No `runtime` feature: the runtime is this crate's own code and no
+# dependency, so the CLI links nothing extra (`brocanth-cli/tests/lean.rs`).
+default = []
+# Group numbers with CLDR's rules, through `brocanth_i18n::Formats`.
+i18n = ["dep:brocanth-i18n"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

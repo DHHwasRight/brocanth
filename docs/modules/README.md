@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 86. For all
+One page per module that `brocanth create` offers. There are 87. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -135,6 +135,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`filters`](filters.md) | typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE | Renderer |  |
 | [`search`](search.md) | Postgres full-text and trigram search: a site index, its migration, a page at /search | Routes |  |
 | [`i18n-routing`](i18n-routing.md) | a locale segment in the path (/fr/about), a redirect from a path without one | Middleware, Renderer | i18n |
+| [`humanize`](humanize.md) | readable values for a page: "3 minutes ago", 1.5 MB, 2nd, 1,234; no dependency | Renderer |  |
 | [`meta`](meta.md) | a title, a description, a canonical URL and Open Graph tags for each page | Renderer, Enhancer |  |
 | [`errors`](errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Renderer, Middleware |  |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |

@@ -1668,7 +1668,7 @@ mod tests {
         // gives, and every module sits under the heading of its main
         // category, or under its parent's row.
         let m = registry(Tab::Expert);
-        let screen = render(&m, None, 112, 120);
+        let screen = render(&m, None, 112, 160);
         let lines: Vec<&str> = screen.lines().collect();
         let mut at = Vec::new();
         for category in brocanth_scaffold::Category::ALL {
