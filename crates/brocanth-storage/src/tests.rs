@@ -1816,3 +1816,530 @@ mod formats {
         );
     }
 }
+
+/// The conformance suites (`crate::conformance`) on every backend.
+///
+/// The disk runs always. Postgres runs with `BROCANTH_TEST_DATABASE_URL`, S3
+/// with `BROCANTH_STORAGE_TEST_S3`, GCS with `BROCANTH_STORAGE_TEST_GCS`, each
+/// behind its feature, and a skip says so on the standard error handle, past
+/// libtest's capture (see [`pg`]):
+///
+/// ```sh
+/// BROCANTH_STORAGE_TEST_S3=http://minioadmin:minioadmin@localhost:9000/brocanth-test \
+/// BROCANTH_STORAGE_TEST_GCS=http://localhost:4443/brocanth-test \
+///   cargo test -p brocanth-storage --features s3,gcs -- conformance
+/// ```
+///
+/// The S3 bucket must exist (CI creates it with `curl --aws-sigv4`); the GCS
+/// run creates its own on the emulator. Every run works under a prefix of
+/// its own, so parallel runs share a bucket and clean only what they wrote.
+mod conformance {
+    use std::sync::Arc;
+
+    use crate::conformance::{bucket, storage, Can};
+    use crate::rt::block_on;
+    use crate::{FsBucket, LocalDisk, ObjectStorage, Storage};
+
+    #[test]
+    fn local_disk_keeps_the_storage_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+        block_on(storage(
+            store,
+            Can {
+                limit: None,
+                signs: false,
+                fetch: None,
+                big: false,
+                create_only: true,
+            },
+        ));
+    }
+
+    #[test]
+    fn object_storage_on_a_disk_keeps_the_storage_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(FsBucket::open(dir.path()).unwrap());
+        let store: Arc<dyn Storage> =
+            Arc::new(ObjectStorage::new(bucket).with_max_object_bytes(4096));
+        block_on(storage(
+            store,
+            Can {
+                limit: Some(4096),
+                signs: false,
+                fetch: None,
+                big: false,
+                create_only: true,
+            },
+        ));
+    }
+
+    #[test]
+    fn fs_bucket_keeps_the_bucket_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = Arc::new(FsBucket::open(dir.path()).unwrap());
+        block_on(bucket(
+            b,
+            "run",
+            Can {
+                limit: None,
+                signs: false,
+                fetch: None,
+                big: true,
+                create_only: true,
+            },
+        ));
+    }
+
+    #[test]
+    fn an_fs_bucket_refuses_its_reserved_names() {
+        use crate::{Bucket, ObjectPath, PutOptions, StorageError};
+        let dir = tempfile::tempdir().unwrap();
+        let b = FsBucket::open(dir.path()).unwrap();
+        for reserved in ["tmp/x", "a/b.meta", ".gitignore"] {
+            let p = ObjectPath::parse(reserved).unwrap();
+            assert!(
+                matches!(
+                    block_on(b.put(&p, b"x".as_slice().into(), PutOptions::new())),
+                    Err(StorageError::InvalidPath(_))
+                ),
+                "{reserved}"
+            );
+        }
+        assert!(block_on(b.list("")).unwrap().is_empty());
+    }
+
+    /// The claim that lets a project move between `LocalDisk` and
+    /// `ObjectStorage` on a disk without moving a file.
+    #[test]
+    fn local_disk_and_object_storage_read_each_others_files() {
+        use crate::{HashKey, ObjectInfo, VariantSpec};
+        let dir = tempfile::tempdir().unwrap();
+        let hash = HashKey::from_secret(b"one secret for both");
+        let disk = LocalDisk::open(dir.path())
+            .unwrap()
+            .with_hash_key(hash.clone());
+        let objects =
+            ObjectStorage::new(Arc::new(FsBucket::open(dir.path()).unwrap())).with_hash_key(hash);
+        let spec = VariantSpec::parse("300x200t").unwrap();
+
+        let png = b"\x89PNG\r\n\x1a\nwritten by the disk".to_vec();
+        let about = ObjectInfo::new().with_filename("ünï.png");
+        let key = disk.put_blocking(&png, &about).unwrap();
+        disk.put_variant_blocking(&key, spec, b"thumb").unwrap();
+        assert_eq!(objects.address_of(&png), key);
+        assert_eq!(block_on(objects.get(&key)).unwrap(), png);
+        let meta = block_on(objects.meta(&key)).unwrap();
+        assert_eq!(meta, disk.meta_blocking(&key).unwrap());
+        assert_eq!(
+            block_on(objects.get_variant(&key, spec)).unwrap().unwrap(),
+            b"thumb"
+        );
+
+        let png2 = b"\x89PNG\r\n\x1a\nwritten by objects".to_vec();
+        let key2 = block_on(objects.put(&png2, &about)).unwrap();
+        block_on(objects.put_variant(&key2, spec, b"thumb2")).unwrap();
+        assert_eq!(disk.get_blocking(&key2).unwrap(), png2);
+        assert_eq!(
+            disk.meta_blocking(&key2).unwrap(),
+            block_on(objects.meta(&key2)).unwrap()
+        );
+        assert_eq!(
+            disk.get_variant_blocking(&key2, spec).unwrap().unwrap(),
+            b"thumb2"
+        );
+
+        // A delete by either takes the object and its variants.
+        block_on(objects.delete(&key)).unwrap();
+        assert!(!disk.exists_blocking(&key).unwrap());
+        assert_eq!(disk.get_variant_blocking(&key, spec).unwrap(), None);
+        disk.delete_blocking(&key2).unwrap();
+        assert!(!block_on(objects.exists(&key2)).unwrap());
+        assert_eq!(block_on(objects.get_variant(&key2, spec)).unwrap(), None);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_storage_keeps_the_storage_contract() {
+        let Some(url) = std::env::var("BROCANTH_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+        else {
+            super::cloud::skip("Postgres", "BROCANTH_TEST_DATABASE_URL");
+            return;
+        };
+        super::cloud::reactor().block_on(async move {
+            let store = crate::PgStorage::connect(&url)
+                .await
+                .expect("connecting")
+                .with_max_object_bytes(4096)
+                .unwrap();
+            store.migrate().await.expect("creating the tables");
+            storage(
+                Arc::new(store),
+                Can {
+                    limit: Some(4096),
+                    signs: false,
+                    fetch: None,
+                    big: false,
+                    create_only: true,
+                },
+            )
+            .await;
+        });
+    }
+}
+
+/// The harness the S3 and GCS runs share: a reactor, a loud skip, a
+/// fetcher for signed URLs, and the variables parsed.
+#[cfg(any(feature = "postgres", feature = "s3", feature = "gcs"))]
+mod cloud {
+    /// A reactor with I/O and timers: the clients need both.
+    pub fn reactor() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a reactor")
+    }
+
+    /// Says, past libtest's capture, that a backend's suite did not run.
+    pub fn skip(backend: &str, var: &str) {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(
+            format!(
+                "\n============================================================\n\
+                 SKIPPED: the {backend} conformance suite did not run.\n\
+                 Set {var} to run it (docs/object-storage.md §7).\n\
+                 ============================================================\n\n"
+            )
+            .as_bytes(),
+        );
+    }
+
+    /// `http://key:secret@host:port/bucket`, as its parts.
+    #[cfg(any(feature = "s3", feature = "gcs"))]
+    pub struct Target {
+        pub endpoint: String,
+        pub user: Option<(String, String)>,
+        pub bucket: String,
+    }
+
+    #[cfg(any(feature = "s3", feature = "gcs"))]
+    pub fn target(var: &str) -> Option<Target> {
+        let raw = std::env::var(var).ok().filter(|v| !v.trim().is_empty())?;
+        let (scheme, rest) = raw.split_once("://").expect("a URL with a scheme");
+        let (authority, bucket) = rest.split_once('/').expect("a URL with a bucket path");
+        let (user, host) = match authority.rsplit_once('@') {
+            Some((user, host)) => {
+                let (k, s) = user.split_once(':').expect("key:secret before @");
+                (Some((k.to_string(), s.to_string())), host)
+            }
+            None => (None, authority),
+        };
+        Some(Target {
+            endpoint: format!("{scheme}://{host}"),
+            user,
+            bucket: bucket.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// A prefix no other run uses.
+    #[cfg(any(feature = "s3", feature = "gcs"))]
+    pub fn run_prefix() -> String {
+        format!(
+            "run-{}",
+            &crate::ObjectKey::random().unwrap().to_hex()[..16]
+        )
+    }
+
+    /// Signed URLs read and written with `reqwest`.
+    #[cfg(any(feature = "s3", feature = "gcs"))]
+    pub struct Reqwest(pub reqwest::Client);
+
+    #[cfg(any(feature = "s3", feature = "gcs"))]
+    impl crate::conformance::Fetch for Reqwest {
+        fn get<'a>(&'a self, url: &'a str) -> crate::conformance::Fut<'a, Result<Vec<u8>, String>> {
+            Box::pin(async move {
+                let r = self.0.get(url).send().await.map_err(|e| e.to_string())?;
+                let status = r.status();
+                let body = r.bytes().await.map_err(|e| e.to_string())?;
+                if !status.is_success() {
+                    return Err(format!("{status}: {}", String::from_utf8_lossy(&body)));
+                }
+                Ok(body.to_vec())
+            })
+        }
+
+        fn put<'a>(
+            &'a self,
+            url: &'a str,
+            body: Vec<u8>,
+        ) -> crate::conformance::Fut<'a, Result<(), String>> {
+            Box::pin(async move {
+                let r = self
+                    .0
+                    .put(url)
+                    .body(body)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let status = r.status();
+                if !status.is_success() {
+                    let body = r.text().await.unwrap_or_default();
+                    return Err(format!("{status}: {body}"));
+                }
+                Ok(())
+            })
+        }
+    }
+}
+
+#[cfg(feature = "s3")]
+mod s3 {
+    use std::sync::Arc;
+
+    use super::cloud::{reactor, run_prefix, skip, target, Reqwest, Target};
+    use crate::cloud::{CloudBucket, S3Config};
+    use crate::conformance::{bucket, storage, Can};
+    use crate::{Bucket, ObjectStorage};
+
+    const VAR: &str = "BROCANTH_STORAGE_TEST_S3";
+
+    fn config(t: &Target, prefix: Option<String>) -> S3Config {
+        S3Config {
+            bucket: t.bucket.clone(),
+            region: "us-east-1".into(),
+            endpoint: Some(t.endpoint.clone()),
+            path_style: true,
+            access_key_id: t.user.as_ref().map(|u| u.0.clone()),
+            secret_access_key: t.user.as_ref().map(|u| u.1.clone()),
+            prefix,
+        }
+    }
+
+    fn with_target(body: impl AsyncFnOnce(Target)) {
+        let Some(t) = target(VAR) else {
+            skip("S3", VAR);
+            return;
+        };
+        reactor().block_on(body(t));
+    }
+
+    #[test]
+    fn s3_keeps_the_bucket_contract() {
+        with_target(async |t| {
+            let b = Arc::new(CloudBucket::s3(&config(&t, None)).expect("a client"));
+            let fetch = Reqwest(reqwest::Client::new());
+            bucket(
+                b,
+                &run_prefix(),
+                Can {
+                    limit: None,
+                    signs: true,
+                    fetch: Some(&fetch),
+                    big: true,
+                    create_only: true,
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn s3_keeps_the_storage_contract_under_a_prefix() {
+        with_target(async |t| {
+            let b = Arc::new(CloudBucket::s3(&config(&t, Some(run_prefix()))).expect("a client"));
+            let fetch = Reqwest(reqwest::Client::new());
+            let store = ObjectStorage::new(b.clone()).with_max_object_bytes(4096);
+            storage(
+                Arc::new(store),
+                Can {
+                    limit: Some(4096),
+                    signs: true,
+                    fetch: Some(&fetch),
+                    big: false,
+                    create_only: true,
+                },
+            )
+            .await;
+            // Everything the store wrote is under its prefix, and the suite
+            // deleted it all.
+            assert!(b.list("").await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_missing_bucket_and_a_bad_key_fail_the_probe_with_help() {
+        with_target(async |t| {
+            let missing = CloudBucket::s3(&S3Config {
+                bucket: "brocanth-no-such-bucket".into(),
+                ..config(&t, None)
+            })
+            .unwrap();
+            let said = missing.probe().await.unwrap_err().to_string();
+            assert!(
+                said.contains("does not exist") && said.contains("help:"),
+                "{said}"
+            );
+
+            let wrong = CloudBucket::s3(&S3Config {
+                secret_access_key: Some("not-the-secret".into()),
+                ..config(&t, None)
+            })
+            .unwrap();
+            let said = wrong.probe().await.unwrap_err().to_string();
+            assert!(
+                said.contains("credentials were refused") && said.contains("help:"),
+                "{said}"
+            );
+
+            let unreachable = CloudBucket::s3(&S3Config {
+                endpoint: Some("http://127.0.0.1:9".into()),
+                ..config(&t, None)
+            })
+            .unwrap();
+            let said = unreachable.probe().await.unwrap_err().to_string();
+            assert!(said.contains("--storage.probe=false"), "{said}");
+        });
+    }
+}
+
+#[cfg(feature = "gcs")]
+mod gcs {
+    use std::sync::Arc;
+
+    use super::cloud::{reactor, run_prefix, skip, target, Reqwest, Target};
+    use crate::cloud::{CloudBucket, GcsConfig};
+    use crate::conformance::{bucket, storage, Can};
+    use crate::{Bucket, ObjectStorage};
+
+    const VAR: &str = "BROCANTH_STORAGE_TEST_GCS";
+
+    /// A service-account key made for this run with `openssl`, so a signed
+    /// URL can be made; `None` when there is no `openssl`. Never checked in:
+    /// a private key in a public repository is a finding even when it is a
+    /// test's.
+    fn key() -> Option<String> {
+        let out = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let pem = String::from_utf8(out.stdout).ok()?.replace('\n', "\\n");
+        Some(format!(
+            r#"{{"type":"service_account","client_email":"conformance@brocanth.test","private_key_id":"conformance","private_key":"{pem}"}}"#
+        ))
+    }
+
+    fn config(t: &Target, prefix: Option<String>, credentials: Option<String>) -> GcsConfig {
+        GcsConfig {
+            bucket: t.bucket.clone(),
+            credentials,
+            endpoint: Some(t.endpoint.clone()),
+            prefix,
+        }
+    }
+
+    /// The emulator takes a bucket with no credential.
+    async fn create_bucket(t: &Target) {
+        let r = reqwest::Client::new()
+            .post(format!("{}/storage/v1/b?project=brocanth", t.endpoint))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"name":"{}"}}"#, t.bucket))
+            .send()
+            .await
+            .expect("the emulator answers");
+        assert!(
+            r.status().is_success() || r.status().as_u16() == 409,
+            "creating the bucket: {}",
+            r.status()
+        );
+    }
+
+    fn with_target(body: impl AsyncFnOnce(Target)) {
+        let Some(t) = target(VAR) else {
+            skip("GCS", VAR);
+            return;
+        };
+        reactor().block_on(async move {
+            create_bucket(&t).await;
+            body(t).await;
+        });
+    }
+
+    #[test]
+    fn gcs_keeps_the_bucket_contract() {
+        with_target(async |t| {
+            let key = key();
+            let signs = key.is_some();
+            if !signs {
+                skip("GCS signed URL", "an `openssl` on PATH");
+            }
+            let b = Arc::new(CloudBucket::gcs(&config(&t, None, key)).expect("a client"));
+            let fetch = Reqwest(reqwest::Client::new());
+            bucket(
+                b,
+                &run_prefix(),
+                Can {
+                    limit: None,
+                    signs,
+                    fetch: signs.then_some(&fetch as _),
+                    // The emulator has no XML multipart upload (405), and
+                    // ignores `ifGenerationMatch=0`. GCS has both; these
+                    // two paths are checked against S3 only.
+                    big: false,
+                    create_only: false,
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn gcs_keeps_the_storage_contract_under_a_prefix() {
+        with_target(async |t| {
+            let key = key();
+            let signs = key.is_some();
+            let b =
+                Arc::new(CloudBucket::gcs(&config(&t, Some(run_prefix()), key)).expect("a client"));
+            let fetch = Reqwest(reqwest::Client::new());
+            let store = ObjectStorage::new(b.clone()).with_max_object_bytes(4096);
+            storage(
+                Arc::new(store),
+                Can {
+                    limit: Some(4096),
+                    signs,
+                    fetch: signs.then_some(&fetch as _),
+                    big: false,
+                    create_only: true,
+                },
+            )
+            .await;
+            assert!(b.list("").await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_missing_gcs_bucket_fails_the_probe_with_help() {
+        with_target(async |t| {
+            let missing = CloudBucket::gcs(&GcsConfig {
+                bucket: "brocanth-no-such-bucket".into(),
+                ..config(&t, None, None)
+            })
+            .unwrap();
+            let said = missing.probe().await.unwrap_err().to_string();
+            assert!(
+                said.contains("does not exist") && said.contains("help:"),
+                "{said}"
+            );
+        });
+    }
+}

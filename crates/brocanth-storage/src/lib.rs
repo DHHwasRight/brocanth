@@ -5,14 +5,18 @@
 //!
 //! # Shape
 //!
-//! [`Storage`] is the whole public contract. [`LocalDisk`] implements it, and
-//! so does [`PgStorage`] behind the `postgres` feature — objects in `bytea`
-//! columns, for a deployment that already runs Postgres for its queues and
-//! would rather not also run a shared filesystem. An S3 backend is a later,
-//! separate crate that implements the same trait — PLAN §4 cuts object stores
-//! from v1 by name, so there is no `s3` feature here, no unimplemented arm and
-//! no AWS SDK in the lock file. Nothing above the trait changes when that
-//! crate arrives.
+//! [`Storage`] is the whole public contract callers name. [`LocalDisk`]
+//! implements it, and so does [`PgStorage`] behind the `postgres` feature —
+//! objects in `bytea` columns, for a deployment that already runs Postgres
+//! and would rather not also run a shared filesystem.
+//!
+//! S3 and Google Cloud Storage sit below the same trait (ADR 13,
+//! `docs/object-storage.md`). A backend implements the raw [`Bucket`]
+//! contract — put and get with streams, ranges, head, delete, list, signed
+//! URLs — and [`ObjectStorage`] turns any bucket into a `Storage`, so the
+//! rules below exist once. [`FsBucket`] is a bucket on a disk, in
+//! `LocalDisk`'s format; [`cloud::CloudBucket`] is one on S3 (feature `s3`)
+//! or GCS (feature `gcs`). Nothing above the trait changed when they came.
 //!
 //! [`PgStorage`]: postgres::PgStorage
 //!
@@ -103,14 +107,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bucket;
 pub mod deferred;
 pub mod error;
+pub mod fs_bucket;
 pub mod key;
 pub mod local;
 pub mod meta;
+pub mod objects;
 pub mod spec;
 pub mod storage;
 pub mod token;
+
+#[cfg(any(feature = "s3", feature = "gcs"))]
+pub mod cloud;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -131,13 +141,22 @@ pub mod scaffold;
 mod rt;
 
 #[cfg(test)]
+mod conformance;
+
+#[cfg(test)]
 mod tests;
 
+pub use bucket::{
+    Body, Bucket, ByteRange, ByteStream, GetObject, Listed, ObjectHead, ObjectPath, PutOptions,
+    SignedMethod,
+};
 pub use deferred::Deferred;
 pub use error::StorageError;
+pub use fs_bucket::FsBucket;
 pub use key::{HashKey, ObjectKey, KEY_BYTES, KEY_HEX_LEN};
 pub use local::LocalDisk;
 pub use meta::{ContentType, Filename, ObjectInfo, ObjectMeta, MAX_FILENAME_LEN};
+pub use objects::ObjectStorage;
 pub use spec::{CropAnchor, VariantFormat, VariantMode, VariantSpec, MAX_VARIANT_DIM};
 
 #[cfg(feature = "postgres")]

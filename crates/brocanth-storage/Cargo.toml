@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "File storage for brocanth: one trait, a local-disk backend, content-addressed names and derived image variants."
+description = "File storage for brocanth: one trait over a local disk, Postgres, S3 or Google Cloud Storage, content-addressed names and derived image variants."
 readme = "README.md"
 
 [dependencies]
@@ -30,6 +30,26 @@ subtle = "2.6"
 getrandom = "0.4"
 base64 = "0.23"
 thiserror = "2"
+
+# A `Bucket` body is bytes or a stream of them. `bytes` is the chunk type
+# every async HTTP stack already speaks, and `futures-core` is the `Stream`
+# trait alone: no executor, no combinators, no runtime. Both are a few
+# hundred lines and already in the lock through `sqlx` and `reqwest`.
+bytes = "1"
+futures-core = "0.3"
+
+# The S3 and Google Cloud Storage clients, behind `s3` and `gcs`, off by
+# default for the reason `sqlx` is: a feature that is off means the code is
+# absent (§8.2). One crate for both clouds, from the Apache Arrow project:
+# streaming put and get, ranges, listing, conditional create and signed
+# URLs, on the tokio and reqwest 0.13 the workspace already links.
+# `docs/object-storage.md` §4 has the comparison with the two vendor SDKs.
+# No default features: its `fs` backend would be a second disk store
+# beside `FsBucket`, without the `fsync`, the `0600` and the sidecar.
+object_store = { version = "0.14", default-features = false, optional = true }
+# The combinators a cloud backend needs to read a list and a body. Only with
+# `s3` or `gcs`: the disk code polls a stream by hand.
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 
 # The image codecs, and the reason they are optional is §8.2: a feature that is
 # off must mean the code is absent. `image` pulls png, jpeg, gif and webp
@@ -113,6 +133,9 @@ brocanth-cli = { path = "../brocanth-cli" }
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-test.workspace = true
 brocanth-middleware.workspace = true
+# Fetches a signed URL in the S3 and GCS conformance tests, which only run
+# against a server (`docs/object-storage.md` §7). Already in the lock.
+reqwest = { version = "0.13", default-features = false }
 
 [features]
 # `runtime` only. Parsing a size specification, caching a derived variant
@@ -142,6 +165,12 @@ scaffold = ["dep:brocanth-scaffold"]
 # two crates in one workspace asking for two different OpenSSL bindings is a
 # link error nobody can fix from their own `Cargo.toml`.
 postgres = ["runtime", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring"]
+
+# Objects in an S3 bucket, or an S3-compatible one (MinIO, R2), and in a
+# Google Cloud Storage bucket. See [`crate::cloud`]. `http` for the method a
+# signed URL is for.
+s3 = ["runtime", "dep:object_store", "object_store/aws", "dep:futures-util", "dep:http"]
+gcs = ["runtime", "dep:object_store", "object_store/gcp", "dep:futures-util", "dep:http"]
 
 [lints.rust]
 missing_docs = "warn"

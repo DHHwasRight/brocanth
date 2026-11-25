@@ -5,16 +5,13 @@
 //! one trait here, [`LocalDisk`] implements it, and everything above — an
 //! upload route, a download route, an admin screen — talks to the trait.
 //!
-//! # S3 is a later crate, and the trait is why
+//! # Object stores sit below the trait
 //!
-//! PLAN §4 cuts S3 from v1 by name, and this crate does not smuggle it back
-//! in. There is no `Backend` enum with an unimplemented arm, no `s3` feature
-//! and no `aws-sdk` in the lock file. An object store backend is a separate
-//! crate that implements [`Storage`] and depends on this one, exactly as an
-//! adapter over `brocanth-model` is for `brocanth-auth`'s `AuthStore`, and
-//! nothing above the trait changes when it arrives.
-//!
-//! The trait is shaped so that is actually possible:
+//! S3 and Google Cloud Storage arrived as the trait promised: nothing above
+//! it changed. They implement the raw [`Bucket`](crate::bucket::Bucket)
+//! contract, and [`ObjectStorage`](crate::ObjectStorage) turns any bucket
+//! into a `Storage`, so the address, dedupe and variant rules below exist
+//! once (`docs/object-storage.md`, ADR 13). The trait was shaped for it:
 //!
 //! * Every method is `&self`, so an implementation holds a client and a pool.
 //! * Nothing returns a `Path`, a `File` or anything else only a filesystem
@@ -36,12 +33,11 @@
 //!
 //! # What this trait does not do, and why
 //!
-//! * **No streaming.** Bodies are `&[u8]` and `Vec<u8>`. An `AsyncRead` in the
-//!   signature is an async runtime in the tree of every application that
-//!   stores a file, and §8.2 does not allow that for a convenience. The size
-//!   limit on an upload belongs to the HTTP half, which has to enforce one
-//!   before this crate ever sees the bytes. A streaming method can be added
-//!   later, defaulted in terms of these, without breaking an implementation.
+//! * **No streaming.** Bodies are `&[u8]` and `Vec<u8>`. The HTTP half reads
+//!   a whole upload under its own limit before it calls the store, so a
+//!   streaming method here would stream nothing today. Code that moves large
+//!   files uses [`Bucket`](crate::bucket::Bucket), which streams both ways.
+//!   A range read is here ([`Storage::get_range`]).
 //! * **No listing.** An enumeration endpoint over a content-addressed store is
 //!   an enumeration endpoint over everything anybody uploaded. The application
 //!   lists its own records; this crate does not know which rows exist.
@@ -52,6 +48,9 @@
 
 use async_trait::async_trait;
 
+use std::time::Duration;
+
+use crate::bucket::ByteRange;
 use crate::error::StorageError;
 use crate::key::ObjectKey;
 use crate::meta::{ObjectInfo, ObjectMeta};
@@ -183,6 +182,43 @@ pub trait Storage: Send + Sync + 'static {
         spec: VariantSpec,
         content: &[u8],
     ) -> Result<(), StorageError>;
+
+    /// Reads the part of an object `range` covers. A range that ends past
+    /// the object is cut at its end.
+    ///
+    /// The default reads the whole object and slices it. A backend that can
+    /// read a range on its own overrides it: [`ObjectStorage`] does.
+    ///
+    /// [`ObjectStorage`]: crate::ObjectStorage
+    ///
+    /// # Errors
+    /// [`StorageError::NotFound`] when nothing is stored there,
+    /// [`StorageError::InvalidRange`] when the range starts at or after the
+    /// end.
+    async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, StorageError> {
+        range.slice(&self.get(key).await?)
+    }
+
+    /// A URL that reads the object for `ttl` with no other credential, or
+    /// `None` when this backend cannot sign one. A disk and Postgres cannot;
+    /// S3 and GCS can.
+    ///
+    /// The URL is a bearer credential, like a [`FileToken`]: mint it only
+    /// after the policy allowed the read. It reaches the bucket directly, so
+    /// none of the headers the download route sets come with it.
+    ///
+    /// [`FileToken`]: crate::FileToken
+    ///
+    /// # Errors
+    /// [`StorageError::Backend`] when the backend can sign and failed to.
+    async fn signed_url(
+        &self,
+        key: &ObjectKey,
+        ttl: Duration,
+    ) -> Result<Option<String>, StorageError> {
+        let _ = (key, ttl);
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -231,5 +267,17 @@ impl<T: Storage + ?Sized> Storage for std::sync::Arc<T> {
         content: &[u8],
     ) -> Result<(), StorageError> {
         (**self).put_variant(key, spec, content).await
+    }
+
+    async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, StorageError> {
+        (**self).get_range(key, range).await
+    }
+
+    async fn signed_url(
+        &self,
+        key: &ObjectKey,
+        ttl: Duration,
+    ) -> Result<Option<String>, StorageError> {
+        (**self).signed_url(key, ttl).await
     }
 }

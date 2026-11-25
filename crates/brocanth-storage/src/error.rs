@@ -68,8 +68,8 @@ pub enum StorageError {
     /// nothing a client sent reaches a log through here.
     #[error(
         "the object is {size} bytes, past this backend's limit of {limit}\n\
-         help: store a smaller file, or raise the limit (`PgStorage::with_max_object_bytes`, \
-         `max_bytes` for the upload route)"
+         help: store a smaller file, or raise the limit (`with_max_object_bytes` on the store, \
+         `max_object_bytes` under [storage], `max_bytes` for the upload route)"
     )]
     TooLarge {
         /// How many bytes the caller tried to store.
@@ -77,6 +77,28 @@ pub enum StorageError {
         /// The most this backend stores in one object.
         limit: u64,
     },
+
+    /// Something is already stored at that path, and the put asked to
+    /// create only ([`PutOptions::create_only`]).
+    ///
+    /// [`PutOptions::create_only`]: crate::bucket::PutOptions::create_only
+    #[error("an object is already stored at that path")]
+    Exists,
+
+    /// The text is not an object path. The reason is a fixed string, so the
+    /// path itself never reaches a log through here.
+    #[error(
+        "that is not an object path: {0}\n\
+         help: write segments of `A-Z a-z 0-9 . _ -` joined by `/`, with no `.` or `..` segment"
+    )]
+    InvalidPath(&'static str),
+
+    /// The range starts at or after the end of the object, or is empty.
+    #[error(
+        "the range is not inside the object\n\
+         help: ask for a range that starts before the object's size, with `start < end`"
+    )]
+    InvalidRange,
 
     /// Anything the backend failed at.
     ///

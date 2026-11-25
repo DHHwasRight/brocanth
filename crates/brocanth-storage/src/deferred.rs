@@ -101,6 +101,22 @@ impl Storage for Deferred {
     ) -> Result<(), StorageError> {
         self.store()?.put_variant(key, spec, content).await
     }
+
+    async fn get_range(
+        &self,
+        key: &ObjectKey,
+        range: crate::bucket::ByteRange,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.store()?.get_range(key, range).await
+    }
+
+    async fn signed_url(
+        &self,
+        key: &ObjectKey,
+        ttl: std::time::Duration,
+    ) -> Result<Option<String>, StorageError> {
+        self.store()?.signed_url(key, ttl).await
+    }
 }
 
 #[cfg(test)]

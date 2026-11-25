@@ -466,7 +466,7 @@ fn parse_sidecar(text: &str) -> (ContentType, Option<Filename>) {
     )
 }
 
-fn temp_name() -> Result<String, StorageError> {
+pub(crate) fn temp_name() -> Result<String, StorageError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
         .map_err(|e| StorageError::backend(format!("no OS randomness: {e}")))?;
@@ -479,7 +479,7 @@ fn temp_name() -> Result<String, StorageError> {
     Ok(name)
 }
 
-fn remove_if_present(path: &Path, context: &'static str) -> Result<(), StorageError> {
+pub(crate) fn remove_if_present(path: &Path, context: &'static str) -> Result<(), StorageError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -496,25 +496,25 @@ fn remove_dir_if_present(path: &Path, context: &'static str) -> Result<(), Stora
 }
 
 #[cfg(unix)]
-fn restrict(dir: &Path) -> Result<(), StorageError> {
+pub(crate) fn restrict(dir: &Path) -> Result<(), StorageError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .map_err(|e| StorageError::io("restrict a storage directory", e))
 }
 
 #[cfg(not(unix))]
-fn restrict(_dir: &Path) -> Result<(), StorageError> {
+pub(crate) fn restrict(_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn restrict_file(file: &fs::File) -> Result<(), StorageError> {
+pub(crate) fn restrict_file(file: &fs::File) -> Result<(), StorageError> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|e| StorageError::io("restrict a stored file", e))
 }
 
 #[cfg(not(unix))]
-fn restrict_file(_file: &fs::File) -> Result<(), StorageError> {
+pub(crate) fn restrict_file(_file: &fs::File) -> Result<(), StorageError> {
     Ok(())
 }
