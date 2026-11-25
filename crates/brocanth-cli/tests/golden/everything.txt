@@ -46,6 +46,7 @@ serde_json = { version = "1" }  # an outgoing event's payload is JSON
 brocanth-oauth-client = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["admin"] }
 brocanth-realtime = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-events = { git = "https://github.com/DHHwasRight/brocanth.git" }
+brocanth-notifications = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "realtime"] }  # the notifications table, one inbox per account
 brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main" }  # templates, compiled
 jt = { git = "https://github.com/DHHwasRight/jt.git", branch = "main" }  # JSON templates, compiled
@@ -58,8 +59,10 @@ brocanth-pagination = { git = "https://github.com/DHHwasRight/brocanth.git", fea
 brocanth-filters = { git = "https://github.com/DHHwasRight/brocanth.git" }  # filters compiled into the policy's WHERE
 brocanth-search = { git = "https://github.com/DHHwasRight/brocanth.git" }  # full-text search in Postgres, and the site index
 brocanth-i18n = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin", "config"] }
+brocanth-humanize = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["i18n"] }  # readable times, sizes, ordinals and numbers
 brocanth-meta = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-errors = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
+brocanth-debug = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "model"] }  # the development panel; inert in a release build
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge", "websocket"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
@@ -1962,6 +1965,7 @@ mod tests {
             "/feed.xml".to_string(),
             "/impersonate".to_string(),
             "/impersonate/stop".to_string(),
+            "/notifications".to_string(),
             "/openapi.json".to_string(),
             "/openapi.yaml".to_string(),
             "/posts".to_string(),
@@ -2101,15 +2105,19 @@ pub mod cache;
 pub mod content;
 pub mod db;
 pub mod db_embedded;
+pub mod debug_toolbar;
 pub mod errors;
 pub mod feed;
 pub mod flags;
+pub mod humanize;
 pub mod i18n;
+pub mod image;
 pub mod impersonate;
 pub mod jobs;
 pub mod mail;
 pub mod meta;
 pub mod model;
+pub mod notifications;
 pub mod oauth_client;
 pub mod observability;
 pub mod openapi;
@@ -2388,6 +2396,22 @@ macro_rules! register {
                 crate::plugins::meta_settings(&layers)?,
             ),
         );
+
+        // -- debug toolbar -------------------------------------------------
+        //
+        // A panel on each HTML page: timing, SQL, hooks, settings. Inert in a
+        // release build; `brocanth check --deploy` refuses it.
+        //
+        let builder = builder.plugin_hooking(
+            <brocanth_debug::DebugToolbar as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::debug_toolbar_settings(&layers)?,
+            ),
+        );
+        let builder = builder.hooks_off_from(
+            "debug_toolbar",
+            "src/modules/debug_toolbar.rs",
+            crate::modules::debug_toolbar::MODULE.hooks.off(),
+        );
         // PgPool <- db (analytics requires PgPool). `brocanth.toml` [bindings] records it.
         let builder = builder.plugin(
             <crate::plugins::db::Database as brocanth::plugin_api::Plugin>::new(
@@ -2578,6 +2602,11 @@ macro_rules! register {
             ),
         );
         let builder = builder.plugin(
+            <crate::plugins::notifications::Notifications as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::notifications_settings(&layers)?,
+            ),
+        );
+        let builder = builder.plugin(
             <crate::plugins::feed::Feed as brocanth::plugin_api::Plugin>::new(
                 crate::plugins::feed_settings(&layers)?,
             ),
@@ -2647,7 +2676,8 @@ type WithAdmin = After<crate::plugins::admin::AdminSettings, WithValidation>;
 type WithRealtime = After<crate::plugins::realtime::Realtime, WithAdmin>;
 type WithI18n = After<crate::plugins::i18n::I18n, WithRealtime>;
 type WithMeta = After<crate::plugins::meta::Meta, WithI18n>;
-type WithDb = After<crate::plugins::db::Database, WithMeta>;
+type WithDebugToolbar = After<brocanth_debug::DebugToolbar, WithMeta>;
+type WithDb = After<crate::plugins::db::Database, WithDebugToolbar>;
 type WithCache = After<crate::plugins::cache::Cache, WithDb>;
 type WithMiddlewareRateLimit = After<brocanth_middleware::RateLimit, WithCache>;
 type WithBackoffice = After<crate::plugins::backoffice::Backoffice, WithMiddlewareRateLimit>;
@@ -2669,7 +2699,8 @@ type WithSuperuser = After<crate::plugins::superuser::Superuser, WithAuthOauth>;
 type WithRls = After<crate::plugins::rls::RowSecurity, WithSuperuser>;
 type WithStorageRoutes = After<crate::plugins::storage_routes::StorageRoutes, WithRls>;
 type WithOauthClient = After<crate::plugins::oauth_client::OauthClientPlugin, WithStorageRoutes>;
-type WithFeed = After<crate::plugins::feed::Feed, WithOauthClient>;
+type WithNotifications = After<crate::plugins::notifications::Notifications, WithOauthClient>;
+type WithFeed = After<crate::plugins::feed::Feed, WithNotifications>;
 type WithAuthScreens = After<crate::plugins::auth_screens::AuthScreens, WithFeed>;
 type WithAuthOtp = After<crate::plugins::auth_otp::AuthOtp, WithAuthScreens>;
 type WithAuthMfa = After<crate::plugins::auth_mfa::AuthMfa, WithAuthOtp>;
@@ -2687,7 +2718,9 @@ type HookedFlashPlugin =
     Both<<brocanth_middleware::FlashPlugin as HookSource>::Families, HookedCompression>;
 type HookedGtag = Both<<brocanth_gtag::Gtag as HookSource>::Families, HookedFlashPlugin>;
 type HookedI18n = Both<<crate::plugins::i18n::I18n as HookSource>::Families, HookedGtag>;
-type HookedRateLimit = Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedI18n>;
+type HookedDebugToolbar = Both<<brocanth_debug::DebugToolbar as HookSource>::Families, HookedI18n>;
+type HookedRateLimit =
+    Both<<brocanth_middleware::RateLimit as HookSource>::Families, HookedDebugToolbar>;
 type HookedAnalytics =
     Both<<brocanth_analytics::Analytics as HookSource>::Families, HookedRateLimit>;
 type HookedWebhooksIn =
@@ -2735,6 +2768,10 @@ macro_rules! announce {
         let realtime: &crate::plugins::realtime::Broadcast = cx.extract();
         let max_clients = realtime.broker.config().max_clients;
         crate::plugins::say!(info, "realtime: up to {max_clients} clients"; max_clients);
+        if let Some(toolbar) = $app.plugin::<brocanth_debug::DebugToolbar>() {
+            toolbar.observe($app.pipeline(), crate::plugins::settings_report());
+        }
+        let _ = &cx;
         let db: &brocanth_db::Db = cx.extract();
         let connections = db.pool().size();
         crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
@@ -2786,6 +2823,13 @@ pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {
         crate::plugins::say!(
             warn,
             "warning: errors installs no hook; help: brocanth remove errors"
+        );
+    }
+    // Every hook of `debug_toolbar` is off in src/modules/debug_toolbar.rs.
+    if all_off("debug_toolbar", &["start", "panel"]) {
+        crate::plugins::say!(
+            warn,
+            "warning: debug_toolbar installs no hook; help: brocanth remove debug-toolbar"
         );
     }
 }
@@ -3820,6 +3864,26 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "debug_toolbar.enabled",
+        help: "Show the panel on each HTML page.",
+        flag: true,
+        file: "src/modules/debug_toolbar.rs",
+        flags: crate::modules::debug_toolbar::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "debug_toolbar.max_statements",
+        help: "The most SQL statement shapes the panel lists.",
+        flag: true,
+        file: "src/modules/debug_toolbar.rs",
+        flags: crate::modules::debug_toolbar::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "db.url",
         help: "The Postgres URL: postgres://user:password@host:5432/database.",
         flag: false,
@@ -4770,6 +4834,26 @@ pub const SETTINGS: &[Setting] = &[
         list: true,
     },
     Setting {
+        path: "storage_routes.formats",
+        help: "The formats &fmt= may convert a thumbnail to: webp, jpeg, png.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
+        path: "storage_routes.max_pixels",
+        help: "The most pixels a source may declare before a thumbnail of it is a 413.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "oauth_client.providers",
         help: "The providers to offer, by id: github, google, microsoft, gitlab.",
         flag: true,
@@ -4887,6 +4971,36 @@ pub const SETTINGS: &[Setting] = &[
         flags: crate::modules::oauth_client::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
+    },
+    Setting {
+        path: "notifications.migrate",
+        help: "Create the brocanth_notifications table on the first readiness check.",
+        flag: true,
+        file: "src/modules/notifications.rs",
+        flags: crate::modules::notifications::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "notifications.per_page",
+        help: "Notifications per page on /notifications.",
+        flag: true,
+        file: "src/modules/notifications.rs",
+        flags: crate::modules::notifications::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "notifications.mail",
+        help: "Send a notification by mail too when notify() is given an address.",
+        flag: true,
+        file: "src/modules/notifications.rs",
+        flags: crate::modules::notifications::MODULE.flags,
+        none_as: None,
+        text: false,
         list: false,
     },
     Setting {
@@ -5228,6 +5342,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::realtime::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::notifications::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::robots::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -5247,6 +5364,9 @@ fn renames() -> Vec<(&'static str, Flag)> {
         renames.push((key.path(), *flag));
     }
     for (key, flag) in crate::modules::errors::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::debug_toolbar::MODULE.rename {
         renames.push((key.path(), *flag));
     }
     renames
@@ -5360,6 +5480,9 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     for (key, value) in crate::modules::realtime::MODULE.set {
         code.push((key.path(), *value, "src/modules/realtime.rs"));
     }
+    for (key, value) in crate::modules::notifications::MODULE.set {
+        code.push((key.path(), *value, "src/modules/notifications.rs"));
+    }
     for (key, value) in crate::modules::robots::MODULE.set {
         code.push((key.path(), *value, "src/modules/robots.rs"));
     }
@@ -5380,6 +5503,9 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     }
     for (key, value) in crate::modules::errors::MODULE.set {
         code.push((key.path(), *value, "src/modules/errors.rs"));
+    }
+    for (key, value) in crate::modules::debug_toolbar::MODULE.set {
+        code.push((key.path(), *value, "src/modules/debug_toolbar.rs"));
     }
     code
 }
@@ -5624,6 +5750,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let realtime = crate::plugins::realtime::Settings::default();
     let i18n = brocanth_i18n::NegotiatorConfig::default();
     let meta = crate::plugins::meta::Settings::default();
+    let debug_toolbar = brocanth_debug::ToolbarConfig::default();
     let db = crate::plugins::db::Settings::default();
     let cache = crate::plugins::cache::Settings::default();
     let rate_limit = brocanth_middleware::RateLimitConfig::default();
@@ -5644,6 +5771,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     let superuser = crate::plugins::superuser::Settings::default();
     let storage_routes = crate::plugins::storage_routes::Settings::default();
     let oauth_client = crate::plugins::oauth_client::Settings::default();
+    let notifications = brocanth_notifications::NotificationsConfig::default();
     let feed = crate::plugins::feed::Settings::default();
     let auth_screens = crate::plugins::auth_screens::Settings::default();
     let auth_otp = crate::plugins::auth_otp::Settings::default();
@@ -5829,6 +5957,14 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("meta.description", format!("{:?}", meta.description)),
         ("meta.image", format!("{:?}", meta.image)),
         ("meta.twitter", format!("{:?}", meta.twitter)),
+        (
+            "debug_toolbar.enabled",
+            format!("{:?}", debug_toolbar.enabled),
+        ),
+        (
+            "debug_toolbar.max_statements",
+            format!("{:?}", debug_toolbar.max_statements),
+        ),
         ("db.url", format!("{:?}", db.url)),
         ("db.max_connections", format!("{:?}", db.max_connections)),
         ("db.min_connections", format!("{:?}", db.min_connections)),
@@ -6039,6 +6175,14 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", storage_routes.thumb_sizes),
         ),
         (
+            "storage_routes.formats",
+            format!("{:?}", storage_routes.formats),
+        ),
+        (
+            "storage_routes.max_pixels",
+            format!("{:?}", storage_routes.max_pixels),
+        ),
+        (
             "oauth_client.providers",
             format!("{:?}", oauth_client.providers),
         ),
@@ -6083,6 +6227,15 @@ fn defaults() -> Vec<(&'static str, String)> {
             "oauth_client.gitlab_client_secret",
             format!("{:?}", oauth_client.gitlab_client_secret),
         ),
+        (
+            "notifications.migrate",
+            format!("{:?}", notifications.migrate),
+        ),
+        (
+            "notifications.per_page",
+            format!("{:?}", notifications.per_page),
+        ),
+        ("notifications.mail", format!("{:?}", notifications.mail)),
         ("feed.site_url", format!("{:?}", feed.site_url)),
         ("feed.title", format!("{:?}", feed.title)),
         ("feed.author", format!("{:?}", feed.author)),
@@ -6200,6 +6353,11 @@ pub fn meta_settings(layers: &Layers) -> Result<crate::plugins::meta::Settings, 
     layers.section("meta").map_err(|e| e.to_string())
 }
 
+/// `[debug_toolbar]`, from every settings layer.
+pub fn debug_toolbar_settings(layers: &Layers) -> Result<brocanth_debug::ToolbarConfig, String> {
+    layers.section("debug_toolbar").map_err(|e| e.to_string())
+}
+
 /// `[db]`, from every settings layer.
 pub fn db_settings(layers: &Layers) -> Result<crate::plugins::db::Settings, String> {
     layers.section("db").map_err(|e| e.to_string())
@@ -6314,6 +6472,13 @@ pub fn oauth_client_settings(
     layers.section("oauth_client").map_err(|e| e.to_string())
 }
 
+/// `[notifications]`, from every settings layer.
+pub fn notifications_settings(
+    layers: &Layers,
+) -> Result<brocanth_notifications::NotificationsConfig, String> {
+    layers.section("notifications").map_err(|e| e.to_string())
+}
+
 /// `[feed]`, from every settings layer.
 pub fn feed_settings(layers: &Layers) -> Result<crate::plugins::feed::Settings, String> {
     layers.section("feed").map_err(|e| e.to_string())
@@ -6389,6 +6554,12 @@ fn hooks_off_notes() -> Vec<(&'static str, String)> {
         notes.push((
             "errors.details",
             format!("hook errors.{name} is off in src/modules/errors.rs"),
+        ));
+    }
+    for name in crate::modules::debug_toolbar::MODULE.hooks.off() {
+        notes.push((
+            "debug_toolbar.enabled",
+            format!("hook debug_toolbar.{name} is off in src/modules/debug_toolbar.rs"),
         ));
     }
     notes
@@ -6545,7 +6716,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 962cc763ca95cb1f
+// brocanth-digest: 74c8789362266006
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -7779,6 +7950,8 @@ pub mod storage_routes {
         MaxBytes,
         Dedupe,
         ThumbSizes,
+        Formats,
+        MaxPixels,
     }
 
     impl Key {
@@ -7788,6 +7961,8 @@ pub mod storage_routes {
                 Key::MaxBytes => "storage_routes.max_bytes",
                 Key::Dedupe => "storage_routes.dedupe",
                 Key::ThumbSizes => "storage_routes.thumb_sizes",
+                Key::Formats => "storage_routes.formats",
+                Key::MaxPixels => "storage_routes.max_pixels",
             }
         }
     }
@@ -7848,6 +8023,17 @@ pub mod storage_routes {
 /// The shape of src/modules/storage_thumbnails.rs.
 pub mod storage_thumbnails {
     /// What src/modules/storage_thumbnails.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/image.rs.
+pub mod image {
+    /// What src/modules/image.rs holds.
     pub struct Module {}
 
     impl Module {
@@ -8827,6 +9013,51 @@ pub mod realtime_websocket {
     }
 }
 
+/// The shape of src/modules/notifications.rs.
+pub mod notifications {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[notifications]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Migrate,
+        PerPage,
+        Mail,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Migrate => "notifications.migrate",
+                Key::PerPage => "notifications.per_page",
+                Key::Mail => "notifications.mail",
+            }
+        }
+    }
+
+    /// What src/modules/notifications.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+        };
+    }
+}
+
 /// The shape of src/modules/commands.rs.
 pub mod commands {
     /// What src/modules/commands.rs holds.
@@ -9213,6 +9444,20 @@ pub mod i18n_routing {
     }
 }
 
+/// The shape of src/modules/humanize.rs.
+pub mod humanize {
+    /// What src/modules/humanize.rs holds.
+    pub struct Module {
+        /// The language of the phrases without the i18n module: en, fr, de or es.
+        pub locale: &'static str,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { locale: "en" };
+    }
+}
+
 /// The shape of src/modules/meta.rs.
 pub mod meta {
     pub use super::{Flag, Flags};
@@ -9329,6 +9574,94 @@ pub mod errors {
     }
 }
 
+/// The shape of src/modules/debug.rs.
+pub mod debug {
+    /// What src/modules/debug.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/debug_toolbar.rs.
+pub mod debug_toolbar {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[debug_toolbar]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Enabled,
+        MaxStatements,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Enabled => "debug_toolbar.enabled",
+                Key::MaxStatements => "debug_toolbar.max_statements",
+            }
+        }
+    }
+
+    /// The hooks of `debug-toolbar` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `debug_toolbar.start`: start the clock and the statement count, first of
+        /// all request hooks.
+        pub start: bool,
+        /// `debug_toolbar.panel`: write the panel before `</body>` of each HTML
+        /// answer.
+        pub panel: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            start: true,
+            panel: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.start {
+                off.push("start");
+            }
+            if !self.panel {
+                off.push("panel");
+            }
+            off
+        }
+    }
+
+    /// What src/modules/debug_toolbar.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+        /// The hooks that run.
+        pub hooks: Hooks,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+            hooks: Hooks::DEFAULT,
+        };
+    }
+}
+
 /// The shape of src/modules/docker.rs.
 pub mod docker {
     /// What src/modules/docker.rs holds.
@@ -9373,7 +9706,18 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 5fed3ce36e41d1dc
+/// The shape of src/modules/ci_security.rs.
+pub mod ci_security {
+    /// What src/modules/ci_security.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+// brocanth-digest: 187aef36b50313a9
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -9407,12 +9751,15 @@ pub mod cache;
 pub mod cache_redis;
 pub mod ci;
 pub mod ci_github;
+pub mod ci_security;
 pub mod client;
 pub mod commands;
 pub mod config;
 pub mod content;
 pub mod db;
 pub mod db_embedded;
+pub mod debug;
+pub mod debug_toolbar;
 pub mod docker;
 pub mod docker_kubernetes;
 pub mod errors;
@@ -9421,8 +9768,10 @@ pub mod filters;
 pub mod flags;
 pub mod flash;
 pub mod gtag;
+pub mod humanize;
 pub mod i18n;
 pub mod i18n_routing;
+pub mod image;
 pub mod impersonate;
 pub mod input;
 pub mod jobs;
@@ -9438,6 +9787,7 @@ pub mod middleware_csrf;
 pub mod middleware_rate_limit;
 pub mod middleware_security_headers;
 pub mod model;
+pub mod notifications;
 pub mod oauth;
 pub mod oauth_client;
 pub mod oauth_client_memory;
@@ -9505,6 +9855,7 @@ pub const ALL: &[&str] = &[
     "storage",
     "storage-routes",
     "storage-thumbnails",
+    "image",
     "input",
     "client",
     "middleware",
@@ -9531,6 +9882,7 @@ pub const ALL: &[&str] = &[
     "realtime",
     "realtime-sse",
     "realtime-websocket",
+    "notifications",
     "commands",
     "rsx",
     "jt",
@@ -9547,15 +9899,19 @@ pub const ALL: &[&str] = &[
     "search",
     "i18n",
     "i18n-routing",
+    "humanize",
     "meta",
     "errors",
+    "debug",
+    "debug-toolbar",
     "docker",
     "docker-kubernetes",
     "ci",
     "ci-github",
+    "ci-security",
 ];
 
-// brocanth-digest: 0fdfb6ea9b27d150
+// brocanth-digest: ade231c5f483c7f0
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -10479,6 +10835,20 @@ use crate::plugins::shape::storage_thumbnails::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/image.rs =====
+//! `image`: thumbnails converted on request (&fmt=webp), a pixel cap against
+//! decompression bombs, a srcset helper.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::image::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/input.rs =====
 //! `input`: a form or a JSON body, read into a struct, with every fault at
 //! once.
@@ -11237,6 +11607,41 @@ use crate::plugins::shape::realtime_websocket::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/notifications.rs =====
+//! `notifications`: in-app notifications: an inbox per account at
+//! /notifications, unread count, mark read.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [notifications] in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::notifications::{Flag, Flags, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [notifications]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Migrate, Flag::As("migrate")),
+    //   (Key::Migrate, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Migrate, "value"),
+    set: &[],
+
+    ..Module::DEFAULT
+};
 ===== src/modules/commands.rs =====
 //! `commands`: this project's own command line, `serve` plus whatever you add.
 //!
@@ -11583,6 +11988,24 @@ use crate::plugins::shape::i18n_routing::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/humanize.rs =====
+//! `humanize`: readable values for a page: "3 minutes ago", 1.5 MB, 2nd, 1,234;
+//! no dependency.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+
+use crate::plugins::shape::humanize::Module;
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The language of the phrases without the i18n module: en, fr, de or es.
+    locale: "en",
+
+    ..Module::DEFAULT
+};
 ===== src/modules/meta.rs =====
 //! `meta`: a title, a description, a canonical URL and Open Graph tags for each
 //! page.
@@ -11659,6 +12082,64 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/debug.rs =====
+//! `debug`: development tools, refused by `check --deploy`; pick them below.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::debug::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/debug_toolbar.rs =====
+//! `debug-toolbar`: a panel on each HTML page in a debug build: timing, SQL
+//! statements, hooks, settings.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice:
+//! [debug_toolbar] in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::debug_toolbar::{Flag, Flags, Hooks, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [debug_toolbar]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Enabled, Flag::As("enabled")),
+    //   (Key::Enabled, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Enabled, "value"),
+    set: &[],
+
+    hooks: Hooks {
+        // `debug_toolbar.start`: start the clock and the statement count, first
+        // of all request hooks.
+        start: true,
+        // `debug_toolbar.panel`: write the panel before `</body>` of each HTML
+        // answer.
+        panel: true,
+        ..Hooks::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
 ===== src/modules/docker.rs =====
 //! `docker`: a cargo-chef Dockerfile: slim Debian, a user that is not root, a
 //! HEALTHCHECK on /up.
@@ -11711,6 +12192,20 @@ pub const MODULE: Module = Module { ..Module::DEFAULT };
 //! choice, this file takes its default.
 
 use crate::plugins::shape::ci_github::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/ci_security.rs =====
+//! `ci-security`: .github/workflows/security.yml: cargo audit and cargo deny on
+//! each push and each day; deny.toml.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::ci_security::Module;
 
 #[allow(clippy::needless_update)]
 pub const MODULE: Module = Module { ..Module::DEFAULT };
@@ -11989,6 +12484,13 @@ name = "My Blog"
 # image = "/og.png"
 # The site's account, for twitter:site. Empty means none.
 # twitter = "@example"
+
+[debug_toolbar]
+# Show the panel on each HTML page.
+# A release build shows none, whatever this says.
+enabled = true
+# The most SQL statement shapes the panel lists.
+max_statements = 50
 
 [db]
 # The Postgres URL: postgres://user:password@host:5432/database.
@@ -12326,6 +12828,15 @@ dedupe = false
 # WxH crops to the middle, WxHt to the top, WxHb to the bottom, WxHf fits,
 # Wx0 and 0xH scale. Each size is rendered once per file and kept.
 thumb_sizes = ["150x150t", "300x200", "600x600f"]
+# The formats &fmt= may convert a thumbnail to: webp, jpeg, png.
+# Each format is one more rendering per size and file, so list only the ones
+# the pages ask for. WebP here is lossless: right for a logo, larger than JPEG
+# for a photograph.
+formats = ["webp", "jpeg"]
+# The most pixels a source may declare before a thumbnail of it is a 413.
+# Read from the image header before anything is decoded, so a small file that
+# declares 40000x40000 costs a few bytes of reading. At most 50000000.
+max_pixels = 24000000
 
 [oauth_client]
 # The providers to offer, by id: github, google, microsoft, gitlab.
@@ -12358,6 +12869,15 @@ allow_http = false
 # gitlab_client_id = ""
 # The secret of the GitLab application. No flag: it is a secret. Empty means none.
 # gitlab_client_secret = ""
+
+[notifications]
+# Create the brocanth_notifications table on the first readiness check.
+# Off, for a project that keeps brocanth_notifications::SCHEMA in a migration.
+migrate = true
+# Notifications per page on /notifications.
+per_page = 20
+# Send a notification by mail too when notify() is given an address.
+mail = true
 
 [feed]
 # The site's address, scheme and host: every URL in the feed starts with it.
@@ -12438,10 +12958,12 @@ pub fn config_checks() -> Vec<brocanth_config::check::Entry> {
         Entry::migrates("webhooks_out", "`brocanth_webhooks::Outgoing::SCHEMA`"),
         // audit
         Entry::migrates("audit", "`brocanth_audit::PgStore::SCHEMA`"),
+        // notifications
+        Entry::migrates("notifications", "`brocanth_notifications::SCHEMA`"),
     ]
 }
 
-// brocanth-digest: 0cdfb60ecded587b
+// brocanth-digest: d804d90bb15885f1
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
@@ -12543,6 +13065,71 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+===== .github/workflows/security.yml =====
+# The dependency checks: RustSec advisories (`cargo audit`), and the bans and
+# sources in deny.toml (`cargo deny`). On each push to main, on each pull
+# request, and each day, because a new advisory arrives without a push.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Built from crates.io at a fixed version. Cargo checks each crate it
+      # downloads against the index checksum, and `--locked` uses the lock
+      # file the release was published with. To bump: change the version.
+      - run: cargo install cargo-audit --version 0.23.0 --locked
+      # Fails on an advisory against a crate in Cargo.lock. To accept one,
+      # add its id to `ignore` in deny.toml with the reason, and pass
+      # `--ignore <id>` here.
+      - run: cargo audit
+
+  deny:
+    runs-on: ubuntu-latest
+    env:
+      # Bump both together. The hash is the one in the release's
+      # `.sha256` file:
+      # https://github.com/EmbarkStudios/cargo-deny/releases
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-deny, checked against its SHA-256
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          archive="$RUNNER_TEMP/$name.tar.gz"
+          # To a file, checked, then unpacked: never piped into `tar`.
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$name.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # Licenses are not checked: see `[licenses]` in deny.toml.
+      - run: cargo deny check advisories bans sources
 ===== Dockerfile =====
 # syntax=docker/dockerfile:1
 #
@@ -12678,6 +13265,62 @@ Markdown, with tables, footnotes[^1], ~~strikethrough~~ and task lists:
 | draft | no |
 
 [^1]: Rendered once, when the server starts.
+===== deny.toml =====
+# The policy `cargo deny check` reads. CI runs it in
+# .github/workflows/security.yml. The reference:
+# https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Every feature on, so a crate that only one feature pulls in is checked
+# too.
+all-features = true
+
+[advisories]
+# A yanked crate in Cargo.lock fails the check: its author withdrew it.
+yanked = "deny"
+# An unmaintained crate fails the check when this project depends on it
+# directly. One deeper in the tree is its dependency's to replace, and
+# `cargo audit` still lists it as a warning.
+unmaintained = "workspace"
+# An advisory you accept, with the reason and when to look again:
+# { id = "RUSTSEC-0000-0000", reason = "not reachable: we never call X" }
+ignore = []
+
+[bans]
+# Two versions of one crate build twice and link twice. A warning, because
+# it is often a dependency's choice and not yours.
+multiple-versions = "warn"
+# `*` as a version takes whatever is published next. A warning, not an
+# error: brocanth's crates are git dependencies with no version, and
+# `cargo deny` reads a missing version as `*`. The commit in Cargo.lock
+# pins them.
+wildcards = "warn"
+
+[sources]
+# A crate comes from crates.io or from one of the git hosts below. Any other
+# registry or repository fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# brocanth and its template engines are git dependencies.
+allow-org = { github = ["DHHwasRight"] }
+
+[licenses]
+# Not run in CI yet: brocanth's crates and this project declare no
+# `license` in Cargo.toml, and `cargo deny` fails a crate with none. When
+# every crate declares one, add `licenses` to the `cargo deny check` step.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
 ===== deploy/kubernetes.yaml =====
 # A minimal deployment of this image. Change the image, the replica count
 # and the secrets; keep the probes and the timings in step.
@@ -15496,6 +16139,120 @@ pub fn NotFound(caught: &Caught) -> Element {
         <p>{message}</p>
     }
     <p><a href="/">Back to the home page</a></p>
+}
+===== src/pages/notifications.rs =====
+//! `/notifications` -- the signed-in account's notifications, newest first.
+//!
+//! `GET` lists them, `?before=<id>` for the next page. `POST` with `id=<n>`
+//! marks one read, with `all=1` every one. A visitor with no session gets a
+//! 401: an inbox belongs to an account.
+
+use brocanth_notifications::policy::{Dialect, Pred};
+use brocanth_notifications::{escape, safe_url, MarkRead, Notification, NotificationColumn};
+
+use crate::pages::{Ctx, Error, Response};
+use crate::plugins::notifications::{account, store};
+
+/// GET: the inbox.
+pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
+    let Some(account) = account(ctx).await else {
+        return Err(Error::new(401, "sign in to read your notifications"));
+    };
+    let before = brocanth_notifications_query(&ctx.query, "before").and_then(|v| v.parse().ok());
+    // The rule, ANDed into the same `WHERE` as the account. The inbox holds
+    // one account already; narrow it here, by kind or anything else.
+    let rule = Pred::<NotificationColumn>::Always.condition::<Notification>(Dialect::Postgres)?;
+    let rule = Some(&rule);
+    let store = store(ctx)?;
+    let inbox = store.inbox(&account);
+    // `per_page` under `[notifications]`.
+    let limit = store.config().per_page;
+    let unread = inbox
+        .unread()
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
+    let items = inbox
+        .list(before, limit, rule)
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
+    let csrf = ctx
+        .hooked::<brocanth_middleware::CsrfToken>()
+        .map(|token| token.hidden_field())
+        .unwrap_or_default();
+
+    let mut body = format!(
+        "<!doctype html><title>Notifications</title><h1>Notifications</h1>\
+         <p>{unread} unread</p>"
+    );
+    if unread > 0 {
+        body.push_str(&format!(
+            "<form method=\"post\" action=\"/notifications\">{csrf}\
+             <input type=\"hidden\" name=\"all\" value=\"1\">\
+             <button>Mark all read</button></form>"
+        ));
+    }
+    if items.is_empty() {
+        body.push_str("<p>Nothing here yet.</p>");
+    }
+    body.push_str("<ol>");
+    for item in &items {
+        let title = match item.url.as_deref().filter(|url| safe_url(url)) {
+            Some(url) => format!("<a href=\"{}\">{}</a>", escape(url), escape(&item.title)),
+            None => escape(&item.title),
+        };
+        let state = if item.read { "read" } else { "unread" };
+        body.push_str(&format!("<li data-state=\"{state}\">{title}"));
+        if !item.body.is_empty() {
+            body.push_str(&format!("<p>{}</p>", escape(&item.body)));
+        }
+        if !item.read {
+            body.push_str(&format!(
+                "<form method=\"post\" action=\"/notifications\">{csrf}\
+                 <input type=\"hidden\" name=\"id\" value=\"{}\">\
+                 <button>Mark read</button></form>",
+                item.id
+            ));
+        }
+        body.push_str("</li>");
+    }
+    body.push_str("</ol>");
+    if items.len() == limit as usize {
+        if let Some(last) = items.last() {
+            body.push_str(&format!(
+                "<a href=\"/notifications?before={}\">Older</a>",
+                last.id
+            ));
+        }
+    }
+    Ok(Response::ok(body))
+}
+
+/// POST: mark one notification read, or all of them, then back to the
+/// inbox.
+pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
+    let Some(account) = account(ctx).await else {
+        return Err(Error::new(401, "sign in to read your notifications"));
+    };
+    let Some(asked) = MarkRead::from_form(&ctx.body) else {
+        return Err(Error::new(400, "send id=<n> or all=1"));
+    };
+    let store = store(ctx)?;
+    let inbox = store.inbox(&account);
+    let done = match asked {
+        MarkRead::One(id) => inbox.mark_read(id).await.map(|_| ()),
+        MarkRead::All => inbox.mark_all_read().await.map(|_| ()),
+    };
+    done.map_err(|e| Error::internal(e.to_string()))?;
+    Ok(Response::empty(303).with_header("location", "/notifications"))
+}
+
+/// One parameter of the query string, as it was sent. Only digits are read
+/// from it here, so it needs no decoding.
+fn brocanth_notifications_query<'q>(query: &'q str, name: &str) -> Option<&'q str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
 }
 ===== src/pages/openapi.json.rs =====
 //! `/openapi.json` -- because the file is called `openapi.json.rs`.
@@ -19477,6 +20234,62 @@ mod tests {
         assert!(refused.to_string().contains("help:"), "{refused}");
     }
 }
+===== src/plugins/debug_toolbar/mod.rs =====
+//! The development panel: `brocanth_debug::DebugToolbar`, registered in
+//! `src/plugins/mod.rs` and set by `[debug_toolbar]`.
+//!
+//! Each HTML answer gets a panel before `</body>`: the verb, the path, the
+//! status and the time; the SQL statements by shape; the hooks of each chain
+//! in run order and the ones turned off; the settings in effect, secrets
+//! masked. A release build shows nothing: the plugin installs no hook when
+//! `debug_assertions` is off.
+//!
+//! Remove it before a deploy: `brocanth remove debug-toolbar debug`.
+//! `brocanth check --deploy` refuses a project that still has it.
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    /// The page at `path`, after one redirect: a locale segment, a
+    /// trailing slash.
+    async fn page(path: &str) -> String {
+        let app = crate::app::build().expect("the application builds");
+        let mut response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        if (300..400).contains(&response.status) {
+            if let Some(to) = response.header("location").map(str::to_string) {
+                response = crate::app::handle(&app, Request::new(Verb::Get, to)).await;
+            }
+        }
+        String::from_utf8_lossy(response.body.bytes().expect("a whole body")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_page_in_a_debug_build_shows_its_timing_hooks_and_settings() {
+        let body = page("/").await;
+        assert_eq!(brocanth_debug::ACTIVE, cfg!(debug_assertions));
+        if !brocanth_debug::ACTIVE {
+            assert!(
+                !body.contains("debug: GET /"),
+                "a release build shows no panel"
+            );
+            return;
+        }
+        assert!(body.contains("debug: GET /"), "{body}");
+        assert!(body.contains(" · 200 · "), "{body}");
+        assert!(body.contains("debug_toolbar.start"), "{body}");
+        assert!(body.contains("debug_toolbar.max_statements"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_panel_counts_the_statements_of_the_orm() {
+        if brocanth_debug::ACTIVE {
+            let body = page("/").await;
+            assert!(body.contains(" SQL</summary>"), "{body}");
+        }
+    }
+}
 ===== src/plugins/errors/mod.rs =====
 //! Written by `brocanth`. What a failure becomes.
 //!
@@ -20038,6 +20851,59 @@ pub async fn actor(ctx: &Ctx) -> Actor {
         _ => Actor::anonymous(),
     }
 }
+===== src/plugins/humanize/mod.rs =====
+//! Readable values for a page: "3 minutes ago", "1.5 MB", "2nd", "1,234".
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! ```ignore
+//! let h = crate::plugins::humanize::of(ctx);
+//! let line = format!("{}, {}", h.ago(seconds), h.file_size(bytes));
+//! ```
+//!
+//! The language is the locale the `i18n` hook chose for the request.
+//! English, French, German and Spanish have their own phrases; another
+//! locale gets English phrases. Numbers are grouped by the locale's CLDR
+//! formats, as the catalogs in `locales/` group them.
+
+pub use brocanth_humanize::Humanize;
+
+use crate::pages::Ctx;
+
+/// The helpers in the language of this request.
+#[allow(dead_code)]
+pub fn of(ctx: &Ctx) -> Humanize {
+    Humanize::with_formats(crate::plugins::i18n::locale(ctx).formats())
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::{Params, Verb};
+
+    use crate::plugins::i18n::Locale;
+
+    use super::*;
+
+    #[test]
+    fn a_page_writes_times_sizes_and_counts_in_the_locale() {
+        let en = Humanize::with_formats(Locale::En.formats());
+        assert_eq!(en.ago(180), "3 minutes ago");
+        assert_eq!(en.file_size(1_500_000), "1.5 MB");
+        assert_eq!(en.ordinal(2), "2nd");
+        let fr = Humanize::with_formats(Locale::Fr.formats());
+        assert_eq!(fr.ago(180), "il y a 3 minutes");
+        assert_eq!(fr.ordinal(1), "1er");
+        // The catalog and the helper group a number alike.
+        assert_eq!(fr.number(1_234_567), Locale::Fr.formats().number(1_234_567));
+    }
+
+    #[test]
+    fn a_ctx_with_no_request_gets_the_default_locale() {
+        // `en` is the default catalog.
+        let h = of(&Ctx::new(Verb::Get, "/", Params::empty()));
+        assert_eq!(h.ago(120), "2 minutes ago");
+    }
+}
 ===== src/plugins/i18n/mod.rs =====
 //! Written by `brocanth`. The catalogs in `locales/`, compiled by
 //! `build.rs`, and the locale of a request.
@@ -20128,6 +20994,126 @@ mod tests {
         assert_eq!(t::items(Locale::En, 1), "1 item");
         assert_eq!(t::items(Locale::Fr, 1), "1 article");
         assert_eq!(t::greeting(Locale::En, "Ada"), "Hello, Ada!");
+    }
+}
+===== src/plugins/image/mod.rs =====
+//! Links to stored images, in a size and a format the file routes allow.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! ```ignore
+//! let src = crate::plugins::image::src(ctx, &key, "300x200", Some("webp"))?;
+//! let set = crate::plugins::image::srcset(ctx, &key, &["150x150t", "600x600f"], Some("webp"))?;
+//! // <img src="{src}" srcset="{set}" sizes="(max-width: 600px) 150px, 600px" alt="…">
+//! ```
+//!
+//! Each link carries a file token, so mint it after your policy allowed
+//! the read. A size must be in `thumb_sizes` and a format in `formats`
+//! under `[storage_routes]`: the routes answer any other with a 400 before
+//! they read the file, so nobody can make the server render a size no page
+//! uses. A source past `max_pixels` is a 413, read from its header before a
+//! pixel is decoded.
+
+use brocanth_storage::routes;
+use brocanth_storage::{ObjectKey, VariantFormat, VariantSpec};
+
+use crate::pages::Ctx;
+use crate::plugins::storage::FileStore;
+
+/// Where the file routes answer: `path` in `src/modules/storage_routes.rs`.
+const PATH: &str = crate::modules::storage_routes::MODULE.path;
+
+/// One size and format, as `routes` spells them, or why not.
+fn spec(size: &str, format: Option<&str>) -> Result<VariantSpec, String> {
+    let spec = VariantSpec::parse(size).map_err(|e| format!("size `{size}`: {e}"))?;
+    let format = format
+        .map(|f| VariantFormat::parse(f).map_err(|e| format!("format `{f}`: {e}")))
+        .transpose()?;
+    Ok(spec.with_format(format))
+}
+
+fn files(ctx: &Ctx) -> Result<&FileStore, String> {
+    ctx.provided::<FileStore, _>()
+        .ok_or_else(|| "this Ctx has no file store: it was built by hand".to_string())
+}
+
+/// The link to one thumbnail of `key`: `<img src>`.
+#[allow(dead_code)]
+pub fn src(ctx: &Ctx, key: &ObjectKey, size: &str, format: Option<&str>) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    Ok(routes::thumb_url(PATH, key, &token, spec(size, format)?))
+}
+
+/// The links to several thumbnails of `key`, each with its width:
+/// `<img srcset>`. A size with no fixed width (`0xH`) is left out.
+#[allow(dead_code)]
+pub fn srcset(
+    ctx: &Ctx,
+    key: &ObjectKey,
+    sizes: &[&str],
+    format: Option<&str>,
+) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    let specs = sizes
+        .iter()
+        .map(|size| spec(size, format))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(routes::srcset(PATH, key, &token, &specs))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_format_or_a_size_off_the_lists_is_refused_before_the_file_is_read() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        // No file at this address: the lists are checked first.
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
+        // `png` is not in `formats` by default.
+        let png = crate::app::handle(&app, get(&link("150x150t", Some("png")))).await;
+        assert_eq!(png.status, 400);
+        // A size outside `thumb_sizes` is refused before anything renders.
+        let odd = crate::app::handle(&app, get(&link("151x150", Some("webp")))).await;
+        assert_eq!(odd.status, 400);
+    }
+
+    #[test]
+    fn srcset_gives_each_size_its_width_and_drops_a_free_one() {
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let tokens =
+            brocanth_storage::FileTokens::new(brocanth_storage::FileTokenKey::from_secret(b"test"));
+        let token = tokens.issue(&key);
+        let sizes = ["150x150t", "0x200", "600x600f"]
+            .iter()
+            .map(|size| spec(size, Some("webp")).expect("a valid spec"))
+            .collect::<Vec<_>>();
+        let set = routes::srcset(PATH, &key, &token, &sizes);
+        assert!(set.contains("&thumb=150x150t&fmt=webp 150w, "), "{set}");
+        assert!(set.ends_with("&thumb=600x600f&fmt=webp 600w"), "{set}");
+        assert!(!set.contains("0x200"), "{set}");
+        assert!(spec("150x150t", Some("gif")).is_err());
+    }
+
+    fn get(target: &str) -> Request {
+        let (path, query) = target.split_once('?').expect("a query");
+        let mut request = Request::new(Verb::Get, path);
+        request.query = query.to_string();
+        request
     }
 }
 ===== src/plugins/impersonate/mod.rs =====
@@ -21367,6 +22353,12 @@ impl Plugin for Model {
         // The `db` plugin is registered first and opened the pool in its own
         // `before_start`. This wraps it and opens nothing.
         let orm = Orm::from_db(lc.require_service::<brocanth_db::Db>()?);
+        // The development panel counts this connection's statements. Its
+        // probe is a service only in a debug build.
+        let orm = match lc.services().get::<brocanth_model::Probe>() {
+            Some(probe) => orm.probed(probe),
+            None => orm,
+        };
         // For another plugin: `lc.require_service::<Orm>()`.
         lc.services_mut().insert(orm.clone());
         self.orm = Some(orm);
@@ -21390,6 +22382,132 @@ impl Plugin for Model {
         if let Some(orm) = &self.orm {
             cx.insert(orm.clone());
         }
+    }
+}
+===== src/plugins/notifications/mod.rs =====
+//! In-app notifications: the plugin, who is reading, and `notify`.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! ```ignore
+//! use brocanth_notifications::Notice;
+//!
+//! let notice = Notice::new("comment", "Ada replied to your post").url("/posts/7");
+//! crate::plugins::notifications::notify(ctx, &author_id, notice, Some("ada@example.com")).await?;
+//! ```
+//!
+//! `notify` stores a row in `brocanth_notifications` for that account.
+//! It also sends the notification by mail when you give an address
+//! (`[notifications] mail`), and publishes the row on the realtime broker.
+//! The account reads it at `/notifications`.
+
+use crate::plugins::mail::Outbox;
+use brocanth_auth::session::Privilege;
+use brocanth_notifications::{Notice, NotificationStore};
+
+use crate::pages::{Ctx, Error};
+use crate::plugins::auth::Services;
+
+/// The plugin, from the library. `[notifications]` configures it.
+pub use brocanth_notifications::NotificationsPlugin as Notifications;
+
+/// The signed-in account, as the notifications store it, or `None` for a
+/// visitor with no live session.
+pub async fn account(ctx: &Ctx) -> Option<String> {
+    // No cookie, no session: no read of the session store.
+    let cookie = ctx.header("cookie")?;
+    let auth = ctx.provided::<Services, _>()?;
+    match auth.sessions().from_cookie_header(cookie).await {
+        Ok(session) if session.privilege != Privilege::Anonymous => {
+            Some(session.account.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The store, on every dispatched request.
+pub fn store(ctx: &Ctx) -> Result<&NotificationStore, Error> {
+    ctx.provided::<NotificationStore, _>().ok_or_else(|| {
+        Error::new(
+            500,
+            "no notification store on this context\nhelp: register the notifications plugin",
+        )
+    })
+}
+
+/// Tells `account` about something: one row in its inbox.
+///
+/// Call it after the change it reports is committed: a notification about
+/// a write that rolled back is a lie the reader acts on.
+#[allow(dead_code)]
+pub async fn notify(
+    ctx: &Ctx,
+    account: &str,
+    notice: Notice,
+    email: Option<&str>,
+) -> Result<i64, Error> {
+    let id = store(ctx)?
+        .notify(account, &notice)
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
+    // By mail too, when the caller knows the address and `mail` is on. The
+    // outbox queues it with `jobs`, or sends it at once without.
+    if let (Some(email), Some(outbox)) = (email, ctx.provided::<Outbox, _>()) {
+        if store(ctx)?.config().mail {
+            let mut text = notice.body.clone();
+            if let Some(url) = &notice.url {
+                text.push_str("\n\n");
+                text.push_str(url);
+            }
+            let to =
+                brocanth_mail::Address::parse(email).map_err(|e| Error::new(422, e.to_string()))?;
+            let message = outbox
+                .message()
+                .to(to)
+                .subject(&notice.title)
+                .text(text)
+                .build()
+                .map_err(|e| Error::internal(e.to_string()))?;
+            outbox
+                .deliver_later(message)
+                .await
+                .map_err(|e| Error::internal(e.to_string()))?;
+        }
+    }
+    // Live: the new row as a change, with its account, so a subscription
+    // whose rule is `account = <the reader>` receives it.
+    if let Some(realtime) = ctx.provided::<crate::plugins::realtime::Broadcast, _>() {
+        brocanth_notifications::publish(&realtime.broker, account, id, &notice);
+    }
+    Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    #[tokio::test]
+    async fn a_visitor_with_no_session_has_no_inbox() {
+        let app = crate::app::build().expect("the application builds");
+        let mut response =
+            crate::app::handle(&app, Request::new(Verb::Get, "/notifications")).await;
+        // One redirect, for a locale segment.
+        if (300..400).contains(&response.status) {
+            let to = response.header("location").expect("a location").to_string();
+            response = crate::app::handle(&app, Request::new(Verb::Get, to)).await;
+        }
+        assert_eq!(response.status, 401);
+    }
+
+    #[tokio::test]
+    async fn marking_read_without_the_csrf_token_is_refused() {
+        let app = crate::app::build().expect("the application builds");
+        let mut request = Request::new(Verb::Post, "/notifications")
+            .with_header("content-type", "application/x-www-form-urlencoded");
+        request.body = b"all=1".to_vec().into();
+        let response = crate::app::handle(&app, request).await;
+        assert_eq!(response.status, 403);
     }
 }
 ===== src/plugins/oauth_client/mod.rs =====
@@ -24741,7 +25859,8 @@ mod tests {
 //! and answers `303` to the form's `return_to` field, with `?file=` and
 //! `&token=` added, or `201` with the address. `GET /files/{address}` serves
 //! the file to a request whose `?token=` opens it.
-//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists.
+//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists, and
+//! `&fmt=webp` to convert it to a format `formats` lists.
 //! The path and `public` are in `src/modules/storage_routes.rs`.
 //!
 //! A plain form works with no script. The CSRF check reads no multipart
@@ -24778,7 +25897,7 @@ use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request,
 use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
-use brocanth_storage::{FileTokens, Storage, VariantSpec};
+use brocanth_storage::{FileTokens, Storage, VariantFormat, VariantSpec};
 
 /// Whether this request may store a file.
 ///
@@ -24813,6 +25932,10 @@ pub struct Settings {
     pub dedupe: bool,
     /// The only sizes `?thumb=` may ask for; any other is a 400.
     pub thumb_sizes: Vec<String>,
+    /// The formats `&fmt=` may convert a thumbnail to.
+    pub formats: Vec<String>,
+    /// The most pixels a source may declare before a thumbnail of it is a 413.
+    pub max_pixels: u64,
 }
 
 impl Default for Settings {
@@ -24824,6 +25947,8 @@ impl Default for Settings {
                 .iter()
                 .map(|size| size.to_string())
                 .collect(),
+            formats: vec!["webp".to_string(), "jpeg".to_string()],
+            max_pixels: 24_000_000,
         }
     }
 }
@@ -24880,6 +26005,18 @@ impl Plugin for StorageRoutes {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let formats = self
+            .settings
+            .formats
+            .iter()
+            .map(|format| {
+                VariantFormat::parse(format).map_err(|e| {
+                    PluginError::new(format!(
+                        "[storage_routes] formats `{format}`: {e}\nhelp: list webp, jpeg or png"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let config = RoutesConfig {
             path: crate::modules::storage_routes::MODULE.path.to_string(),
             max_bytes: self.settings.max_bytes,
@@ -24887,6 +26024,8 @@ impl Plugin for StorageRoutes {
             public: crate::modules::storage_routes::MODULE.public,
             thumbnails: true,
             thumb_sizes,
+            formats,
+            max_pixels: self.settings.max_pixels,
             dedupe: self.settings.dedupe,
             csrf_field: csrf.field.clone(),
             csrf_header,
@@ -25639,6 +26778,7 @@ request.
 - `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
 - `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token
 - `storage-thumbnails`  ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders
+- `image`  thumbnails converted on request (&fmt=webp), a pixel cap against decompression bombs, a srcset helper
 - `input`  a form or a JSON body, read into a struct, with every fault at once
 - `client`  a subcommand that calls this application's own API, built from its routes
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
@@ -25665,6 +26805,7 @@ request.
 - `realtime`  one write is a map lookup, not a query per subscriber
 - `realtime-sse`  one long response per subscriber, frames written as they are made
 - `realtime-websocket`  a duplex socket per subscriber, frames both ways
+- `notifications`  in-app notifications: an inbox per account at /notifications, unread count, mark read
 - `commands`  this project's own command line, `serve` plus whatever you add
 - `rsx`  `.rsx` templates compiled into the binary; without it a page builds a String
 - `jt`  `.jt` templates compiled into the binary; a JSON answer without a struct per shape
@@ -25681,12 +26822,16 @@ request.
 - `search`  Postgres full-text and trigram search: a site index, its migration, a page at /search
 - `i18n`  translations checked at build time; a locale per request from the query, a cookie or Accept-Language
 - `i18n-routing`  a locale segment in the path (/fr/about), a redirect from a path without one
+- `humanize`  readable values for a page: "3 minutes ago", 1.5 MB, 2nd, 1,234; no dependency
 - `meta`  a title, a description, a canonical URL and Open Graph tags for each page
 - `errors`  HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook
+- `debug`  development tools, refused by `check --deploy`; pick them below
+- `debug-toolbar`  a panel on each HTML page in a debug build: timing, SQL statements, hooks, settings
 - `docker`  a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up
 - `docker-kubernetes`  deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain
 - `ci`  fmt, clippy and the tests on every push; pick the provider below
 - `ci-github`  .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image
+- `ci-security`  .github/workflows/security.yml: cargo audit and cargo deny on each push and each day; deny.toml
 
 **Absent:** `logging`, `beacon`, `sessions`, `db-embedded-prod`, `cache-memory`, `static` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
@@ -26099,6 +27244,16 @@ remembers the choice in the cookie. A path under an `unprefixed`
 prefix of `[i18n]` (`/api`), the routes of other modules (the admin,
 the file routes) and a file such as `/robots.txt` keep no segment.
 
+## Readable values
+
+A page writes a time, a size, an ordinal or a large count for a reader
+through `crate::plugins::humanize::of(ctx)`: `ago(seconds)`,
+`since(then, now)`, `file_size(bytes)`, `ordinal(n)`, `number(n)`. Do not
+format these by hand: the helper follows the request's language, and
+sizes are decimal (1 kB = 1000 bytes) everywhere, so two pages never
+show one file in two units. Keep the exact value in a `title` or a
+`<time datetime>` attribute beside the phrase.
+
 ## Page metadata
 
 Every page has a title and share tags. A page sets its own with
@@ -26116,6 +27271,18 @@ its `Display` is the tags, escaped. A JSON answer (`.jt`) takes
 The root layout declares `meta: &Head`, and `html!` fills it with
 `ctx.head()`. It writes `<title>{meta.title()}</title>` and `{! meta }`.
 Only a layout that writes `<head>` declares `meta`.
+
+## Development panel
+
+In a debug build each HTML page ends with a panel: timing, the ORM's SQL
+statements by shape, the hooks in run order, the settings in effect. Use
+it to find an N+1: one shape issued many times for one page. Fix it with
+an eager load, not by raising `max_statements`.
+
+Never rely on the panel in a test of page content, and never remove the
+`development_only` check: the panel shows every setting to whoever
+loads a page. Run `brocanth remove debug-toolbar debug` before a deploy;
+`brocanth check --deploy` refuses the project until then.
 
 ## The database
 
@@ -26611,6 +27778,22 @@ client secret in `$<APP>_OAUTH_CLIENT__<PROVIDER>_CLIENT_SECRET`, never in
 a committed config file. Changing the key makes every stored token
 unreadable.
 
+## Notifications
+
+Tell an account about something with
+`crate::plugins::notifications::notify(ctx, &account, Notice::new(kind, title))`,
+after the change it reports is committed. The account reads it at
+`/notifications`.
+
+- Read and mark only through `store.inbox(&account)`, with the account
+  from `crate::plugins::notifications::account(ctx)`. Never take an
+  account id from a form or the query string: an inbox is the signed-in
+  account's.
+- A link is a path on this site or an http(s) URL; `notify` refuses any
+  other, because the page writes it into an `href`.
+- Do not filter a page of notifications after it is read. Put the rule in
+  the `list` call, so the page and its next link agree.
+
 ## Feed
 
 `/feed.xml` is an Atom feed of the published posts: no draft, no
@@ -26620,6 +27803,23 @@ start. Set it per deployment (`--feed.site_url=https://example.com` or
 the environment). Do not write a second feed route, and do not make a
 URL in a post relative to the feed: each entry carries `xml:base`, so a
 link from the root (`/about`) resolves.
+
+## Dependency checks
+
+`.github/workflows/security.yml` runs `cargo audit` and `cargo deny` on
+each push and each day. `deny.toml` is the policy.
+
+- A CI step that downloads a tool pins its version and its SHA-256,
+  downloads to a file, and checks it with `sha256sum -c` before it
+  unpacks or runs it. Take the hash from the release, not from your
+  own download. Never pipe a download into `sh`, `bash` or `tar`.
+  `cargo install --locked --version X` and an action pinned by commit
+  SHA need no extra check.
+- An advisory fails the check. Update the crate (`cargo update -p
+  <crate>`). Accept one only in `ignore` in `deny.toml`, with the
+  reason, and pass the same id to `cargo audit --ignore`.
+- A new git dependency outside the allowed hosts fails `sources`. Add
+  its host to `[sources]` only after you read who publishes it.
 
 ## Account screens
 
@@ -26701,6 +27901,16 @@ Rules:
 - Never impersonate a member of staff, and never clear
   `session.impersonation`: stopping deletes the session.
 
+## Images
+
+Link a stored image through `crate::plugins::image`: `src(ctx, &key,
+size, format)` for one `<img src>`, `srcset(ctx, &key, sizes, format)`
+for `<img srcset>`. Call them after your policy allowed the read: each
+link carries a file token. A size must be in `thumb_sizes` and a format
+in `formats` under `[storage_routes]`, or the link answers 400; add the
+size there, never an open-ended width parameter. Use `webp` for a logo
+or a screenshot and `jpeg` for a photograph: WebP here is lossless.
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -26725,7 +27935,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 6ea056459dc8ae90 -->
+<!-- brocanth-digest: d2037c45f82112da -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -26737,7 +27947,7 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "auth-otp", "auth-mfa", "superuser", "roles", "impersonate", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "markdown", "robots", "sitemap", "content", "feed", "pagination", "filters", "search", "i18n", "i18n-routing", "meta", "errors", "docker", "docker-kubernetes", "ci", "ci-github"]
+enabled = ["observability", "observability-logs", "observability-health", "observability-metrics", "observability-tracing", "analytics", "config", "db", "db-embedded", "model", "cache", "cache-redis", "jobs", "jobs-memory", "flags", "audit", "mail", "auth", "auth-oauth", "auth-screens", "auth-lockout", "auth-otp", "auth-mfa", "superuser", "roles", "impersonate", "policy", "rls", "storage", "storage-routes", "storage-thumbnails", "image", "input", "client", "middleware", "middleware-csrf", "middleware-security-headers", "middleware-rate-limit", "middleware-conditional-get", "middleware-compression", "flash", "gtag", "openapi", "validation", "resource", "admin", "admin-model", "admin-actions", "backoffice", "webhooks", "webhooks-in", "webhooks-out", "oauth", "oauth-client", "oauth-client-memory", "realtime", "realtime-sse", "realtime-websocket", "notifications", "commands", "rsx", "jt", "rsx-tailwind", "rsx-htmx", "sanitize", "markdown", "robots", "sitemap", "content", "feed", "pagination", "filters", "search", "i18n", "i18n-routing", "humanize", "meta", "errors", "debug", "debug-toolbar", "docker", "docker-kubernetes", "ci", "ci-github", "ci-security"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
@@ -26824,7 +28034,7 @@ kind = ["enhancer", "middleware", "renderer"]
 files = ["src/modules/model.rs", "migrations/", "src/bin/migrate.rs", "src/plugins/model/"]
 config = []
 crates = ["brocanth-model", "brocanth-migrate"]
-adapted_to = ["commands"]
+adapted_to = ["commands", "debug-toolbar"]
 
 [modules.cache]
 version = "0.1.0"
@@ -26984,7 +28194,7 @@ kind = ["middleware"]
 files = ["src/modules/storage_routes.rs", "src/plugins/storage_routes/"]
 config = ["storage_routes"]
 crates = ["brocanth-storage"]
-adapted_to = ["storage-thumbnails"]
+adapted_to = ["storage-thumbnails", "image"]
 
 [modules.storage-thumbnails]
 version = "0.1.0"
@@ -26993,6 +28203,14 @@ files = ["src/modules/storage_thumbnails.rs"]
 config = []
 crates = ["brocanth-storage"]
 adapted_to = []
+
+[modules.image]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/image.rs", "src/plugins/image/"]
+config = []
+crates = []
+adapted_to = ["db"]
 
 [modules.input]
 version = "0.1.0"
@@ -27202,6 +28420,14 @@ config = []
 crates = ["brocanth-server", "brocanth-events"]
 adapted_to = []
 
+[modules.notifications]
+version = "0.1.0"
+kind = ["routes", "enhancer"]
+files = ["src/modules/notifications.rs", "src/pages/notifications.rs", "src/plugins/notifications/"]
+config = ["notifications"]
+crates = ["brocanth-notifications"]
+adapted_to = ["mail", "realtime", "policy"]
+
 [modules.commands]
 version = "0.1.0"
 kind = ["enhancer"]
@@ -27330,6 +28556,14 @@ config = []
 crates = []
 adapted_to = []
 
+[modules.humanize]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/humanize.rs", "src/plugins/humanize/"]
+config = []
+crates = ["brocanth-humanize"]
+adapted_to = ["i18n"]
+
 [modules.meta]
 version = "0.1.0"
 kind = ["renderer", "enhancer"]
@@ -27345,6 +28579,22 @@ files = ["src/modules/errors.rs", "src/pages/error.rsx", "src/pages/not-found.rs
 config = ["errors"]
 crates = ["brocanth-errors"]
 adapted_to = ["rsx", "i18n-routing"]
+
+[modules.debug]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/debug.rs"]
+config = []
+crates = []
+adapted_to = []
+
+[modules.debug-toolbar]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/debug_toolbar.rs", "src/plugins/debug_toolbar/"]
+config = ["debug_toolbar"]
+crates = ["brocanth-debug"]
+adapted_to = ["model"]
 
 [modules.docker]
 version = "0.1.0"
@@ -27378,4 +28628,12 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: f8c1eb629640f922
+[modules.ci-security]
+version = "0.1.0"
+kind = ["external"]
+files = ["src/modules/ci_security.rs", ".github/workflows/security.yml", "deny.toml"]
+config = []
+crates = []
+adapted_to = []
+
+# brocanth-digest: 6f2c7ce90da114f5
