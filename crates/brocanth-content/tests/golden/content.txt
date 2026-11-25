@@ -82,6 +82,9 @@ serde = { version = "1", features = ["derive"] }
 [build-dependencies]
 brocanth-content = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["build"], default-features = false }  # build.rs checks content/; no Markdown or HTML parser in the build script
 serde = { version = "1", features = ["derive"] }  # build.rs reads the front matter into src/plugins/content/posts.rs
+
+[dev-dependencies]
+brocanth-test = { git = "https://github.com/DHHwasRight/brocanth.git" }  # the page tests read the HTML by element
 ===== .gitignore =====
 /target
 ===== rust-toolchain.toml =====
@@ -2610,23 +2613,33 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
+    use brocanth_test::Html;
 
-    /// The status and the body of a GET, through the whole application.
-    async fn get(path: &str) -> (u16, String) {
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
         let app = crate::app::build().expect("the application builds");
         let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
         let body = response.body.bytes().expect("a whole body");
-        (response.status, String::from_utf8_lossy(body).into_owned())
+        (response.status, Html::new(String::from_utf8_lossy(body)))
     }
 
     #[tokio::test]
     async fn a_post_shows_its_rendered_body() {
-        let (status, body) = get("/posts/hello").await;
+        let (status, page) = get("/posts/hello").await;
         assert_eq!(status, 200);
-        assert!(body.contains("<h1>Hello, world</h1>"), "{body}");
+        let headed = page.tags("h1").iter().any(|h| h.text() == "Hello, world");
+        assert!(headed, "no <h1> with the title:\n{}", page.source());
         // The Markdown, rendered: a heading with its id, and a table.
-        assert!(body.contains(r#"<h2 id="front-matter">"#), "{body}");
-        assert!(body.contains("<table>"), "{body}");
+        let anchored = page
+            .tags("h2")
+            .iter()
+            .any(|h| h.attr("id") == Some("front-matter"));
+        assert!(anchored, "no <h2 id=\"front-matter\">:\n{}", page.source());
+        assert!(
+            !page.tags("table").is_empty(),
+            "no <table>:\n{}",
+            page.source()
+        );
     }
 
     #[tokio::test]
@@ -2691,22 +2704,28 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
+    use brocanth_test::Html;
 
-    /// The status and the body of a GET, through the whole application.
-    async fn get(path: &str) -> (u16, String) {
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
         let app = crate::app::build().expect("the application builds");
         let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
         let body = response.body.bytes().expect("a whole body");
-        (response.status, String::from_utf8_lossy(body).into_owned())
+        (response.status, Html::new(String::from_utf8_lossy(body)))
     }
 
     #[tokio::test]
     async fn the_list_links_each_post_with_its_date() {
-        let (status, body) = get("/posts").await;
+        let (status, page) = get("/posts").await;
         assert_eq!(status, 200);
-        assert!(body.contains(r#"href="/posts/hello""#), "{body}");
-        assert!(body.contains("Hello, world"), "{body}");
-        assert!(body.contains(r#"datetime="2026-11-22""#), "{body}");
+        page.assert_link_to("/posts/hello");
+        let link = page.link_to("/posts/hello").expect("asserted above");
+        assert_eq!(link.text(), "Hello, world");
+        let dated = page
+            .tags("time")
+            .iter()
+            .any(|time| time.attr("datetime") == Some("2026-11-22"));
+        assert!(dated, "no <time> for the post:\n{}", page.source());
     }
 }
 ===== src/pages/posts/index.rsx =====
@@ -3218,7 +3237,7 @@ version = "0.1.0"
 kind = ["enhancer", "routes"]
 files = ["src/modules/content.rs", "content/posts/hello.md", "src/pages/posts/[slug].rs", "src/pages/posts/[slug].rsx", "src/pages/posts/index.rs", "src/pages/posts/index.rsx", "src/plugins/content/", "build.rs"]
 config = ["content"]
-crates = ["brocanth-content", "serde"]
+crates = ["brocanth-content", "brocanth-test", "serde"]
 adapted_to = []
 
-# brocanth-digest: e66a9dd3dc7078fa
+# brocanth-digest: a339ee388ad55f02

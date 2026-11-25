@@ -74,12 +74,15 @@ brocanth-auth = { git = "https://github.com/DHHwasRight/brocanth.git", features 
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-admin-model = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-policy = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["macro"] }
-brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["agreement"] }  # roles, grants and policies in Rust, diffed into migrations
+brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git" }  # roles, grants and policies in Rust, diffed into migrations
 brocanth-backoffice = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }  # the reactor `serve` runs on, and the signals that stop it
 serde = { version = "1", features = ["derive"] }  # the config plugin reads typed sections
+
+[dev-dependencies]
+brocanth-rls = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["agreement"] }  # the agreement test of the `#[db]` policy
 
 [[bin]]
 name = "backoffice"

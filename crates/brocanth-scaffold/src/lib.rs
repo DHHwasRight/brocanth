@@ -1051,9 +1051,28 @@ pub struct Dep {
     /// A trailing comment on the dependency line. Short, and about why this
     /// crate is here rather than what it is.
     pub note: Option<&'static str>,
-    /// Whether it goes in `[build-dependencies]`: the build script uses it,
-    /// the binary does not. Set with [`Dep::for_build`].
-    pub build: bool,
+    /// The table it goes in: `[dependencies]`, `[build-dependencies]` or
+    /// `[dev-dependencies]`. Set with [`Dep::for_build`] and
+    /// [`Dep::for_dev`].
+    pub kind: DepKind,
+}
+
+/// The table of the generated `Cargo.toml` a [`Dep`] goes in.
+///
+/// One crate may be in more than one table. Each table merges on its own:
+/// two modules that want `brocanth-rls` as a dev-dependency make one
+/// `[dev-dependencies]` line, apart from the `[dependencies]` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DepKind {
+    /// `[dependencies]`: the binary links it.
+    #[default]
+    Normal,
+    /// `[build-dependencies]`: the build script uses it, the binary does
+    /// not.
+    Build,
+    /// `[dev-dependencies]`: `cargo test` compiles it, `cargo build` does
+    /// not. A feature turned on here is on in the test build only.
+    Dev,
 }
 
 /// Where a generated project's dependency is fetched from.
@@ -1098,7 +1117,7 @@ impl Dep {
             unless: Vec::new(),
             defaults: true,
             note: None,
-            build: false,
+            kind: DepKind::Normal,
         }
     }
 
@@ -1149,7 +1168,21 @@ impl Dep {
     /// resolves the two feature sets apart, so the binary links no TOML
     /// parser and the build script links no CLDR data.
     pub fn for_build(mut self) -> Self {
-        self.build = true;
+        self.kind = DepKind::Build;
+        self
+    }
+
+    /// Put it in `[dev-dependencies]`, for a test the module writes.
+    ///
+    /// The binary does not link it, and its features are on in the test
+    /// build only. `rls` turns on `brocanth-rls`'s `agreement` here: the
+    /// agreement test needs proptest, and the server does not.
+    ///
+    /// A dev-dependency on a crate that is also in `[dependencies]` adds
+    /// only its features. When it turns none on (a [`Dep::feature_with`]
+    /// whose module is absent), the generator leaves the line out.
+    pub fn for_dev(mut self) -> Self {
+        self.kind = DepKind::Dev;
         self
     }
 }

@@ -31,7 +31,7 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use brocanth_scaffold::{Dep, Kind, Scaffold as Built, Setting, Slot, Source};
+use brocanth_scaffold::{Dep, DepKind, Kind, Scaffold as Built, Setting, Slot, Source};
 use clap::Args;
 
 use crate::tui::{Choice, Draft};
@@ -1951,48 +1951,57 @@ fn core(name: &'static str) -> Dep {
 /// requester asked for it, which is what cargo does anyway: one dependant
 /// wanting the defaults turns them on for all.
 fn merged(picks: &[&'static str]) -> Result<Vec<Dep>, Vec<Diagnostic>> {
+    merge(
+        picks
+            .iter()
+            .flat_map(|pick| about(pick).crates.into_iter().map(move |dep| (*pick, dep))),
+    )
+}
+
+/// [`merged`], over `(module key, crate)` pairs rather than the registry.
+fn merge(
+    wanted: impl IntoIterator<Item = (&'static str, Dep)>,
+) -> Result<Vec<Dep>, Vec<Diagnostic>> {
     let mut out: Vec<Dep> = Vec::new();
-    for pick in picks {
-        for dep in about(pick).crates {
-            // A build dependency is another line in another table, so it
-            // merges only with its own kind.
-            match out
-                .iter_mut()
-                .find(|held| held.name == dep.name && held.build == dep.build)
-            {
-                None => out.push(dep),
-                Some(held) => {
-                    // Two sources for one crate is not a merge, it is two
-                    // different crates sharing a name, and guessing which
-                    // one the project meant is worse than stopping.
-                    if held.source != dep.source {
-                        return Err(vec![Diagnostic::error(
-                            *pick,
-                            format!("two modules want `{}` from different places", dep.name),
-                        )
-                        .note("a dependency line can name one source")
-                        .help(
-                            "leave one of the two modules out, and report the clash to brocanth",
-                        )]);
-                    }
-                    for feature in dep.features {
-                        if !held.features.contains(&feature) {
-                            held.features.push(feature);
-                        }
-                    }
-                    for with in dep.with {
-                        if !held.with.contains(&with) {
-                            held.with.push(with);
-                        }
-                    }
-                    for unless in dep.unless {
-                        if !held.unless.contains(&unless) {
-                            held.unless.push(unless);
-                        }
-                    }
-                    held.defaults = held.defaults || dep.defaults;
-                    held.note = held.note.or(dep.note);
+    for (pick, dep) in wanted {
+        // A build or dev dependency is another line in another table,
+        // so it merges only with its own kind.
+        match out
+            .iter_mut()
+            .find(|held| held.name == dep.name && held.kind == dep.kind)
+        {
+            None => out.push(dep),
+            Some(held) => {
+                // Two sources for one crate is not a merge, it is two
+                // different crates sharing a name, and guessing which
+                // one the project meant is worse than stopping.
+                if held.source != dep.source {
+                    return Err(vec![Diagnostic::error(
+                        pick,
+                        format!("two modules want `{}` from different places", dep.name),
+                    )
+                    .note("a dependency line can name one source")
+                    .help(
+                        "leave one of the two modules out, and report the clash to brocanth",
+                    )]);
                 }
+                for feature in dep.features {
+                    if !held.features.contains(&feature) {
+                        held.features.push(feature);
+                    }
+                }
+                for with in dep.with {
+                    if !held.with.contains(&with) {
+                        held.with.push(with);
+                    }
+                }
+                for unless in dep.unless {
+                    if !held.unless.contains(&unless) {
+                        held.unless.push(unless);
+                    }
+                }
+                held.defaults = held.defaults || dep.defaults;
+                held.note = held.note.or(dep.note);
             }
         }
     }
@@ -2008,20 +2017,42 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // serde is the one registry crate that both a module and this file may
     // ask for, so it is held back and written once, after the others.
     let serde = serde_dep(&mut picked, needs_serde(a, built));
-    // What a module's `build.rs` uses, in a table of its own.
-    let (for_build, mut picked): (Vec<Dep>, Vec<Dep>) = picked.into_iter().partition(|d| d.build);
-    let build_deps = if for_build.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n[build-dependencies]\n{}\n",
-            for_build
-                .iter()
-                .map(|dep| source_of(a, dep))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+    // What a module's `build.rs` uses, and what its tests use, each in a
+    // table of its own.
+    let (for_build, picked): (Vec<Dep>, Vec<Dep>) =
+        picked.into_iter().partition(|d| d.kind == DepKind::Build);
+    let (for_dev, mut picked): (Vec<Dep>, Vec<Dep>) =
+        picked.into_iter().partition(|d| d.kind == DepKind::Dev);
+    let table = |name: &str, deps: Vec<String>| {
+        if deps.is_empty() {
+            String::new()
+        } else {
+            format!("\n[{name}]\n{}\n", deps.join("\n"))
+        }
     };
+    let build_deps = table(
+        "build-dependencies",
+        for_build
+            .into_iter()
+            .map(|dep| source_of(a, &resolved(a, dep)))
+            .collect(),
+    );
+    // A dev line on a crate the binary already has adds only features.
+    // With none (a `feature_with` whose module is absent), it changes
+    // nothing cargo resolves, and is left out.
+    let dev_deps = table(
+        "dev-dependencies",
+        for_dev
+            .into_iter()
+            .map(|dep| resolved(a, dep))
+            .filter(|dep| {
+                !(dep.features.is_empty()
+                    && dep.defaults
+                    && picked.iter().any(|normal| normal.name == dep.name))
+            })
+            .map(|dep| source_of(a, &dep))
+            .collect(),
+    );
     // Every project gets the server line below. A module that needs one of
     // its features (`realtime-websocket` needs `websocket`) asks for the
     // crate, and the features join that line rather than a second one.
@@ -2033,25 +2064,8 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
             }
         }
     }
-    for mut dep in picked {
-        // A feature that exists for another module, on when that module is.
-        for (key, feature) in dep.with.clone() {
-            if a.has(key) && !dep.features.contains(&feature) {
-                dep = dep.feature(feature);
-            }
-        }
-        // A feature for the default a child module replaces: on unless one
-        // of the keys listed with it is chosen.
-        for (_, feature) in dep.unless.clone() {
-            let replaced = dep
-                .unless
-                .iter()
-                .any(|(key, f)| *f == feature && a.has(key));
-            if !replaced && !dep.features.contains(&feature) {
-                dep = dep.feature(feature);
-            }
-        }
-        deps.push(source_of(a, &dep));
+    for dep in picked {
+        deps.push(source_of(a, &resolved(a, dep)));
     }
     // The macros that read `src/pages`: the route table always, and the
     // layouts when there are any. Compile-time only -- a proc macro puts no
@@ -2156,9 +2170,11 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
          [dependencies]\n\
          {deps}\n\
          {build_deps}\
+         {dev_deps}\
          {bins}",
         name = a.name,
         build_deps = build_deps,
+        dev_deps = dev_deps,
         bins = bins,
         default_run = default_run,
         deps = deps.join("\n"),
@@ -2168,6 +2184,29 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
             String::new()
         },
     )
+}
+
+/// `dep` with the features its [`Dep::feature_with`] and
+/// [`Dep::feature_unless`] entries turn on for these answers.
+fn resolved(a: &Answers, mut dep: Dep) -> Dep {
+    // A feature that exists for another module, on when that module is.
+    for (key, feature) in dep.with.clone() {
+        if a.has(key) && !dep.features.contains(&feature) {
+            dep = dep.feature(feature);
+        }
+    }
+    // A feature for the default a child module replaces: on unless one
+    // of the keys listed with it is chosen.
+    for (_, feature) in dep.unless.clone() {
+        let replaced = dep
+            .unless
+            .iter()
+            .any(|(key, f)| *f == feature && a.has(key));
+        if !replaced && !dep.features.contains(&feature) {
+            dep = dep.feature(feature);
+        }
+    }
+    dep
 }
 
 /// The modules that register a plugin instance in `build`.
@@ -2212,7 +2251,7 @@ fn needs_serde(a: &Answers, built: &Built) -> bool {
 fn serde_dep(picked: &mut Vec<Dep>, for_config: bool) -> Option<Dep> {
     let asked = picked
         .iter()
-        .position(|dep| dep.name == "serde" && !dep.build)
+        .position(|dep| dep.name == "serde" && dep.kind == DepKind::Normal)
         .map(|at| picked.remove(at));
     if !for_config {
         return asked;
@@ -6077,6 +6116,77 @@ mod tests {
     #[test]
     fn the_first_config_file_is_the_one_the_loader_reads_by_default() {
         assert_eq!(DEFAULT_ENV, brocanth_config::DEFAULT_ENV);
+    }
+
+    #[test]
+    fn dev_dependencies_merge_by_table_and_union_their_features() {
+        let merged = merge([
+            ("a", Dep::brocanth("brocanth-rls")),
+            ("a", Dep::brocanth("brocanth-rls").for_dev().feature("one")),
+            ("b", Dep::brocanth("brocanth-rls").for_dev().feature("two")),
+            ("b", Dep::brocanth("brocanth-rls").for_dev().feature("one")),
+        ])
+        .expect("one source");
+        // One line per table: the binary's, and the tests'.
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert_eq!(merged[0].kind, DepKind::Normal);
+        assert!(merged[0].features.is_empty(), "{merged:?}");
+        assert_eq!(merged[1].kind, DepKind::Dev);
+        assert_eq!(merged[1].features, ["one", "two"]);
+    }
+
+    #[test]
+    fn a_dev_dependency_from_another_source_is_refused() {
+        let refused = merge([
+            ("a", Dep::version("x", "1").for_dev()),
+            ("b", Dep::version("x", "2").for_dev()),
+        ])
+        .expect_err("two sources");
+        assert!(refused[0].render().contains("different places"));
+    }
+
+    /// The lines of `[name]` in a generated `Cargo.toml`.
+    fn table(manifest: &str, name: &str) -> Vec<String> {
+        manifest
+            .lines()
+            .skip_while(|line| *line != format!("[{name}]"))
+            .skip(1)
+            .take_while(|line| !line.starts_with('['))
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn manifest_of(picks: &[&'static str]) -> String {
+        scaffold(&answers(picks))
+            .expect("the modules agree")
+            .into_iter()
+            .find(|(path, _)| path == "Cargo.toml")
+            .map(|(_, text)| text)
+            .expect("a Cargo.toml")
+    }
+
+    #[test]
+    fn a_dev_dependency_is_written_in_its_own_table_with_its_features() {
+        let manifest = manifest_of(&["config", "db", "commands", "policy", "rls"]);
+        let dev = table(&manifest, "dev-dependencies");
+        assert_eq!(dev.len(), 1, "{manifest}");
+        assert!(dev[0].starts_with("brocanth-rls = "), "{manifest}");
+        assert!(dev[0].contains("features = [\"agreement\"]"), "{manifest}");
+        let normal = table(&manifest, "dependencies");
+        let rls = normal
+            .iter()
+            .find(|line| line.starts_with("brocanth-rls = "))
+            .expect("brocanth-rls in [dependencies]");
+        assert!(!rls.contains("agreement"), "{manifest}");
+    }
+
+    #[test]
+    fn a_dev_line_that_turns_nothing_on_is_left_out() {
+        // Without `policy`, `rls`'s dev line has no feature: it would
+        // repeat the `[dependencies]` line and change nothing.
+        let manifest = manifest_of(&["config", "db", "commands", "rls"]);
+        assert!(!manifest.contains("[dev-dependencies]"), "{manifest}");
     }
 
     fn answers(picks: &[&'static str]) -> Answers {

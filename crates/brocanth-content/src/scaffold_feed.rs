@@ -57,6 +57,9 @@ impl Module for Feed {
         .outside_runtime()
         .asked_in("pages", "An Atom feed of the posts")
         .krate(Dep::brocanth("brocanth-content"))
+        // Its test reads the layout's `<link>`. `content` asks for the
+        // same line, and the two merge into one.
+        .krate(Dep::brocanth("brocanth-test").for_dev())
         .absent(
             "feed",
             "no feed; a reader learns of a new post by visiting the site",
@@ -255,6 +258,7 @@ impl Plugin for Feed {
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
+    use brocanth_test::Html;
 
     use super::*;
 
@@ -290,12 +294,13 @@ mod tests {
         let app = crate::app::build().expect("the application builds");
         let response = crate::app::handle(&app, Request::new(Verb::Get, "@HOME@")).await;
         let body = response.body.bytes().expect("a whole body");
-        let body = String::from_utf8_lossy(body);
-        assert!(
-            body.contains(r#"<link rel="alternate" type="application/atom+xml""#),
-            "{body}"
-        );
-        assert!(body.contains(r#"href="/feed.xml""#), "{body}");
+        let page = Html::new(String::from_utf8_lossy(body));
+        let feed = page.tags("link").into_iter().find(|link| {
+            link.attr("rel") == Some("alternate")
+                && link.attr("type") == Some("application/atom+xml")
+        });
+        let feed = feed.unwrap_or_else(|| panic!("no feed link:\n{}", page.source()));
+        assert_eq!(feed.attr("href"), Some("/feed.xml"));
     }
 }
 "##;

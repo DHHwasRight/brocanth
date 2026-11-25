@@ -94,6 +94,21 @@ the module writes with `s.file`. One crate may appear twice, once per
 table: `i18n` takes `brocanth-i18n` with its runtime for the binary and
 with its compiler for the build script.
 
+`.for_dev()` puts the line in `[dev-dependencies]`, for a test the module
+writes. `cargo build` does not compile it, and its features are on in the
+test build only. Use it for a crate or a feature that only a generated
+test calls: `content` takes `brocanth-test` for the HTML reader its page
+tests use, and `rls` takes `brocanth-rls` with `agreement` for the
+policy's agreement test, so the server compiles no proptest. A dev line
+on a crate that is also in `[dependencies]` adds only features. When it
+turns none on (`feature_with` and the module is absent), the generator
+leaves the line out.
+
+Each table merges on its own: two modules that want one crate in
+`[dev-dependencies]` make one line with the union of their features.
+`add` adds the line or its new features, and `remove` takes out what the
+generator no longer writes, and the table when it is empty.
+
 A third-party module uses `Dep::git` or `Dep::version` for its own crate.
 `Dep::brocanth` resolves only names inside this workspace.
 

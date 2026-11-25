@@ -84,6 +84,11 @@ impl Module for Content {
                 .for_build()
                 .note("build.rs checks content/; no Markdown or HTML parser in the build script"),
         )
+        .krate(
+            Dep::brocanth("brocanth-test")
+                .for_dev()
+                .note("the page tests read the HTML by element"),
+        )
         .krate(Dep::version("serde", "1").feature("derive"))
         .krate(
             Dep::version("serde", "1")
@@ -480,9 +485,9 @@ fn index_rs(project: &Project) -> String {
             r#"
     #[tokio::test]
     async fn a_french_reader_gets_the_translation() {{
-        let (status, body) = get("{path}").await;
+        let (status, page) = get("{path}").await;
         assert_eq!(status, 200);
-        assert!(body.contains("Bonjour, le monde"), "{{body}}");
+        page.assert_text("Bonjour, le monde");
     }}
 "#
         )
@@ -534,22 +539,28 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
+    use brocanth_test::Html;
 
-    /// The status and the body of a GET, through the whole application.
-    async fn get(path: &str) -> (u16, String) {
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
         let app = crate::app::build().expect("the application builds");
         let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
         let body = response.body.bytes().expect("a whole body");
-        (response.status, String::from_utf8_lossy(body).into_owned())
+        (response.status, Html::new(String::from_utf8_lossy(body)))
     }
 
     #[tokio::test]
     async fn the_list_links_each_post_with_its_date() {
-        let (status, body) = get("@PATH@").await;
+        let (status, page) = get("@PATH@").await;
         assert_eq!(status, 200);
-        assert!(body.contains(r#"href="@LINK@""#), "{body}");
-        assert!(body.contains("Hello, world"), "{body}");
-        assert!(body.contains(r#"datetime="2026-11-22""#), "{body}");
+        page.assert_link_to("@LINK@");
+        let link = page.link_to("@LINK@").expect("asserted above");
+        assert_eq!(link.text(), "Hello, world");
+        let dated = page
+            .tags("time")
+            .iter()
+            .any(|time| time.attr("datetime") == Some("2026-11-22"));
+        assert!(dated, "no <time> for the post:\n{}", page.source());
     }
 @FRENCH@}
 "##;
@@ -598,7 +609,12 @@ fn post_rs(project: &Project) -> String {
     };
     let title_test = if project.has("meta") {
         "        // The page's <title> is the post's.\n        \
-         assert!(body.contains(\"<title>Hello, world\"), \"{body}\");\n"
+         let title = page.tags(\"title\");\n        \
+         assert!(\n            \
+         title.iter().any(|t| t.text().starts_with(\"Hello, world\")),\n            \
+         \"{}\",\n            \
+         page.source()\n        \
+         );\n"
     } else {
         ""
     };
@@ -644,23 +660,33 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
+    use brocanth_test::Html;
 
-    /// The status and the body of a GET, through the whole application.
-    async fn get(path: &str) -> (u16, String) {
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
         let app = crate::app::build().expect("the application builds");
         let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
         let body = response.body.bytes().expect("a whole body");
-        (response.status, String::from_utf8_lossy(body).into_owned())
+        (response.status, Html::new(String::from_utf8_lossy(body)))
     }
 
     #[tokio::test]
     async fn a_post_shows_its_rendered_body() {
-        let (status, body) = get("@PATH@").await;
+        let (status, page) = get("@PATH@").await;
         assert_eq!(status, 200);
-        assert!(body.contains("<h1>Hello, world</h1>"), "{body}");
+        let headed = page.tags("h1").iter().any(|h| h.text() == "Hello, world");
+        assert!(headed, "no <h1> with the title:\n{}", page.source());
         // The Markdown, rendered: a heading with its id, and a table.
-        assert!(body.contains(r#"<h2 id="front-matter">"#), "{body}");
-        assert!(body.contains("<table>"), "{body}");
+        let anchored = page
+            .tags("h2")
+            .iter()
+            .any(|h| h.attr("id") == Some("front-matter"));
+        assert!(anchored, "no <h2 id=\"front-matter\">:\n{}", page.source());
+        assert!(
+            !page.tags("table").is_empty(),
+            "no <table>:\n{}",
+            page.source()
+        );
 @TITLE_TEST@
     }
 

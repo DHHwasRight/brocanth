@@ -814,6 +814,31 @@ fn strip_manifest(
         have.decor_mut().set_prefix(restored);
     }
 
+    // What a module's `build.rs` and its tests used. A table the
+    // generator no longer writes a line in goes with its last line.
+    for table in ["build-dependencies", "dev-dependencies"] {
+        let was_deps = was.get(table).and_then(Item::as_table).unwrap_or(&empty);
+        let now_deps = now.get(table).and_then(Item::as_table).unwrap_or(&empty);
+        let Some(have) = doc.get_mut(table).and_then(Item::as_table_mut) else {
+            continue;
+        };
+        for (key, item) in was_deps.iter() {
+            match now_deps.get(key) {
+                None => {
+                    have.remove(key);
+                }
+                Some(stays) => {
+                    if let Some(old) = have.get_mut(key) {
+                        drop_features(old, item, stays);
+                    }
+                }
+            }
+        }
+        if have.is_empty() {
+            doc.remove(table);
+        }
+    }
+
     let had_run = was.get("package").and_then(|p| p.get("default-run"));
     let has_run = now.get("package").and_then(|p| p.get("default-run"));
     if had_run.is_some() && has_run.is_none() {
@@ -1284,6 +1309,38 @@ mod tests {
 
     fn with(picks: &[&'static str], more: &[&'static str]) -> Vec<&'static str> {
         picks.iter().chain(more).copied().collect()
+    }
+
+    #[test]
+    fn a_dev_dependency_leaves_with_its_module_and_comes_back_with_it() {
+        let base: &[&'static str] = &["config", "db", "commands", "rls"];
+        let full = with(base, &["policy"]);
+        let root = project("rmdevdeps", &full);
+        assert!(
+            read(&root, "Cargo.toml").contains("[dev-dependencies]"),
+            "{}",
+            read(&root, "Cargo.toml")
+        );
+
+        if let Err(e) = remove(&root, &["policy"]) {
+            panic!("{}", said(&e));
+        }
+        assert_as_created(&root, "rmdevdeps", base, &[]);
+        // The table held only the agreement line, so it goes with it.
+        let manifest = read(&root, "Cargo.toml");
+        assert!(!manifest.contains("[dev-dependencies]"), "{manifest}");
+
+        if let Err(e) = add(&root, &["policy"]) {
+            panic!("{}", said(&e));
+        }
+        let manifest = read(&root, "Cargo.toml");
+        let line = manifest
+            .lines()
+            .skip_while(|line| *line != "[dev-dependencies]")
+            .find(|line| line.starts_with("brocanth-rls = "))
+            .unwrap_or_else(|| panic!("no dev line:\n{manifest}"));
+        assert!(line.contains("\"agreement\""), "{manifest}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

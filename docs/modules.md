@@ -142,7 +142,7 @@ asks for `runtime` by name (`brocanth-admin`, `brocanth-observe`).
 | `rsx-tailwind` | tooling | `CommandsMod`, `NodeDependencies`, `MiseTasks` | — |
 | `rsx-htmx` | renderer + edge | written by hand | `partial_depth` on `Ctx` |
 | `commands` (in-CLI) | tooling | `CommandsMod`, `binary` | — |
-| `brocanth-test` | tooling | dev-dependency only | — |
+| `brocanth-test` | tooling | dev-dependency only: `Dep::for_dev` from a module whose generated tests read pages (`content`) | — |
 | `brocanth-observe` | edge + service | `observability` and its children `observability-logs`, `-health`, `-metrics`, `-tracing`: `ConfigSections`, `PluginsMod`, `AppPlugins`, `ServerWrap` (`src/plugins/observability/serving.rs` wraps the handler with the `Observer`); each child is a cargo feature or a pair of paths | `Plugin`, `Services`, reads `Readiness`; with `jobs`, the queue's events and depth |
 | `brocanth-flags` | service | `flags`: `ConfigSections`, `PluginsMod`, `AppPlugins`, `AgentsSections`; with `admin`, `AdminPanels` | `Plugin`, `ProvidesContext<Flags>`, readiness (the table read) |
 | `jt` | renderer | `PagesRenderers`, `PagesRoutes`, two files | — |
@@ -803,7 +803,8 @@ difference. Three rules decide what it may touch:
    Only a file that is new with this add is written when absent.
 6. **The shared files are edited, never rewritten.** `Cargo.toml` goes
    through `toml_edit`: a dependency already there keeps its spec, and
-   only a feature the new module needs is added to it. A new git
+   only a feature the new module needs is added to it. The same holds
+   in `[build-dependencies]` and `[dev-dependencies]`. A new git
    dependency takes the `branch`, `rev` or `tag` of a dependency the
    project already takes from that repository, because cargo reads one
    repository at two refs as two sources. In the receipt above
@@ -867,8 +868,9 @@ generator is the one source of what a module wrote, so `add` and
 4. **The shared files lose only the module's part.** In `Cargo.toml`, a
    dependency the generator wrote before and does not write now goes, a
    feature it no longer asks for goes, and so do its `[[bin]]` and
-   `default-run`. The receipt above `[dependencies]` gets the module's
-   line again. In `config/<env>.toml`, a section (or a key in a parent's
+   `default-run`. The same holds in `[build-dependencies]` and
+   `[dev-dependencies]`, and a table left empty goes. The receipt above
+   `[dependencies]` gets the module's line again. In `config/<env>.toml`, a section (or a key in a parent's
    section) goes while its values are the generator's. A changed value is
    refused, because it is the developer's: copy it, delete the section,
    and run again. A comment is not a value.

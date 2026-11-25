@@ -68,15 +68,19 @@ impl Module for Rls {
             "resource",
             "AGENTS.md says how a resource runs each operation as the request's identity",
         )
+        .krate(
+            Dep::brocanth("brocanth-rls")
+                .note("roles, grants and policies in Rust, diffed into migrations"),
+        )
         // `agreement`: with `policy`, the example policy's `db { … }`
-        // clause runs `brocanth_rls::agreement` in `cargo test`. A normal
-        // dependency feature, because a module cannot write a
-        // `[dev-dependencies]` line: the server compiles proptest and links
-        // none of it (the test is `#[cfg(test)]`).
+        // clause runs `brocanth_rls::agreement` in `cargo test`. A
+        // dev-dependency feature, so `cargo build` compiles no proptest.
+        // Without `policy` the line turns nothing on, and is not written.
         .krate(
             Dep::brocanth("brocanth-rls")
                 .feature_with("policy", "agreement")
-                .note("roles, grants and policies in Rust, diffed into migrations"),
+                .for_dev()
+                .note("the agreement test of the `#[db]` policy"),
         )
         .after("model")
         .absent(

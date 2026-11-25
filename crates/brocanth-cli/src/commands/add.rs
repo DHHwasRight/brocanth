@@ -670,18 +670,19 @@ fn merge_manifest(path: &str, current: &str, generated: &str) -> Result<String, 
         }
     }
 
-    // What a module's `build.rs` uses. No receipt here: the receipt is
-    // about `[dependencies]`.
-    if let Some(deps) = want.get("build-dependencies").and_then(Item::as_table) {
+    // What a module's `build.rs` uses, and what its tests use. No receipt
+    // here: the receipt is about `[dependencies]`.
+    for table in ["build-dependencies", "dev-dependencies"] {
+        let Some(deps) = want.get(table).and_then(Item::as_table) else {
+            continue;
+        };
         // A pinned brocanth source is pinned in `[dependencies]`.
         let pins = doc
             .get("dependencies")
             .and_then(Item::as_table)
             .cloned()
             .unwrap_or_default();
-        let have = doc
-            .entry("build-dependencies")
-            .or_insert(Item::Table(Default::default()));
+        let have = doc.entry(table).or_insert(Item::Table(Default::default()));
         if let Some(have) = have.as_table_mut() {
             for (key, item) in deps.iter() {
                 if let Some(old) = have.get_mut(key) {

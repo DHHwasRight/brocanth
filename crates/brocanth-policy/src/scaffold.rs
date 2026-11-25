@@ -122,7 +122,7 @@ fn plugin_rs(project: &Project) -> String {
     // With `rls`, the database enforces the rules too, so the example
     // carries the agreement test (docs/policy-rls-bridge.md, decision 10).
     // `rls` turns on `brocanth-rls`'s `agreement` feature, which the test
-    // calls, and writes `agreement_url`.
+    // calls, in `[dev-dependencies]`, and writes `agreement_url`.
     let agreement = if project.has("rls") { DB_CLAUSE } else { "" };
     // One extra paragraph when the broker is here, because this is the pair
     // §10 is about and a reader with both should be told where the join is.

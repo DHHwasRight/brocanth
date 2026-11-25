@@ -4,7 +4,8 @@
 //! Each shape is generated, checked with rustfmt, and compared with
 //! `tests/golden/<name>.txt`. Bless with `BROCANTH_BLESS=1`; build each
 //! project and run its own tests with `BROCANTH_BUILD=1`: the build script
-//! checks the posts, and the pages answer through `app::handle`.
+//! checks the posts, and the pages answer through `app::handle`, read by
+//! `brocanth-test`'s HTML reader.
 
 use brocanth_content::scaffold::{Content, Feed};
 use brocanth_markdown::scaffold::MarkdownModule;
@@ -58,6 +59,14 @@ fn with_meta_and_a_feed_the_post_is_an_article_and_the_layout_links_the_feed() {
         &["config", "rsx", "markdown", "content", "feed", "meta"],
     );
     assert!(file(&files, "src/pages/layout.rsx").contains("href=\"/feed.xml\""));
+    // `content` and `feed` both ask for `brocanth-test`: one dev line.
+    let manifest = file(&files, "Cargo.toml");
+    let dev: Vec<&str> = manifest
+        .lines()
+        .skip_while(|line| *line != "[dev-dependencies]")
+        .filter(|line| line.starts_with("brocanth-test = "))
+        .collect();
+    assert_eq!(dev.len(), 1, "{manifest}");
     assert!(
         file(&files, "config/development.toml").contains("site_url = \"http://localhost:3000\"")
     );

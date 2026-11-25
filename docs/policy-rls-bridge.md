@@ -661,9 +661,11 @@ Built in phase 6 (18 November 2026), with these changes to the sketch:
   second. Reason: a config project always has a `[db] url`, so "no URL"
   alone would fail `cargo test` on a machine with no Postgres. The URL's
   user must be a superuser; the generated docs say so.
-- `brocanth-rls` takes the `agreement` feature as a normal dependency
-  feature when the project has `policy`: a module cannot write
-  `[dev-dependencies]`. The server compiles proptest and links none of it.
+- `brocanth-rls` takes the `agreement` feature in `[dev-dependencies]`
+  when the project has `policy` (`Dep::for_dev`). Reason: only the test
+  calls it, so `cargo build` compiles no proptest. Until the scaffold had
+  dev-dependencies it was a normal dependency feature, and the server
+  compiled proptest and linked none of it.
 - The agreement test compared the rules as data on both sides, so it did
   not see a missing `update_check` when the app's `writable` mask permits
   the change: without `update_check`, both sides read `update` and agree.
