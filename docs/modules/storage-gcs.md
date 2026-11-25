@@ -65,8 +65,8 @@ metadata server for GKE workload identity and Cloud Run). A signed URL
 needs the key, or a service account allowed to sign blobs.
 
 ```sh
-brocanth create shop --storage --storage-gcs
-./shop serve --storage.bucket=shop-uploads --storage.credentials_file=/run/secrets/gcs.json
+brocanth create shop --with storage,storage-gcs
+./shop --storage.bucket=shop-uploads --storage.credentials_file=/run/secrets/gcs.json
 ```
 
 `endpoint` is for an emulator such as fake-gcs-server; with it, requests

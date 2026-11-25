@@ -47,7 +47,7 @@ fills at `before_start`, once the pool is open. The objects live in
 cascade from an object to its variants. The default limit is 32 MiB per
 object. Every instance sees every file, and a database backup holds them.
 
-It requires `PgPool`, so `brocanth create --storage --storage-db` adds
+It requires `PgPool`, so `brocanth create <name> --with storage,storage-db` adds
 `db`. A project made before the `ObjectStore` Kind with `storage` and `db`
 reads as this module, so its files stay in Postgres.
 

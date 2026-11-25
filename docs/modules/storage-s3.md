@@ -64,10 +64,10 @@ token on EKS, the container credentials on ECS, the instance role). The
 secret has no flag: read it from a file.
 
 ```sh
-brocanth create shop --storage --storage-s3
-./shop serve --storage.bucket=shop-uploads --storage.region=eu-west-1
+brocanth create shop --with storage,storage-s3
+./shop --storage.bucket=shop-uploads --storage.region=eu-west-1
 # MinIO or R2:
-./shop serve --storage.bucket=uploads --storage.endpoint=http://localhost:9000 \
+./shop --storage.bucket=uploads --storage.endpoint=http://localhost:9000 \
   --storage.access_key_id=minioadmin --storage.secret_access_key_file=/run/secrets/s3
 ```
 

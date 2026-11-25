@@ -30,7 +30,7 @@ Also run `cargo fmt --check` before a commit.
 CI: `.github/workflows/ci.yml` runs the gate on a push to `main` and on
 each pull request: fmt, clippy (default and `--all-features`), `cargo test
 --workspace`, `mise run scaffold`, and the database tests against Postgres
-16 and Redis 7 service containers. `mise run generated` runs on a push to
+16 and Redis 7 service containers, MinIO and a GCS emulator. `mise run generated` runs on a push to
 `main`, nightly and on demand, not on a pull request. `mise run embedded`
 runs nightly and on demand only: it downloads a Postgres archive.
 
@@ -43,6 +43,15 @@ runs nightly and on demand only: it downloads a Postgres archive.
   `BROCANTH_QUEUE_TEST_DATABASE_URL`, so set it too.
   `BROCANTH_QUEUE_REQUIRE_POSTGRES=1` makes a missing database a failure
   there.
+- Object storage conformance (`brocanth-storage`, `docs/object-storage.md`
+  §7) runs on the disk always, on Postgres with
+  `BROCANTH_TEST_DATABASE_URL` (feature `postgres`), on S3 with
+  `BROCANTH_STORAGE_TEST_S3=http://minioadmin:minioadmin@localhost:9000/brocanth-test`
+  (feature `s3`; the bucket must exist) and on GCS with
+  `BROCANTH_STORAGE_TEST_GCS=http://localhost:4443/brocanth-test` (feature
+  `gcs`; the run makes the bucket). CI starts `pgsty/minio` and
+  `tustvold/fake-gcs-server` by digest; copy the `docker run` lines from
+  `.github/workflows/ci.yml`. Each run works under its own prefix.
 - Isolation differs per crate, and no rule covers them all:
   - own schema: `brocanth-auth`, `brocanth-middleware` (rate limit), the
     `brocanth-jobs` panel test and its migrate race test, and the two

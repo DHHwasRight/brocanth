@@ -116,18 +116,45 @@ jobs:
       BROCANTH_QUEUE_TEST_DATABASE_URL: postgres://brocanth:brocanth@localhost:5433/queue
       BROCANTH_QUEUE_REQUIRE_POSTGRES: "1"
       BROCANTH_CACHE_TEST_REDIS: redis://localhost:6379
+      # The object store conformance runs (docs/object-storage.md §7).
+      BROCANTH_STORAGE_TEST_S3: http://minioadmin:minioadmin@localhost:9000/brocanth-test
+      BROCANTH_STORAGE_TEST_GCS: http://localhost:4443/brocanth-test
     steps:
       - uses: actions/checkout@v4
       # `zod` is a workspace dependency on ../zod (a sibling repository).
       - name: Check out zod beside brocanth
         run: git clone --depth 1 https://github.com/DHHwasRight/zod.git ../zod
+      # MinIO and a GCS emulator, by digest. `docker run`, not `services`:
+      # a service container cannot pass the arguments both need. Bump the
+      # tag and the digest together.
+      # - pgsty/minio: a community build of MinIO; `minio/minio` images are
+      #   no longer published. RELEASE.2026-08-04T00-00-00Z.
+      # - tustvold/fake-gcs-server: the fork the object_store project tests
+      #   against; upstream fake-gcs-server sends an XML-API PUT to its JSON
+      #   upload handler (checked on 1.52.2 and on 2026-08 latest).
+      - name: Start MinIO and the GCS emulator
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 \
+            server /data
+          docker run -d --name gcs -p 4443:4443 \
+            tustvold/fake-gcs-server@sha256:dcd3aeacc07c731f1336e90c2889be2af8626ae993ee1fe2c0ba042ebbeb5a04 \
+            -scheme http -backend memory -public-host localhost:4443
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live >/dev/null && break
+            sleep 1
+          done
+          # The S3 suite needs its bucket; the GCS suite makes its own.
+          curl -sf --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin \
+            -X PUT http://localhost:9000/brocanth-test
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: database
       # The crates whose tests read the variables above, each with every
       # feature (the `postgres` tests of cache and storage sit behind
-      # one). One process at a time: two processes on one database touch
+      # one, and the S3 and GCS runs of storage behind `s3` and `gcs`). One process at a time: two processes on one database touch
       # each other's jobs rows (CLAUDE.md "Tests"). The embedded Postgres
       # tests skip without BROCANTH_EMBEDDED_TEST; the nightly job runs
       # them.

@@ -163,7 +163,10 @@ kind!(ObjectStore, group = "storage", runtime = "dyn brocanth_storage::Storage",
 | `storage-s3` | `ObjectStore` | none | `s3` | nothing; `storage` writes `CloudBucket::s3` |
 | `storage-gcs` | `ObjectStore` | none | `gcs` | nothing; `storage` writes `CloudBucket::gcs` |
 
-The backend modules write no file. `storage` asks
+The four are children of `storage` (`part_of_but_off`), as
+`cache-redis` is of `cache`; two of them in one project are refused,
+because `storage` itself provides no store. The backend modules write no
+file. `storage` asks
 `project.provider::<ObjectStore>()` and writes the matching open code
 into `src/plugins/storage/mod.rs`, with the backend's settings. Reason:
 the token and secret logic is one block of a few hundred lines; four
@@ -194,16 +197,17 @@ So `storage storage-db jobs` adds `db` once, for both.
 - `brocanth remove storage-s3`: the default comes back (`added
   storage-fs`). Removing the only provider of a Kind without a default
   is still refused.
-- `brocanth create --storage --storage-s3`: the requirement is met, so
+- `brocanth create <name> --with storage,storage-s3`: the requirement is met, so
   nothing is added.
 
 ### 3.4 Projects from before
 
 `add` and `remove` read `[modules] enabled`. When it holds `storage` and
 no provider of `ObjectStore`, the CLI reads `storage-db` if `db` is
-there, else `storage-fs`, and says so once. The generated storage file
-for each is byte for byte what the project already has, so the add finds
-no edit and rewrites only `brocanth.toml`.
+there, else `storage-fs`. The generated storage file for each holds the
+same open code the project already has (`storage-db` byte for byte,
+`storage-fs` with one comment line changed), so the files stay where they
+are.
 
 ## 4. The client library
 
@@ -279,17 +283,27 @@ disk, said as a warning.
 | `Bucket` conformance (put, streaming put, limit, create-only, get, range, head, metadata, delete, list, signed get and put) | `FsBucket`, S3, GCS | as above |
 | cross-read | `LocalDisk` and `ObjectStorage<FsBucket>` on one root | always |
 
-Variables: `BROCANTH_STORAGE_TEST_S3` (an endpoint URL; MinIO's
-`minioadmin` keys) and `BROCANTH_STORAGE_TEST_GCS` (a fake-gcs-server
-URL). Each test makes its own bucket, so runs never share state. A skip
-prints a banner past libtest's capture, as the Postgres tests do.
+Variables: `BROCANTH_STORAGE_TEST_S3`
+(`http://key:secret@host:port/bucket`; the bucket must exist) and
+`BROCANTH_STORAGE_TEST_GCS` (`http://host:port/bucket`; the run makes the
+bucket on the emulator). Each run works under a prefix of its own, so
+parallel runs share a bucket and delete only what they wrote. A skip
+prints a banner past libtest's capture, as the Postgres tests do. The S3
+and GCS runs also check the start probe: a missing bucket, a wrong secret
+and an unreachable server each fail with a `help:` line.
 
 Images, pinned by digest:
 `pgsty/minio:RELEASE.2026-08-04T00-00-00Z` (a community build of MinIO;
 the `minio/minio` images are no longer published) and
-`fsouza/fake-gcs-server:1.52.2`. CI starts both with `docker run` in the
-`database` job: a service container cannot pass the arguments both
-need (`server /data`, `-scheme http`).
+`tustvold/fake-gcs-server` (the fork the `object_store` project tests
+against: upstream `fsouza/fake-gcs-server`, 1.52.2 and the 2026-08 build,
+sends an XML-API PUT to its JSON upload handler). CI starts both with
+`docker run` in the `database` job: a service container cannot pass the
+arguments both need (`server /data`, `-scheme http`).
+
+What the emulator cannot show, and so only S3 proves: a create-only put
+refused on a taken path (the emulator ignores `ifGenerationMatch=0`), and
+an upload in parts (it has no XML multipart API). Real GCS has both.
 
 ## 8. Deferred
 
