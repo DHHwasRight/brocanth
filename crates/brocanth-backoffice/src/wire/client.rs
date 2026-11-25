@@ -99,6 +99,12 @@ impl WireClient {
         WireClient::build(base, secret.map_err(config_error))
     }
 
+    /// A client that cannot connect: its check is `message`, which has a
+    /// `help:` line. For a configuration that could not be read.
+    pub fn failed(message: String) -> WireClient {
+        WireClient::build("http://unconfigured", Err(config_error(message)))
+    }
+
     fn build(base: &str, secret: Result<ServiceSecret, TabError>) -> WireClient {
         let secret = check_url(base).map_err(config_error).and(secret);
         let http = reqwest::Client::builder()

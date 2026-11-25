@@ -29,13 +29,13 @@ An option is set at build time in `src/modules/backoffice.rs`. A setting is read
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`superuser`](superuser.md): the claim each call carries holds the signed-in member of staff's grants |
+| Adapts to | [`superuser`](superuser.md): the claim each call carries holds the signed-in member of staff's grants; [`admin-model`](admin-model.md): the wire serves the admin's models over the ORM, not the in-memory fixture; [`rls`](rls.md): with `policy` too, the wire runs each call as the staff member's database identity; [`policy`](policy.md): with `rls` too, the wire runs each call as the staff member's database identity |
 | Contributes | `AgentsSection` `backoffice`: how the second binary serves the admin |
 | Collects | none |
 | Exports | none |
 | Hooks | none |
 | Options (build time) | none |
-| Settings (run time) | `[backoffice]`: `addr`, `embedded` |
+| Settings (run time) | `[backoffice]`: `addr`, `embedded`, `wire`, `data_url`, `service_secret` (secret), `tx_timeout_secs`, `tx_max` |
 <!-- end generated: capabilities -->
 
 ## What it writes
@@ -51,8 +51,10 @@ Files:
 - `src/plugins/backoffice/mod.rs`: the `[backoffice]` settings, the
   `Backoffice` plugin that checks them at start, `contract` (the admin's
   data source on the tab data contract), `claim` (the `Claim` each call
-  carries; with `superuser` it reads `brocanth_auth::Staff`), and the
-  server wrap `Door`.
+  carries; with `superuser` it reads `brocanth_auth::Staff`), the
+  server wrap `Door`, and `wire_source`, the admin's source as the wire
+  serves it (with `admin-model` it compiles `src/plugins/admin/models.rs`
+  a second time).
 
 Slots:
 
@@ -79,9 +81,22 @@ table. `Door` answers 404 to a path its binary does not serve:
 To split: run the application with `--backoffice.embedded=false`, run
 `backoffice` beside it, and route `mount_at` to it at the proxy.
 
+Over the wire (docs/backoffice.md §7.5): the application with
+`--backoffice.wire=true` also answers `POST /_backoffice/wire`, signed
+calls only. `backoffice` with `--backoffice.data_url=http://app:3000`
+reads and writes the admin's rows there, not in its own process. Both
+take `--backoffice.service_secret_file=PATH` (or `_env`); without it, or
+with fewer than 32 bytes, both stop at start. Start the application
+first: the backoffice reads the registry at start.
+
 ## Settings
 
 | Key | File value | Flag | What |
 |---|---|---|---|
 | `addr` | `"127.0.0.1:3001"` | `--backoffice.addr` | Where `src/bin/backoffice.rs` listens: an address and a port. Not an address: both binaries stop at start. |
 | `embedded` | `true` | `--backoffice.embedded` | Serve the admin from the application binary too. False when the backoffice runs as its own service. |
+| `wire` | `false` | `--backoffice.wire` | The application serves the admin's rows at `/_backoffice/wire`. Needs `service_secret`. |
+| `data_url` | none | `--backoffice.data_url` | `src/bin/backoffice.rs` reads the admin's rows at this URL. Needs `service_secret`. |
+| `service_secret` | none | `--backoffice.service_secret_file`, `--backoffice.service_secret_env` | The secret both binaries sign the wire with, 32 bytes or more. A secret: no value flag. |
+| `tx_timeout_secs` | `30` | `--backoffice.tx_timeout_secs` | An idle transaction of the wire rolls back after this. |
+| `tx_max` | `32` | `--backoffice.tx_max` | The most transactions the wire holds open. |

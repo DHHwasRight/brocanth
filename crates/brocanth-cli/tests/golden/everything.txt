@@ -3959,6 +3959,56 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "backoffice.wire",
+        help: "Serve the admin's rows to the backoffice binary over HTTP, at /_backoffice/wire. Needs service_secret.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "backoffice.data_url",
+        help: "Where the backoffice binary reads the admin's rows: the application's URL, such as http://127.0.0.1:3000. Needs service_secret. Empty means none.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "backoffice.service_secret",
+        help: "The secret both binaries sign the wire with: 32 bytes or more, such as `openssl rand -hex 32`. Empty means none.",
+        flag: false,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "backoffice.tx_timeout_secs",
+        help: "Seconds the application keeps an idle transaction of the wire before it rolls it back.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "backoffice.tx_max",
+        help: "The most transactions the application holds open for the wire at once.",
+        flag: true,
+        file: "src/modules/backoffice.rs",
+        flags: crate::modules::backoffice::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
         path: "robots.index",
         help: "Let crawlers read this site. False answers `Disallow: /` and nothing else.",
         flag: true,
@@ -5777,6 +5827,17 @@ fn defaults() -> Vec<(&'static str, String)> {
         ),
         ("backoffice.addr", format!("{:?}", backoffice.addr)),
         ("backoffice.embedded", format!("{:?}", backoffice.embedded)),
+        ("backoffice.wire", format!("{:?}", backoffice.wire)),
+        ("backoffice.data_url", format!("{:?}", backoffice.data_url)),
+        (
+            "backoffice.service_secret",
+            format!("{:?}", backoffice.service_secret),
+        ),
+        (
+            "backoffice.tx_timeout_secs",
+            format!("{:?}", backoffice.tx_timeout_secs),
+        ),
+        ("backoffice.tx_max", format!("{:?}", backoffice.tx_max)),
         ("robots.index", format!("{:?}", robots.index)),
         ("robots.disallow", format!("{:?}", robots.disallow)),
         ("robots.allow", format!("{:?}", robots.allow)),
@@ -6453,7 +6514,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: b9c3db00a7281654
+// brocanth-digest: d484819736014387
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -8405,6 +8466,10 @@ pub mod backoffice {
     pub enum Key {
         Addr,
         Embedded,
+        Wire,
+        DataUrl,
+        TxTimeoutSecs,
+        TxMax,
     }
 
     impl Key {
@@ -8413,6 +8478,10 @@ pub mod backoffice {
             match self {
                 Key::Addr => "backoffice.addr",
                 Key::Embedded => "backoffice.embedded",
+                Key::Wire => "backoffice.wire",
+                Key::DataUrl => "backoffice.data_url",
+                Key::TxTimeoutSecs => "backoffice.tx_timeout_secs",
+                Key::TxMax => "backoffice.tx_max",
             }
         }
     }
@@ -9273,7 +9342,7 @@ pub mod ci_github {
     }
 }
 
-// brocanth-digest: 8b9b38d19df33c95
+// brocanth-digest: 5fed3ce36e41d1dc
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -11951,6 +12020,18 @@ window_secs = 60
 addr = "127.0.0.1:3001"
 # Serve the admin from the application binary too. False when the backoffice runs as its own service.
 embedded = true
+# Serve the admin's rows to the backoffice binary over HTTP, at /_backoffice/wire. Needs service_secret.
+# Read by the application binary. The backoffice binary never serves it.
+wire = false
+# Where the backoffice binary reads the admin's rows: the application's URL, such as http://127.0.0.1:3000. Needs service_secret. Empty means none.
+# Read by src/bin/backoffice.rs only. Empty: it reads them itself, as the application does.
+# data_url = ""
+# The secret both binaries sign the wire with: 32 bytes or more, such as `openssl rand -hex 32`. Empty means none.
+# service_secret = ""
+# Seconds the application keeps an idle transaction of the wire before it rolls it back.
+tx_timeout_secs = 30
+# The most transactions the application holds open for the wire at once.
+tx_max = 32
 
 [robots]
 # Let crawlers read this site. False answers `Disallow: /` and nothing else.
@@ -18222,20 +18303,25 @@ pub async fn mail_locked(
 //!
 //! - [`contract`] puts the admin's data source on the tab data contract:
 //!   `plugins::admin_panels` hands it to the admin. Each call carries the
-//!   staff member's [`Claim`].
+//!   staff member's [`Claim`]. In `src/bin/backoffice.rs` with `data_url`
+//!   set, the contract goes over HTTP to the application.
 //! - [`Backoffice`] checks `[backoffice]` at start, in both binaries.
 //! - [`Door`] keeps each binary to its own paths: `src/bin/backoffice.rs`
 //!   answers only the admin's mount, and this binary answers it only while
-//!   `embedded` is true.
+//!   `embedded` is true. With `wire` on, this binary also answers the
+//!   backoffice binary's signed calls at `/_backoffice/wire`.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth_admin::policy::Principal;
 use brocanth_admin::SharedData;
-use brocanth_backoffice::{Claim, Contracted, Gate, InProcess, Role};
+use brocanth_backoffice::wire::{ServiceSecret, WireClient, WireServer};
+use brocanth_backoffice::{Claim, Contracted, Gate, InProcess, Role, SharedTabs};
 
+use crate::pages::Ctx;
 use crate::plugins::{Answer, Handler, ServerWrap};
 
 /// Where the backoffice binary listens, and whether this binary serves the
@@ -18245,7 +18331,7 @@ use crate::plugins::{Answer, Handler, ServerWrap};
 /// It derives `Deserialize` because this application reads it from
 /// `[backoffice]` in a TOML file. Drop the config plugin and the derive goes
 /// with it: `Plugin::Config` carries no bounds the core imposes.
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// Where `src/bin/backoffice.rs` listens: an address and a port.
@@ -18253,6 +18339,38 @@ pub struct Settings {
     /// Whether the application binary serves the admin at `mount_at` too.
     /// False when the backoffice runs as its own service.
     pub embedded: bool,
+    /// Whether the application binary serves the admin's rows to the
+    /// backoffice binary over HTTP, at `/_backoffice/wire`.
+    pub wire: bool,
+    /// Where the backoffice binary reads the admin's rows: the
+    /// application's URL. `None`: it reads them itself.
+    pub data_url: Option<String>,
+    /// The secret both binaries sign the wire with. Only from a file, a
+    /// variable or `--backoffice.service_secret_file`/`_env`.
+    pub service_secret: Option<String>,
+    /// Seconds the application keeps an idle transaction of the wire.
+    pub tx_timeout_secs: u64,
+    /// The most transactions the application holds open for the wire.
+    pub tx_max: usize,
+}
+
+/// Every field but a secret, which prints as `<redacted>`: a log line or
+/// a panic message that prints the settings leaks no secret.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("addr", &self.addr)
+            .field("embedded", &self.embedded)
+            .field("wire", &self.wire)
+            .field("data_url", &self.data_url)
+            .field(
+                "service_secret",
+                &self.service_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tx_timeout_secs", &self.tx_timeout_secs)
+            .field("tx_max", &self.tx_max)
+            .finish()
+    }
 }
 
 impl Default for Settings {
@@ -18260,12 +18378,21 @@ impl Default for Settings {
         Self {
             addr: "127.0.0.1:3001".to_string(),
             embedded: true,
+            wire: false,
+            data_url: None,
+            service_secret: None,
+            tx_timeout_secs: 30,
+            tx_max: 32,
         }
     }
 }
 
-/// The gate [`Door`] reads, from the checked settings.
-struct Chosen(Gate);
+/// What [`Door`] reads, from the checked settings.
+struct Chosen {
+    gate: Gate,
+    /// The wire's secret and its limits, when this binary serves it.
+    wire: Option<(ServiceSecret, Duration, usize)>,
+}
 
 /// Checks `[backoffice]` when the application is built, in both binaries,
 /// so a bad address stops the start and not the first request.
@@ -18283,21 +18410,87 @@ impl Plugin for Backoffice {
     }
 
     fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
-        brocanth_backoffice::check_addr(&self.settings.addr).map_err(PluginError::new)?;
-        lc.services_mut().insert(Chosen(Gate::new(
+        let settings = &self.settings;
+        brocanth_backoffice::check_addr(&settings.addr).map_err(PluginError::new)?;
+        // A missing or short secret, or a bad URL, stops the start in both
+        // binaries (docs/backoffice.md §7.5, W3).
+        let secret = brocanth_backoffice::wire::check_settings(
+            settings.wire,
+            settings.data_url.as_deref(),
+            settings.service_secret.as_deref(),
+            settings.tx_timeout_secs,
+            settings.tx_max,
+        )
+        .map_err(PluginError::new)?;
+        let gate = Gate::new(
             brocanth_backoffice::role(),
             crate::modules::admin::MODULE.mount_at,
-            self.settings.embedded,
-        )));
+            settings.embedded,
+        );
+        // Only the application serves the wire.
+        let wire = match secret {
+            Some(secret) if settings.wire && gate.role() == Role::App => Some((
+                secret,
+                Duration::from_secs(settings.tx_timeout_secs),
+                settings.tx_max,
+            )),
+            _ => None,
+        };
+        lc.services_mut().insert(Chosen { gate, wire });
         Ok(())
     }
 }
 
 /// The admin's data source, on the tab data contract: the admin's end
-/// ([`Contracted`]) over the data side in this process ([`InProcess`]).
-/// `plugins::admin_panels` passes it to `AdminConfig::data_through`.
+/// ([`Contracted`]) over the data side in this process ([`InProcess`]), or
+/// over the application's wire in the backoffice binary with `data_url`
+/// set (docs/backoffice.md §7.5, W8). `plugins::admin_panels` passes it to
+/// `AdminConfig::data_through`.
 pub fn contract(data: SharedData) -> SharedData {
-    Contracted::new(InProcess::new(data)).claim(claim).shared()
+    let tabs: SharedTabs = match wire_client() {
+        Some(client) => client.shared(),
+        None => Arc::new(InProcess::new(data)),
+    };
+    Contracted::over(tabs).claim(claim).shared()
+}
+
+/// The client of the application's wire, in the backoffice binary when
+/// `[backoffice] data_url` is set. Nothing is sent until the admin is
+/// built, and a failure is the admin's start-time error.
+///
+/// The binary's name is compiled in: `contract` runs before any plugin
+/// registers, so no service can say which binary this is. The
+/// application binary ignores `data_url`, so one configuration serves both.
+fn wire_client() -> Option<WireClient> {
+    if option_env!("CARGO_BIN_NAME") != Some("backoffice") {
+        return None;
+    }
+    let settings =
+        crate::plugins::layers().and_then(|layers| crate::plugins::backoffice_settings(&layers));
+    match settings {
+        Ok(settings) => {
+            let url = settings.data_url.filter(|url| !url.trim().is_empty())?;
+            Some(WireClient::lazy(&url, settings.service_secret.as_deref()))
+        }
+        Err(message) => Some(WireClient::failed(message)),
+    }
+}
+
+/// The admin's models, compiled a second time from the admin's own file,
+/// as `src/bin/backoffice.rs` compiles the application.
+#[path = "../admin/models.rs"]
+mod models;
+
+/// The admin's data source, as the wire serves it (docs/backoffice.md
+/// §7.5, W9). Keep it the same as the one `plugins::admin` builds.
+fn wire_source(ctx: &Ctx) -> SharedData {
+    match ctx.provided::<brocanth_model::Orm, _>() {
+        Some(orm) => {
+            let models = models::Models::new(orm.connection().clone());
+            Arc::new(models.as_identity(crate::plugins::rls::staff))
+        }
+        None => Arc::new(brocanth_admin::Fixture::new()),
+    }
 }
 
 /// Who a call is for, as the contract carries it: the signed-in member of
@@ -18324,18 +18517,43 @@ pub fn serve() -> Result<(), String> {
     crate::app::serve(&addr.to_string())
 }
 
-/// A server wrap: a path this binary does not serve answers 404.
+/// A server wrap: a path this binary does not serve answers 404. With
+/// `wire` on, the application answers the backoffice binary's signed calls
+/// here, before the request hooks: a machine call needs no session.
 pub struct Door;
 
 impl ServerWrap for Door {
     fn wrap(app: &Arc<crate::app::App>, next: Handler) -> Handler {
-        let gate = app
+        let chosen = app
             .core
             .services()
             .get::<Chosen>()
-            .map(|chosen| chosen.0.clone())
             .expect("`backoffice` is registered in `register!`");
+        let gate = chosen.gate.clone();
+        let wire = chosen.wire.clone();
+        // Built by the first call, when the plugins have started and the
+        // admin's source can be reached. This application's, not the
+        // process's.
+        let server: Arc<OnceLock<WireServer>> = Arc::default();
+        let app = Arc::clone(app);
         Arc::new(move |request: brocanth_server::Request| -> Answer {
+            if let Some((secret, timeout, max)) = &wire {
+                if request.path == brocanth_backoffice::wire::PATH {
+                    let server = server
+                        .get_or_init(|| {
+                            let ctx = Ctx::new(
+                                brocanth::routing::Verb::Post,
+                                brocanth_backoffice::wire::PATH,
+                                brocanth::routing::Params::empty(),
+                            )
+                            .with_plugins(app.core.context());
+                            WireServer::new(wire_source(&ctx), secret.clone())
+                                .holding(*timeout, *max)
+                        })
+                        .clone();
+                    return Box::pin(async move { server.handle(request).await });
+                }
+            }
             if gate.admits(&request.path) {
                 next(request)
             } else {
@@ -18403,6 +18621,53 @@ mod tests {
     fn the_default_address_is_an_address() {
         let settings = super::Settings::default();
         assert!(brocanth_backoffice::check_addr(&settings.addr).is_ok());
+    }
+
+    /// The wire with no secret stops the start, with the flag to fix it.
+    #[test]
+    fn the_wire_without_a_secret_stops_the_start() {
+        use brocanth::plugin_api::Plugin as _;
+        let settings = super::Settings {
+            wire: true,
+            ..super::Settings::default()
+        };
+        let built = brocanth::plugin_app::AppBuilder::new()
+            .plugin(super::Backoffice::new(settings))
+            .build();
+        let error = built.err().expect("no secret").to_string();
+        assert!(error.contains("service_secret_file"), "{error}");
+    }
+
+    /// The wire is off by default: its path is not served, and nothing
+    /// signs an answer there.
+    #[tokio::test]
+    async fn the_wire_is_not_served_while_it_is_off() {
+        let app = Arc::new(crate::app::build().expect("the application builds"));
+        let post = || brocanth_server::Request::new(Verb::Post, brocanth_backoffice::wire::PATH);
+        let handler = crate::plugins::wrap(&app, {
+            let app = Arc::clone(&app);
+            move |request| {
+                let app = Arc::clone(&app);
+                async move { crate::app::handle(&app, request).await }
+            }
+        });
+        // Off by default: whatever the pages answer, it is not the wire.
+        let off = handler(post()).await;
+        assert_ne!(off.status, 401);
+        assert!(off
+            .header(brocanth_backoffice::wire::SIGNATURE_HEADER)
+            .is_none());
+    }
+
+    #[test]
+    fn a_printed_settings_never_shows_a_secret() {
+        let settings = super::Settings {
+            service_secret: Some("not-for-the-log".to_string()),
+            ..super::Settings::default()
+        };
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-for-the-log"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
 ===== src/plugins/cache/mod.rs =====
@@ -26632,7 +26897,7 @@ kind = ["middleware", "external"]
 files = ["src/modules/backoffice.rs", "src/bin/backoffice.rs", "src/plugins/backoffice/"]
 config = ["backoffice"]
 crates = ["brocanth-backoffice"]
-adapted_to = ["superuser"]
+adapted_to = ["superuser", "admin-model", "rls", "policy"]
 
 [modules.webhooks]
 version = "0.1.0"
@@ -26882,4 +27147,4 @@ config = []
 crates = []
 adapted_to = ["docker", "rls", "db"]
 
-# brocanth-digest: 333469e24b92255e
+# brocanth-digest: f8c1eb629640f922

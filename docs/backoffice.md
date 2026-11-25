@@ -424,15 +424,216 @@ borrows its source, and the source bound to a claim is a new `Arc`. So
 no `TabData` could return a transaction without a change to the trait,
 or the pinned block that D8 describes.
 
+### 7.5 The wire (designed 2026-11-24)
+
+The contract of §7.1 over HTTP. The application serves it; the
+backoffice binary calls it. Module `brocanth_backoffice::wire`, behind
+the `wire` feature (on by default).
+
+**W1. One POST path, one envelope, the loopback's codec.** The
+application answers `POST /_backoffice/wire`. The body is an `Ask` in
+JSON: `Hello`, `Call(Call)`, `Begin(Claim)`, `InTx { tx, caller, write }`,
+`Commit { tx }`, `Rollback { tx }`, or `Panel { tab, claim, call }`
+(§7.6). The answer is `Result<Reply, TabError>` in JSON, status 200. A
+transport problem has its own status: 401 for a request that is not
+signed right, 400 for a body that does not decode, 405 for another verb.
+Reason: the types are the contract's (D2), and an error is data (D7). One
+handler and one codec cannot drift, and `Json` already proves each type
+survives it.
+
+**W2. A server wrap, mounted only when `[backoffice] wire = true`.** The
+generated `Door` answers the wire's path before the request hooks run.
+With `wire = false` (the default) the path is not served, and the page
+table answers it. Reason: a machine call needs no session, no CSRF token
+and no locale. A route in the page table would run every request hook
+first. Nothing listens unless asked (PLAN.md §8). The backoffice binary
+never serves the wire: it answers only the admin's mount (B2).
+
+**W3. One service secret, on both sides, checked at start.**
+`[backoffice] service_secret` is a secret setting: no value flag, only
+`--backoffice.service_secret_file=PATH` and
+`--backoffice.service_secret_env=VAR`, and `<redacted>` in `Debug`. It is
+required when `wire` is true or `data_url` is set, and it has at least 32
+bytes after the trailing whitespace of a file is cut. The `Backoffice`
+plugin refuses a missing or short one in `register`, in both binaries.
+Reason: the owner's rule that a bad configuration fails at start, and
+secrets that never reach `ps`.
+
+**W4. Each request is signed with HMAC-SHA256; replays are refused.**
+The client signs `brocanth-backoffice/1`, the time in Unix seconds, a
+random 128-bit nonce, the path and the body, and sends the time, the nonce
+and the signature as headers. The server recomputes the signature and
+compares it in constant time (`Mac::verify_slice`). It refuses a time more
+than 60 seconds away from its own clock, and a nonce it saw inside that
+window. It keeps at most 65 536 nonces; when the set is full it answers
+503 and does not forget one early. The reply is signed too, over the
+request's nonce, so the backoffice knows its application answered.
+Reason: a bearer token puts the secret itself on every request, and a
+proxy log keeps it. An HMAC keeps the secret off the wire, binds the body
+and the path to it, and costs one hash. The nonce set makes a replay
+inside the window cost nothing to refuse. The signature gives integrity
+and authenticity, not secrecy: rows travel in clear over `http://`. Use
+`https://` or a private network.
+
+**W5. D4 and D6 hold on the wire.** The server decodes a `Call`, with its
+`Scope::Where` and its `Claim`, only after the signature verifies. Its
+data side is always `InProcess::enforcing_grants()`; there is no setting
+to turn the check off. Reason: the condition runs as the server's own
+SQL (D4), and the server must not trust the caller's RBAC decision (D6).
+The secret is what makes the caller "an authenticated backoffice".
+
+**W6. The server holds a transaction between requests, with a timeout
+and a cap.** `Begin` opens a transaction for the claim and answers a
+random 128-bit id. Each `InTx` takes the transaction out of the table,
+runs one write, and puts it back. A second request for the same id while
+one runs gets a `Protocol` error. A transaction idle for
+`[backoffice] tx_timeout_secs` (30) rolls back: every request sweeps the
+table, and a task the first request starts sweeps it every half timeout.
+At `[backoffice] tx_max` (32) open transactions, `Begin` is refused with a
+`help:` line. A write must carry the subject of the claim that opened the
+transaction. A request cut off in the middle drops its transaction, which
+keeps nothing. The client's transaction, dropped without `commit`, sends
+a rollback. Reason: D8 made the transaction owned so that a server can
+keep it. A held transaction holds a database connection, so it needs an
+end that does not depend on the client.
+
+**W7. The registry and the check are read once, at connect.** The
+client's first act is `Hello`. The answer holds the protocol version, the
+registry and the result of the data side's `check`. The client keeps
+them: `TabData::registry` and `TabData::check` stay synchronous and read
+the copy. A connect that fails is the client's `check` error, so the
+admin's start-time check fails and the backoffice does not start. Start
+the application first. Reason: an entity registry does not change while a
+process runs (D1), and a sync `registry` keeps the admin's build as it is.
+
+**W8. The backoffice binary takes its rows over the wire when
+`[backoffice] data_url` is set.** `plugins::backoffice::contract` picks
+the wire client when the binary is `backoffice` and `data_url` is set;
+otherwise it keeps `InProcess`. The application binary ignores
+`data_url`, and the backoffice binary never serves the wire, so one
+configuration file serves both. The binary's name comes from
+`CARGO_BIN_NAME`, which cargo compiles in. Reason: `contract` runs when
+the admin is built, in the admin plugin's `configure` stage, before any
+plugin's `register` and with no services to read a role from. The name of
+the binary is what the binary is; it is fixed when it is compiled, and it
+is not state that one application in a process can set for another. The
+client connects on a thread of its own with a small runtime, because the
+admin builds synchronously, both at start and on its first request.
+
+**W9. The application serves the wire over the admin's own models.** The
+data side of the wire is `InProcess::enforcing_grants()` over the
+admin's source: the models of `src/plugins/admin/models.rs`, over the
+ORM, as `plugins::rls::staff` with `rls` and `policy`. The generated
+backoffice file compiles `models.rs` a second time with `#[path]`, as the
+second binary compiles the application (B1). Reason: the admin's plugin
+file builds its source inside a private `Later`, and its legacy rewrite
+tables compare that file text for text. A seam there is a separate change
+(§7.4).
+
+### 7.6 Panel data contracts
+
+**P1. A panel's data is a trait in the panel's crate, with owned serde
+types.** The flags panel reads `brocanth_flags::admin::FlagsData`: `read`
+(the stored rules and the last error), `set` and `remove`. `Flags`
+implements it. `FlagsPanel::over(data, declared)` takes any
+`Arc<dyn FlagsData>`; `FlagsPanel::new` and `FlagsPanel::late` keep their
+signatures, so a generated admin needs no edit. Reason: the rule of
+`docs/module-capabilities.md` §5.1, and D1, which said each panel gets its
+own trait in its own crate.
+
+**P2. One JSON seam in `brocanth-admin`, no serde in it.**
+`brocanth_admin::panel::remote` has two traits that carry JSON text:
+`PanelWire` (the backoffice's end: send one call of a tab, for a
+principal) and `PanelServe` (the data side: decode a call, say the level
+it needs, run it). A panel crate implements `PanelServe` for its data and
+a remote `FlagsData` over any `PanelWire`. `brocanth-backoffice`
+implements `PanelWire` over the wire client and dispatches
+`Ask::Panel` to the `PanelServe` registered for the tab. Reason: a panel
+crate must not depend on `brocanth-backoffice`, and the backoffice must
+not depend on every panel crate. Text keeps `brocanth-admin` without
+serde.
+
+**P3. RBAC on the server, per panel call.** The panel's `PanelServe`
+names the level each call needs (`read` for a read, `edit` for a write),
+and the wire server refuses a claim that does not hold `<tab>.<level>`,
+as D6 does for a model screen.
+
+### 7.7 A binary without the application: waits
+
+A backoffice binary that links only the admin and a contract client (no
+application plugins) is not built. Three things the admin takes from the
+application have no contract yet:
+
+1. **The principal.** The admin reads the staff member from the session,
+   through `auth` and `superuser`, over the database. Without those
+   plugins the binary needs a session call on the wire, or a client of
+   the session and staff tables.
+2. **The admin's configuration.** The row policies (`AdminResource`), the
+   model screens and the panels are code in `src/plugins/admin/`. The row
+   scope is compiled from them on the admin's side (D4). A binary without
+   that code has no scope to send, unless the scope moves to the data
+   side, which reverses D4.
+3. **Most panels.** Only flags has a data contract (§7.6); the rest read
+   their crate's handle through a late cell.
+
+With the wire, the second binary already reads and writes every model row
+through the application. It still opens the database for the sessions
+and the staff of point 1, and for the panels of point 3.
+
+### 7.8 Built (v2, 2026-11-25)
+
+- `brocanth_backoffice::wire` (feature `wire`, default): `Ask`, `Reply`,
+  `ServiceSecret`, `sign`, `check_settings`, `WireServer` (held
+  transactions, nonces, the reaper, `Ask::Panel` dispatch), `WireClient`
+  (`connect`, `lazy`, `failed`, `panels`).
+- `brocanth_admin::panel::remote`: `PanelWire`, `PanelServe`.
+- `brocanth_flags::admin`: `FlagsData`, `FlagsView`, `FlagsCall`,
+  `FlagsAnswer`, `FlagsServe`, `RemoteFlags`, `FlagsPanel::over`. `Rule`
+  derives serde under `admin`.
+- The `backoffice` module: five settings (`wire`, `data_url`,
+  `service_secret`, `tx_timeout_secs`, `tx_max`), checked in `register`;
+  `Door` serves the wire; `contract` picks the client (W8);
+  `wire_source` (W9).
+- Tests: `tests/wire.rs` (a server on a real socket in its own runtime:
+  list, fetch, insert, update, delete; transactions committed, rolled
+  back, dropped, timed out, capped; grants refused on the data side; a
+  transaction bound to its subject; a wrong, missing or short secret at
+  connect; an unsigned, stale, replayed or altered request; the admin's
+  screens and the flags tab through `TestClient` over the wire; a panel
+  call with its grant checked), `tests/identity.rs` (Postgres, forced
+  RLS: each call and a held transaction run as the claim's identity
+  through HTTP), the generated project's tests (no secret stops the
+  start; the wire is not served while off). The three shapes build with
+  `BROCANTH_BUILD=1`, the second binary included.
+
+To split over the wire, with one secret for both:
+
+```text
+openssl rand -hex 32 > /run/secrets/backoffice
+cargo run -- --backoffice.wire=true --backoffice.embedded=false \
+  --backoffice.service_secret_file=/run/secrets/backoffice
+cargo run --bin backoffice -- --backoffice.data_url=http://127.0.0.1:3000 \
+  --backoffice.service_secret_file=/run/secrets/backoffice
+```
+
+Start the application first: the backoffice reads the registry at start
+and stops with a `help:` line when it cannot.
+
 ### 7.4 Deferred
 
-- The wire: an HTTP transport with the JSON codec, a service secret
-  (`_file`/`_env`) on both sides, a transaction held by the server
-  between requests, the registry read once at connect.
-- Data traits for the panels: jobs, cache, roles, flags, analytics.
-  Each panel still reads its crate's handle through a late cell.
-- A backoffice binary that links only the admin and a contract client.
-  It needs the wire.
+- Data traits for the panels jobs, cache, roles and analytics (and
+  audit, config, openapi, realtime, webhooks, oauth-client). Each still
+  reads its crate's handle through a late cell. Flags has one (§7.6).
+- The flags panel over the wire in a generated project: the `flags`
+  module's admin line still builds `FlagsPanel::late`, and `Door` does
+  not register `FlagsServe`. The crate pieces exist and are tested.
+- A backoffice binary that links only the admin and a contract client
+  (§7.7).
+- A seam in the admin's plugin file for its data source, so the wire's
+  `wire_source` stops repeating it (W9).
+- A test in the generated project with the wire on: its settings come
+  from the process's arguments, so a test cannot turn it on for one
+  application. The crate's tests cover the path.
 - Sign-in pages in the second binary. It serves only `mount_at`; staff
   sign in on the application, on the same host.
 - An image and a deployment for the second binary (`docker`,

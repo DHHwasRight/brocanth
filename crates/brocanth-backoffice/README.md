@@ -21,6 +21,13 @@ member's database identity. `InProcess::enforcing_grants()` refuses a call
 whose claim does not hold `<tab>.<level>`; a server that takes calls from
 another process must turn it on.
 
+**The wire** (feature `wire`, on by default). `WireServer` answers the
+contract at `POST /_backoffice/wire` in the application; `WireClient` is a
+`TabData` over HTTP for the backoffice binary. Each request is signed
+with HMAC-SHA256 over a shared service secret, with a time window and a
+nonce; the server always checks grants and holds transactions between
+requests with a timeout and a cap. `docs/backoffice.md` §7.5.
+
 **The second binary.** The `backoffice` module (feature `scaffold`) writes
 `src/bin/backoffice.rs`, which runs the application itself and serves only
 the admin's mount, at `[backoffice] addr`. `Gate` keeps each binary to its
