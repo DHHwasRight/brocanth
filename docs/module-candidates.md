@@ -271,7 +271,7 @@ HTML-first Rust app.
 | `meta` | Per-page `<title>`, description, canonical, Open Graph, Twitter, JSON-LD, hreflang | Next `metadata`/`generateMetadata` (N31); next-seo | no: one `pages::TITLE` in `rsx.rs` LAYOUT_RSX | Renderer | M | 5 | A site with one title cannot ship; SEO is the HTML-first selling point |
 | `og-image` | Render a PNG social card from a template at `/og/{page}.png`, cached | `@vercel/og`, satori, `opengraph-image.tsx` (N33, N34) | no | Routes | L | 3 | High SEO value, but a text-to-raster engine is a week of work |
 | `icons` | Favicon set, apple-touch-icon, `manifest.webmanifest` from settings | Next `icon.*`, `apple-icon`, `manifest.ts` (N33) | partly: `public/favicon.ico` served verbatim | Routes | S | 3 | Cheap; every production site needs the set |
-| `image` | `/img/{hash}?w=&fmt=` resize and re-encode for `assets/`, `Accept` negotiation, a `srcset` helper | `next/image` (N35), sharp | partly: `brocanth-storage/src/variants.rs` resizes uploads only | Routes | M | 4 | Largest page-weight win; decoder already chosen in storage |
+| `image` | **Built** for stored images ([page](modules/image.md)): `&fmt=` beside `?thumb=`, `max_pixels`, a `srcset` helper. Not built: `assets/` images and `Accept` negotiation. Was: `/img/{hash}?w=&fmt=` resize and re-encode for `assets/`, `Accept` negotiation, a `srcset` helper | `next/image` (N35), sharp | partly: `brocanth-storage/src/variants.rs` resizes uploads only | Routes | M | 4 | Largest page-weight win; decoder already chosen in storage |
 | `storage-routes` (part of `storage`) | **Built.** Multipart upload route, download route, `?thumb=WxH`, `?token=` for protected files | PB file API (P26–P28); uploadthing, @vercel/blob | partly: `brocanth-input/src/multipart.rs`, storage tokens, variants; module writes no route | Routes | S | 5 | Every hard part is done; the HTTP edge is missing |
 | `storage-s3` | S3-compatible backend (R2, MinIO), presigned URLs | PB S3 (P29), pocketbase-presigned-urls; @vercel/blob | no: declined in PLAN.md §4 (Postgres `bytea` instead) | Enhancer | M | 4 | Containers have no durable disk; revisit the §4 decision |
 | `not-found` | `not-found.rsx` and `error.rsx` per directory, rendered in the layout | `not-found.tsx`, `forbidden()`, `unauthorized()` (N7) | no: a miss answers plain `Not Found` | Renderer | S | 4 | Day-one polish; reuses the layout walk in `html!` |
@@ -345,8 +345,8 @@ Ranked by value per effort, then by what each unblocks. "Partly" counts as
     `auth-mfa` and `impersonate` beside them.
 14. ~~**`markdown` + `content`**~~ (M, 4). Built, with `feed`. Not built:
     a `.md` file as a route, tag pages, a second collection by generator.
-15. **`image`** (M, 4). A resize and format endpoint for `assets/`, with
-    `srcset`. It reuses the storage decoder and its pixel cap.
+15. ~~**`image`**~~ (M, 4). Built for stored images: format conversion,
+    a pixel cap and `srcset`. A resize endpoint for `assets/` is not built.
 
 Next in line: `audit-log`, `api-tokens`, `orgs` (L), `storage-s3` (needs the
 PLAN.md §4 decision to change), `crons` panel, `redirects`, `icons`,

@@ -21,6 +21,11 @@
 //! codecs in it can still answer "that is not a size" with a 400 rather than
 //! with a panic or a 500.
 //!
+//! A spec may also carry a [`VariantFormat`], set by
+//! [`VariantSpec::with_format`] and never parsed from the size text: it is
+//! `&fmt=` on the routes. `Display` writes it as a suffix, `300x200t.webp`,
+//! so each format has its own cache entry.
+//!
 //! # Two limits that are security rather than taste
 //!
 //! * **Dimensions are capped at parse time** ([`MAX_VARIANT_DIM`]). A request
@@ -86,6 +91,75 @@ pub struct VariantSpec {
     width: u32,
     height: u32,
     mode: VariantMode,
+    /// The encoding asked for, or `None` for the crate's choice: JPEG for
+    /// an opaque image, PNG for one with alpha.
+    format: Option<VariantFormat>,
+}
+
+/// An encoding a variant may be converted to: `&fmt=` on the file routes.
+///
+/// Three, because those are the encoders `image` ships with the four
+/// decoders this crate already links: no codec is added for them. WebP is
+/// lossless in `image`, so it suits a logo or a screenshot; a photograph
+/// is smaller as JPEG.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VariantFormat {
+    /// `jpeg`, at quality 82. Transparency is lost.
+    Jpeg,
+    /// `png`, lossless.
+    Png,
+    /// `webp`, lossless.
+    WebP,
+}
+
+impl VariantFormat {
+    /// Every format, in the order a reader lists them.
+    pub const ALL: [VariantFormat; 3] =
+        [VariantFormat::WebP, VariantFormat::Jpeg, VariantFormat::Png];
+
+    /// `jpeg`, `png` or `webp`: the `fmt` value and the cache suffix.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VariantFormat::Jpeg => "jpeg",
+            VariantFormat::Png => "png",
+            VariantFormat::WebP => "webp",
+        }
+    }
+
+    /// The media type an answer in this format carries.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            VariantFormat::Jpeg => "image/jpeg",
+            VariantFormat::Png => "image/png",
+            VariantFormat::WebP => "image/webp",
+        }
+    }
+
+    /// Parses `jpeg`, `png` or `webp`, in lower case. `jpg` is refused:
+    /// one spelling per format keeps one cache entry per format.
+    ///
+    /// # Errors
+    /// [`StorageError::InvalidSpec`] for anything else.
+    pub fn parse(text: &str) -> Result<Self, StorageError> {
+        Self::ALL
+            .into_iter()
+            .find(|f| f.as_str() == text)
+            .ok_or(StorageError::InvalidSpec("a format is jpeg, png or webp"))
+    }
+}
+
+impl std::fmt::Display for VariantFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for VariantFormat {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
 }
 
 impl VariantSpec {
@@ -119,6 +193,7 @@ impl VariantSpec {
             width,
             height,
             mode,
+            format: None,
         })
     }
 
@@ -179,6 +254,17 @@ impl VariantSpec {
     pub fn mode(self) -> VariantMode {
         self.mode
     }
+
+    /// The encoding asked for. `None` lets the crate choose.
+    pub fn format(self) -> Option<VariantFormat> {
+        self.format
+    }
+
+    /// The same size in another encoding. A spec with a format is cached
+    /// apart from the same size without one.
+    pub fn with_format(self, format: Option<VariantFormat>) -> Self {
+        Self { format, ..self }
+    }
 }
 
 fn parse_dim(text: &str) -> Result<u32, StorageError> {
@@ -208,7 +294,13 @@ impl std::fmt::Display for VariantSpec {
             VariantMode::Crop(CropAnchor::Bottom) => "b",
             VariantMode::Fit => "f",
         };
-        write!(f, "{}x{}{}", self.width, self.height, suffix)
+        write!(f, "{}x{}{}", self.width, self.height, suffix)?;
+        // `.webp`: a dot cannot occur in a size, so the two spellings never
+        // collide, and the text is still a safe path component.
+        match self.format {
+            Some(format) => write!(f, ".{format}"),
+            None => Ok(()),
+        }
     }
 }
 

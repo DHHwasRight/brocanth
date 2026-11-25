@@ -8,6 +8,7 @@
 //! | `POST {path}`, `multipart/form-data` | the guard, then the `file` part stored; `303` to `return_to`, or `201` with the address |
 //! | `GET {path}/{address}?token=…` | the object, when the token opens that address |
 //! | `GET {path}/{address}?token=…&thumb=300x200t` | a thumbnail of it, from the cache or rendered |
+//! | `GET {path}/{address}?token=…&thumb=300x200t&fmt=webp` | the thumbnail in a format [`RoutesConfig::formats`] lists |
 //! | `GET {path}/{address}` | `403`, unless the routes are `public` |
 //! | another verb on `{path}/{address}` | `405` |
 //!
@@ -47,6 +48,13 @@
 //!   first request renders and caches it; the next ones read the cache.
 //!   Without the `variants` feature a thumbnail is served from the cache
 //!   only.
+//! * **A format is converted only on request, and only to a listed one.**
+//!   `&fmt=` names it, beside `&thumb=`; [`RoutesConfig::formats`] lists
+//!   the ones allowed, and it is empty unless the `image` module is chosen.
+//!   The URL names the format rather than the `Accept` header, so one URL
+//!   is one image and a cache in front needs no `Vary`. A source that
+//!   declares more than [`RoutesConfig::max_pixels`] is a `413` before it is
+//!   decoded.
 //! * **Every upload gets an address of its own, unless the config dedupes.**
 //!   With [`RoutesConfig::dedupe`] off (the default), an upload is stored at
 //!   a random address, so one holder's `delete` never removes the file of
@@ -67,9 +75,9 @@ use brocanth_input::multipart::{self, Limits, Multipart};
 use crate::error::StorageError;
 use crate::key::ObjectKey;
 use crate::meta::{ContentType, ObjectInfo};
-use crate::spec::VariantSpec;
+use crate::spec::{VariantFormat, VariantSpec};
 use crate::storage::Storage;
-use crate::token::FileTokens;
+use crate::token::{FileToken, FileTokens};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -93,6 +101,13 @@ pub struct RoutesConfig {
     pub thumbnails: bool,
     /// The only sizes `?thumb=` may ask for. Any other is a `400`.
     pub thumb_sizes: Vec<VariantSpec>,
+    /// The formats `&fmt=` may convert a thumbnail to. Empty, the default,
+    /// refuses every `&fmt=` with a `400`.
+    pub formats: Vec<VariantFormat>,
+    /// The most pixels a source may declare before a thumbnail of it is
+    /// rendered: a `413` past it. At most
+    /// [`MAX_SOURCE_PIXELS`](crate::MAX_SOURCE_PIXELS), the default.
+    pub max_pixels: u64,
     /// Store identical uploads once, at their content address. Off, each
     /// upload is stored at a random address of its own. See the module
     /// header for why off is the default.
@@ -122,6 +137,8 @@ impl Default for RoutesConfig {
                 .iter()
                 .map(|text| VariantSpec::parse(text).expect("a valid default size"))
                 .collect(),
+            formats: Vec::new(),
+            max_pixels: crate::MAX_SOURCE_PIXELS,
             dedupe: false,
             csrf_field: "_csrf_token".to_string(),
             csrf_header: "x-csrf-token".to_string(),
@@ -247,6 +264,21 @@ impl FileRoutes {
                  help: list the sizes the pages use, such as [\"150x150t\", \"300x200\"], or turn thumbnails off",
             ));
         }
+        if config.max_pixels == 0 || config.max_pixels > crate::MAX_SOURCE_PIXELS {
+            return Err(PluginError::new(format!(
+                "[storage_routes] max_pixels is {}, outside 1 to {}, the most the decoder is sized for\n\
+                 help: set `max_pixels` under [storage_routes] to at most {}",
+                config.max_pixels,
+                crate::MAX_SOURCE_PIXELS,
+                crate::MAX_SOURCE_PIXELS
+            )));
+        }
+        if !config.formats.is_empty() && !config.thumbnails {
+            return Err(PluginError::new(
+                "[storage_routes] formats lists a format and thumbnails are off, so `&fmt=` has no thumbnail to convert\n\
+                 help: empty `formats`, or turn thumbnails on",
+            ));
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 store,
@@ -279,6 +311,13 @@ impl FileRoutes {
             key.to_hex(),
             self.inner.tokens.issue(key).as_str()
         )
+    }
+
+    /// The link to a thumbnail of `key`: [`thumb_url`] with this
+    /// application's path and a new token.
+    pub fn thumb_url(&self, key: &ObjectKey, size: VariantSpec) -> String {
+        let token = self.inner.tokens.issue(key);
+        thumb_url(&self.inner.config.path, key, &token, size)
     }
 
     fn address_of<'r>(&self, path: &'r str) -> Option<&'r str> {
@@ -409,6 +448,39 @@ impl FileRoutes {
                 Err(e) => return plain(400, &e.to_string()),
             },
         };
+        let thumb = match (thumb, param(query, "fmt")) {
+            (thumb, None) => thumb,
+            (None, Some(_)) => {
+                return plain(
+                    400,
+                    "`fmt` converts a thumbnail, and this request names none\n\
+                     help: add `&thumb=` with a size the application lists",
+                )
+            }
+            (Some(spec), Some(text)) => match VariantFormat::parse(text) {
+                Ok(format) if config.formats.contains(&format) => {
+                    Some(spec.with_format(Some(format)))
+                }
+                Ok(_) if config.formats.is_empty() => {
+                    return plain(
+                        400,
+                        "this application converts no thumbnail to another format",
+                    )
+                }
+                Ok(_) => {
+                    let listed: Vec<&str> = config.formats.iter().map(|f| f.as_str()).collect();
+                    return plain(
+                        400,
+                        &format!(
+                            "this application converts no thumbnail to that format\n\
+                             help: ask for one of {}",
+                            listed.join(", ")
+                        ),
+                    );
+                }
+                Err(e) => return plain(400, &e.to_string()),
+            },
+        };
         let etag = match thumb {
             Some(spec) => format!("\"{}-{spec}\"", key.to_hex()),
             None => key.etag(),
@@ -501,7 +573,14 @@ impl FileRoutes {
     ) -> Result<(Vec<u8>, ContentType, Option<String>), Refusal> {
         #[cfg(feature = "variants")]
         {
-            match crate::variants::derive_variant(self.inner.store.as_ref(), key, spec).await {
+            match crate::variants::derive_variant_with(
+                self.inner.store.as_ref(),
+                key,
+                spec,
+                self.inner.config.max_pixels,
+            )
+            .await
+            {
                 Ok(variant) => Ok((variant.bytes, variant.content_type, None)),
                 Err(StorageError::NotAnImage) => Err(refuse(
                     415,
@@ -675,6 +754,40 @@ fn failed(error: &StorageError) -> Response {
         StorageError::TooLarge { .. } => plain(413, &error.to_string()),
         _ => plain(500, "the file store failed; try again"),
     }
+}
+
+/// The link to a thumbnail: `{path}/{address}?token=…&thumb=300x200t`, and
+/// `&fmt=webp` when `size` names a format
+/// ([`VariantSpec::with_format`]).
+///
+/// The size must be one the routes list, and the format one
+/// [`RoutesConfig::formats`] lists, or the link answers `400`.
+pub fn thumb_url(path: &str, key: &ObjectKey, token: &FileToken, size: VariantSpec) -> String {
+    let bare = size.with_format(None);
+    let mut url = format!(
+        "{path}/{}?token={}&thumb={bare}",
+        key.to_hex(),
+        token.as_str()
+    );
+    if let Some(format) = size.format() {
+        url.push_str("&fmt=");
+        url.push_str(format.as_str());
+    }
+    url
+}
+
+/// A `srcset` value: one [`thumb_url`] per size, each with its width, as
+/// `<img srcset>` reads it: `/files/a?…&thumb=150x150t 150w, …`.
+///
+/// A size with no fixed width (`0xH`) has no width descriptor to give, so
+/// it is left out.
+pub fn srcset(path: &str, key: &ObjectKey, token: &FileToken, sizes: &[VariantSpec]) -> String {
+    sizes
+        .iter()
+        .filter(|size| size.width() > 0)
+        .map(|size| format!("{} {}w", thumb_url(path, key, token, *size), size.width()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The sizes, as a reader writes them: `150x150t, 300x200`.

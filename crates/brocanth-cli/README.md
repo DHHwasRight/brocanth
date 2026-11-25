@@ -359,7 +359,7 @@ project without the `commands` module has no command line, and
 
 ## Modules
 
-The CLI offers 87 modules, grouped here by their main category
+The CLI offers 88 modules, grouped here by their main category
 ([docs/module-map.md](../../docs/module-map.md) has every category, the
 seams and the dependency graph). `brocanth create --help` prints each
 module with what it costs.
@@ -369,7 +369,7 @@ module with what it costs.
 | Middleware | request and response hooks, layers, context items | `logging`, `observability`, `observability-logs`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `auth`, `policy`, `validation`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `i18n`, `i18n-routing`, `gtag`, `audit`, `storage-routes`, `storage-thumbnails`, `webhooks-in`, `backoffice` |
 | Routes | a mount at a prefix, or a page file | `observability-health`, `observability-metrics`, `openapi`, `resource`, `auth-screens`, `auth-otp`, `auth-mfa`, `impersonate`, `admin`, `admin-model`, `auth-oauth`, `oauth-client`, `realtime-sse`, `realtime-websocket`, `robots`, `sitemap`, `feed`, `search` |
 | Enhancer | a plugin with a lifecycle, a subcommand, settings | `config`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `mail`, `auth-lockout`, `storage`, `realtime`, `input`, `client`, `commands`, `flags`, `admin-actions`, `webhooks`, `webhooks-out`, `oauth`, `oauth-client-memory`, `superuser`, `roles`, `rls`, `content` |
-| Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt`, `sanitize`, `markdown`, `pagination`, `filters`, `meta`, `errors`, `humanize` |
+| Renderer | a file type in `src/pages`, or a function on `pages` | `rsx`, `rsx-htmx`, `jt`, `sanitize`, `markdown`, `pagination`, `filters`, `meta`, `errors`, `humanize`, `image` |
 | External | files only: build, ship, check | `rsx-tailwind`, `static`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` |
 
 A module that is listed and not available yet gives the reason on its

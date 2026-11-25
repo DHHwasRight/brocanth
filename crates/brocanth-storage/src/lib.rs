@@ -138,7 +138,7 @@ pub use error::StorageError;
 pub use key::{HashKey, ObjectKey, KEY_BYTES, KEY_HEX_LEN};
 pub use local::LocalDisk;
 pub use meta::{ContentType, Filename, ObjectInfo, ObjectMeta, MAX_FILENAME_LEN};
-pub use spec::{CropAnchor, VariantMode, VariantSpec, MAX_VARIANT_DIM};
+pub use spec::{CropAnchor, VariantFormat, VariantMode, VariantSpec, MAX_VARIANT_DIM};
 
 #[cfg(feature = "postgres")]
 pub use postgres::{PgStorage, DEFAULT_MAX_OBJECT_BYTES, OBJECT_SIZE_CEILING};
@@ -146,7 +146,7 @@ pub use storage::Storage;
 pub use token::{FileToken, FileTokenKey, FileTokens, UnixTime, DEFAULT_TTL};
 
 #[cfg(feature = "variants")]
-pub use variants::{derive_variant, render, Variant};
+pub use variants::{derive_variant, derive_variant_with, render, render_with, Variant};
 
 /// The largest width or height a *source* image may declare before this crate
 /// refuses to decode it.

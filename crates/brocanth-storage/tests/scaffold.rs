@@ -6,11 +6,11 @@
 //! project too with `BROCANTH_BUILD=1`.
 
 use brocanth_scaffold::testing;
-use brocanth_storage::scaffold::{FileStorage, StorageRoutes, StorageThumbnails};
+use brocanth_storage::scaffold::{FileStorage, Image, StorageRoutes, StorageThumbnails};
 
 fn shape(name: &str, picks: &[&'static str]) {
-    let modules: [&dyn brocanth_scaffold::Module; 3] =
-        [&FileStorage, &StorageRoutes, &StorageThumbnails];
+    let modules: [&dyn brocanth_scaffold::Module; 4] =
+        [&FileStorage, &StorageRoutes, &StorageThumbnails, &Image];
     let files = brocanth_cli::testing::generate("my-photos", picks, &modules)
         .unwrap_or_else(|e| panic!("{e}"));
     testing::assert_formatted(&files);
@@ -37,6 +37,24 @@ fn the_routes_sit_around_the_csrf_check() {
             "middleware-csrf",
             "storage",
             "storage-routes",
+        ],
+    );
+}
+
+/// With `image`: `formats` and `max_pixels` under `[storage_routes]`, and
+/// the link helpers in `src/plugins/image/mod.rs`.
+#[test]
+fn image_lists_the_formats_and_caps_the_pixels() {
+    shape(
+        "image",
+        &[
+            "config",
+            "middleware",
+            "middleware-csrf",
+            "storage",
+            "storage-routes",
+            "storage-thumbnails",
+            "image",
         ],
     );
 }
@@ -90,8 +108,8 @@ fn a_moved_path_keeps_no_locale_segment_with_no_other_edit() {
         "storage",
         "storage-routes",
     ];
-    let modules: [&dyn brocanth_scaffold::Module; 3] =
-        [&FileStorage, &StorageRoutes, &StorageThumbnails];
+    let modules: [&dyn brocanth_scaffold::Module; 4] =
+        [&FileStorage, &StorageRoutes, &StorageThumbnails, &Image];
     let files = brocanth_cli::testing::generate("my-photos", &picks, &modules)
         .unwrap_or_else(|e| panic!("{e}"));
     let file = |path: &str| -> String {

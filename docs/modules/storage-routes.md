@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/storage_routes.rs`. A setting is 
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`storage-thumbnails`](storage-thumbnails.md): `?thumb=WxH` answers in the sizes `thumb_sizes` lists |
+| Adapts to | [`storage-thumbnails`](storage-thumbnails.md): `?thumb=WxH` answers in the sizes `thumb_sizes` lists; [`image`](image.md): `&fmt=` converts a thumbnail to a format `formats` lists, and `max_pixels` caps the source |
 | Contributes | `AgentsSection` `storage-routes`: which file routes exist, and how a file is served |
 | Collects | none |
 | Exports | none |
@@ -48,6 +48,9 @@ An option is set at build time in `src/modules/storage_routes.rs`. A setting is 
   read. Without a valid token the answer is `403`.
 - With [`storage-thumbnails`](storage-thumbnails.md), `&thumb=WxH` serves a
   thumbnail in a size that `thumb_sizes` lists. Any other size is a `400`.
+- With [`image`](image.md), `&fmt=webp` beside `&thumb=` converts the
+  thumbnail to a format `formats` lists, and a source past `max_pixels` is
+  a `413`.
 - A file that is not a known image is served as an attachment of type
   `application/octet-stream`, never inline. The type the client declared
   is not repeated.

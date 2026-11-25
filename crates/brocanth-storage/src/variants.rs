@@ -49,7 +49,8 @@
 //!
 //! # What the result is encoded as
 //!
-//! JPEG at quality 82 when the source has no alpha channel, PNG when it has.
+//! The format the spec names, when it names one ([`VariantSpec::with_format`],
+//! `&fmt=` on the routes). Otherwise JPEG at quality 82 when the source has no alpha channel, PNG when it has.
 //! A variant is derived data and its format is ours to choose: a photograph
 //! re-encoded as PNG is often larger than the original it was meant to make
 //! cheaper, and a logo re-encoded as JPEG loses the transparency it was
@@ -65,7 +66,7 @@ use tokio::sync::Semaphore;
 use crate::error::StorageError;
 use crate::key::ObjectKey;
 use crate::meta::ContentType;
-use crate::spec::{CropAnchor, VariantMode, VariantSpec};
+use crate::spec::{CropAnchor, VariantFormat, VariantMode, VariantSpec};
 use crate::storage::Storage;
 use crate::{MAX_SOURCE_DIM, MAX_SOURCE_PIXELS};
 
@@ -90,7 +91,7 @@ const JPEG_QUALITY: u8 = 82;
 pub struct Variant {
     /// The encoded image.
     pub bytes: Vec<u8>,
-    /// `image/jpeg` or `image/png`. Always inline-safe.
+    /// `image/jpeg`, `image/png` or `image/webp`. Always inline-safe.
     pub content_type: ContentType,
 }
 
@@ -111,6 +112,24 @@ pub async fn derive_variant(
     key: &ObjectKey,
     spec: VariantSpec,
 ) -> Result<Variant, StorageError> {
+    derive_variant_with(store, key, spec, MAX_SOURCE_PIXELS).await
+}
+
+/// [`derive_variant`], with a lower cap on the pixels a source may declare.
+///
+/// `max_pixels` above [`MAX_SOURCE_PIXELS`] is held to it: the decoder's
+/// memory budget is sized for that cap. A variant already in the cache is
+/// served whatever its source declared, because it was checked when it was
+/// rendered.
+///
+/// # Errors
+/// See [`derive_variant`].
+pub async fn derive_variant_with(
+    store: &dyn Storage,
+    key: &ObjectKey,
+    spec: VariantSpec,
+    max_pixels: u64,
+) -> Result<Variant, StorageError> {
     if let Some(bytes) = store.get_variant(key, spec).await? {
         // The cached bytes are ours, so sniffing them is reading back what we
         // wrote rather than trusting a stranger.
@@ -126,7 +145,7 @@ pub async fn derive_variant(
         .acquire()
         .await
         .map_err(|e| StorageError::backend(format!("waiting for a render: {e}")))?;
-    let variant = crate::local::offload(move || render(&source, spec)).await?;
+    let variant = crate::local::offload(move || render_with(&source, spec, max_pixels)).await?;
     store.put_variant(key, spec, &variant.bytes).await?;
     Ok(variant)
 }
@@ -136,6 +155,20 @@ pub async fn derive_variant(
 /// # Errors
 /// See [`derive_variant`].
 pub fn render(source: &[u8], spec: VariantSpec) -> Result<Variant, StorageError> {
+    render_with(source, spec, MAX_SOURCE_PIXELS)
+}
+
+/// [`render`], with a lower cap on the pixels the source may declare. See
+/// [`derive_variant_with`].
+///
+/// # Errors
+/// See [`derive_variant`].
+pub fn render_with(
+    source: &[u8],
+    spec: VariantSpec,
+    max_pixels: u64,
+) -> Result<Variant, StorageError> {
+    let max_pixels = max_pixels.min(MAX_SOURCE_PIXELS);
     let declared = ContentType::sniff(source).ok_or(StorageError::NotAnImage)?;
     if !declared.is_image() {
         return Err(StorageError::NotAnImage);
@@ -149,7 +182,7 @@ pub fn render(source: &[u8], spec: VariantSpec) -> Result<Variant, StorageError>
         .map_err(|e| StorageError::Image(e.to_string()))?;
     if width > MAX_SOURCE_DIM
         || height > MAX_SOURCE_DIM
-        || u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS
+        || u64::from(width) * u64::from(height) > max_pixels
     {
         return Err(StorageError::ImageTooLarge { width, height });
     }
@@ -167,7 +200,10 @@ pub fn render(source: &[u8], spec: VariantSpec) -> Result<Variant, StorageError>
         .map_err(|e| StorageError::Image(e.to_string()))?;
 
     let resized = resize(&image, spec);
-    encode(&resized)
+    match spec.format() {
+        None => encode(&resized),
+        Some(format) => encode_as(&resized, format),
+    }
 }
 
 fn reader(source: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, StorageError> {
@@ -223,6 +259,40 @@ fn scale_dim(source: u32, target: u32, other: u32) -> u32 {
     let other = u64::from(other.max(1));
     let value = (u64::from(source) * u64::from(target) + other / 2) / other;
     (value.max(1).min(u64::from(MAX_SOURCE_DIM))) as u32
+}
+
+/// Encodes in the format the request named with `&fmt=`.
+///
+/// JPEG drops the alpha channel. WebP is lossless, so it is written from
+/// 8-bit RGB or RGBA, the two layouts its encoder takes.
+fn encode_as(image: &DynamicImage, format: VariantFormat) -> Result<Variant, StorageError> {
+    let mut bytes = Vec::new();
+    let failed = |e: image::ImageError| StorageError::Image(e.to_string());
+    match format {
+        VariantFormat::Jpeg => {
+            let rgb = image.to_rgb8();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY)
+                .encode_image(&rgb)
+                .map_err(failed)?;
+        }
+        VariantFormat::Png => image
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .map_err(failed)?,
+        VariantFormat::WebP => {
+            let layout = if image.color().has_alpha() {
+                DynamicImage::ImageRgba8(image.to_rgba8())
+            } else {
+                DynamicImage::ImageRgb8(image.to_rgb8())
+            };
+            layout
+                .write_to(&mut Cursor::new(&mut bytes), ImageFormat::WebP)
+                .map_err(failed)?;
+        }
+    }
+    Ok(Variant {
+        bytes,
+        content_type: ContentType::parse(format.media_type()).expect("a literal media type"),
+    })
 }
 
 fn encode(image: &DynamicImage) -> Result<Variant, StorageError> {

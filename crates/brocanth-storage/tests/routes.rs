@@ -15,7 +15,9 @@ use brocanth::plugin_order::{Order, Phase};
 use brocanth::routing::Verb;
 use brocanth_middleware::{Csrf, CsrfConfig};
 use brocanth_storage::routes::{FileRoutes, RoutesConfig};
-use brocanth_storage::{FileTokenKey, FileTokens, LocalDisk, ObjectInfo, ObjectKey, Storage};
+use brocanth_storage::{
+    FileTokenKey, FileTokens, LocalDisk, ObjectInfo, ObjectKey, Storage, VariantFormat, VariantSpec,
+};
 use brocanth_test::{TestClient, TestRequest, TestResponse};
 
 /// The one future at a time a test needs. The disk backend never waits on
@@ -960,4 +962,156 @@ fn the_defaults_are_what_the_module_doc_says() {
     assert!(config.thumbnails);
     assert_eq!(config.csrf_field, "_csrf_token");
     assert_eq!(config.csrf_header, "x-csrf-token");
+}
+
+/// A rig that converts thumbnails to the formats listed.
+fn converting(formats: &[VariantFormat]) -> RoutesConfig {
+    RoutesConfig {
+        thumb_sizes: vec!["30x20".parse().unwrap()],
+        formats: formats.to_vec(),
+        ..RoutesConfig::default()
+    }
+}
+
+/// A PNG with an alpha channel: a logo, which WebP keeps transparent.
+fn logo(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([20, 90, 200, 128]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn fmt_converts_a_thumbnail_to_a_listed_format_and_caches_it_apart() {
+    let rig = rig(converting(&[VariantFormat::WebP, VariantFormat::Png]), true);
+    let key = block_on(rig.store.put(&logo(300, 200), &ObjectInfo::new())).unwrap();
+    let url = rig.routes.url(&key);
+
+    let webp = get(&rig, &format!("{url}&thumb=30x20&fmt=webp"));
+    assert_eq!(webp.status(), 200, "{}", webp.text());
+    assert_eq!(webp.header("content-type"), Some("image/webp"));
+    let decoded = image::load_from_memory_with_format(webp.body(), image::ImageFormat::WebP)
+        .expect("a WebP image");
+    assert_eq!((decoded.width(), decoded.height()), (30, 20));
+    assert!(decoded.color().has_alpha(), "WebP keeps the transparency");
+
+    // The default thumbnail and the WebP one are two cache entries and two
+    // entity tags.
+    let plain = get(&rig, &format!("{url}&thumb=30x20"));
+    assert_eq!(plain.header("content-type"), Some("image/png"));
+    assert_ne!(plain.header("etag"), webp.header("etag"));
+    let spec: VariantSpec = "30x20".parse().unwrap();
+    let cached = block_on(
+        rig.store
+            .get_variant(&key, spec.with_format(Some(VariantFormat::WebP))),
+    );
+    assert!(cached.unwrap().is_some(), "the WebP rendering is cached");
+}
+
+#[test]
+fn fmt_is_refused_unless_listed_and_beside_a_thumbnail() {
+    let listing = rig(converting(&[VariantFormat::WebP]), true);
+    let key = block_on(listing.store.put(&png(300, 200), &ObjectInfo::new())).unwrap();
+    let url = listing.routes.url(&key);
+    let unlisted = get(&listing, &format!("{url}&thumb=30x20&fmt=png"));
+    assert_eq!(unlisted.status(), 400);
+    assert!(
+        unlisted.text().contains("help: ask for one of webp"),
+        "{}",
+        unlisted.text()
+    );
+    assert_eq!(
+        get(&listing, &format!("{url}&thumb=30x20&fmt=jpg")).status(),
+        400
+    );
+    let alone = get(&listing, &format!("{url}&fmt=webp"));
+    assert_eq!(alone.status(), 400);
+    assert!(
+        alone.text().contains("help: add `&thumb=`"),
+        "{}",
+        alone.text()
+    );
+
+    // Without the `image` module the list is empty and every format is
+    // refused.
+    let plain = rig(RoutesConfig::default(), true);
+    let key = block_on(plain.store.put(&png(300, 200), &ObjectInfo::new())).unwrap();
+    let url = plain.routes.url(&key);
+    assert_eq!(
+        get(&plain, &format!("{url}&thumb=300x200&fmt=webp")).status(),
+        400
+    );
+}
+
+#[test]
+fn a_source_past_max_pixels_is_a_413_before_it_is_decoded() {
+    let config = RoutesConfig {
+        max_pixels: 100 * 100,
+        ..converting(&[VariantFormat::Jpeg])
+    };
+    let rig = rig(config, true);
+    let big = block_on(rig.store.put(&png(101, 100), &ObjectInfo::new())).unwrap();
+    let answer = get(
+        &rig,
+        &format!("{}&thumb=30x20&fmt=jpeg", rig.routes.url(&big)),
+    );
+    assert_eq!(answer.status(), 413, "{}", answer.text());
+    let small = block_on(rig.store.put(&png(100, 100), &ObjectInfo::new())).unwrap();
+    let answer = get(
+        &rig,
+        &format!("{}&thumb=30x20&fmt=jpeg", rig.routes.url(&small)),
+    );
+    assert_eq!(answer.status(), 200, "{}", answer.text());
+    assert_eq!(answer.header("content-type"), Some("image/jpeg"));
+}
+
+#[test]
+fn a_pixel_cap_past_the_decoder_budget_or_formats_without_thumbnails_stop_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+    let refuse = |config: RoutesConfig| match FileRoutes::new(
+        store.clone(),
+        tokens(),
+        config,
+        |_: &http::Request<Vec<u8>>, _: &brocanth::plugin_hooks::RequestState| false,
+    ) {
+        Ok(_) => panic!("the routes started"),
+        Err(e) => e.to_string(),
+    };
+    let too_many = refuse(RoutesConfig {
+        max_pixels: brocanth_storage::MAX_SOURCE_PIXELS + 1,
+        ..RoutesConfig::default()
+    });
+    assert!(too_many.contains("help: set `max_pixels`"), "{too_many}");
+    let no_thumbs = refuse(RoutesConfig {
+        thumbnails: false,
+        formats: vec![VariantFormat::WebP],
+        ..RoutesConfig::default()
+    });
+    assert!(no_thumbs.contains("help: empty `formats`"), "{no_thumbs}");
+}
+
+#[test]
+fn srcset_lists_each_sized_thumbnail_with_its_width() {
+    let tokens = tokens();
+    let key = ObjectKey::parse(&"ab".repeat(32)).unwrap();
+    let token = tokens.issue(&key);
+    let sizes: Vec<VariantSpec> = ["150x150t", "0x200", "600x600f"]
+        .iter()
+        .map(|s| {
+            s.parse::<VariantSpec>()
+                .unwrap()
+                .with_format(Some(VariantFormat::WebP))
+        })
+        .collect();
+    let set = brocanth_storage::routes::srcset("/files", &key, &token, &sizes);
+    let hex = key.to_hex();
+    let t = token.as_str();
+    assert_eq!(
+        set,
+        format!(
+            "/files/{hex}?token={t}&thumb=150x150t&fmt=webp 150w, \
+             /files/{hex}?token={t}&thumb=600x600f&fmt=webp 600w"
+        )
+    );
 }

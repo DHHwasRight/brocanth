@@ -161,6 +161,9 @@ pub const ALL: &[&dyn Module] = &[
     // project's guard, a download route behind a file token, thumbnails.
     &brocanth_storage::scaffold::StorageRoutes,
     &brocanth_storage::scaffold::StorageThumbnails,
+    // Thumbnails in another format, a lower pixel cap and a srcset helper.
+    // No dependency of its own: the encoders come with the decoders.
+    &brocanth_storage::scaffold::Image,
     // The five edge hooks. The first crate in the workspace whose whole
     // job is to implement `HookSource`: the pipeline was there, tested,
     // and every implementation of it was a test fixture.

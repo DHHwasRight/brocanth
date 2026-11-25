@@ -528,6 +528,10 @@ impl Module for StorageRoutes {
             "storage-thumbnails",
             "`?thumb=WxH` answers in the sizes `thumb_sizes` lists",
         )
+        .adapts_to(
+            "image",
+            "`&fmt=` converts a thumbnail to a format `formats` lists, and `max_pixels` caps the source",
+        )
         // An upload is a form post. Without the check, any page on any site
         // posts files here with the visitor's cookies. The routes also read
         // the check's field and header, so they keep no copy of either.
@@ -573,9 +577,11 @@ impl Module for StorageRoutes {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let thumbnails = project.has("storage-thumbnails");
+        // `image` needs `storage-thumbnails`, so it never comes alone.
+        let image = thumbnails && project.has("image");
         s.file(
             "src/plugins/storage_routes/mod.rs",
-            routes_rs(project, thumbnails),
+            routes_rs(project, thumbnails, image),
         );
         s.at(Slot::PluginsMod).line("pub mod storage_routes;");
         configurable_hooking(
@@ -589,7 +595,7 @@ impl Module for StorageRoutes {
                 prelude: ROUTES_COMMENT.to_string(),
                 adjust: None,
             },
-            routes_settings(thumbnails),
+            routes_settings(thumbnails, image),
         );
         s.at(Slot::AgentsSections).block(ROUTES_AGENTS.to_string());
     }
@@ -625,6 +631,200 @@ impl Module for StorageThumbnails {
     fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
 }
 
+/// Images: `image`. Format conversion for the thumbnails, a lower pixel
+/// cap, and a `srcset` helper.
+///
+/// The rendering is the crate's: `storage-thumbnails` already links the
+/// `image` crate's decoders, and the three encoders this module offers come
+/// with them. So the module adds no dependency. It turns on two settings of
+/// `storage-routes` (`formats`, `max_pixels`), which adapts to it, and
+/// writes `src/plugins/image/mod.rs`, the helper a page calls to link a
+/// thumbnail.
+pub struct Image;
+
+impl Module for Image {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "image",
+            "thumbnails converted on request (&fmt=webp), a pixel cap against decompression bombs, a srcset helper",
+        )
+        .category(Category::Renderer)
+        .contributes::<AgentsSection>(
+            Contribution::new("image", "how a page links an image in a size and a format"),
+            true,
+        )
+        .needs(
+            "storage-thumbnails",
+            "it converts the thumbnails `storage-thumbnails` renders; without them there is no image to convert",
+        )
+        .after("storage-routes")
+        .asked_in("data", "Images: thumbnails in WebP or JPEG, a srcset helper")
+        .absent(
+            "image",
+            "no format conversion; a thumbnail is JPEG or PNG, and a page writes its own srcset",
+        )
+    }
+
+    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+        s.file(
+            "src/plugins/image/mod.rs",
+            IMAGE_RS.replace("@PATH@", &module_ref("storage-routes", "path")),
+        );
+        s.at(Slot::PluginsMod).line("pub mod image;");
+        s.at(Slot::AgentsSections).block(IMAGE_AGENTS.to_string());
+    }
+}
+
+const IMAGE_AGENTS: &str = "\n\
+    ## Images\n\
+    \n\
+    Link a stored image through `crate::plugins::image`: `src(ctx, &key,\n\
+    size, format)` for one `<img src>`, `srcset(ctx, &key, sizes, format)`\n\
+    for `<img srcset>`. Call them after your policy allowed the read: each\n\
+    link carries a file token. A size must be in `thumb_sizes` and a format\n\
+    in `formats` under `[storage_routes]`, or the link answers 400; add the\n\
+    size there, never an open-ended width parameter. Use `webp` for a logo\n\
+    or a screenshot and `jpeg` for a photograph: WebP here is lossless.\n";
+
+const IMAGE_RS: &str = r##"//! Links to stored images, in a size and a format the file routes allow.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! ```ignore
+//! let src = crate::plugins::image::src(ctx, &key, "300x200", Some("webp"))?;
+//! let set = crate::plugins::image::srcset(ctx, &key, &["150x150t", "600x600f"], Some("webp"))?;
+//! // <img src="{src}" srcset="{set}" sizes="(max-width: 600px) 150px, 600px" alt="…">
+//! ```
+//!
+//! Each link carries a file token, so mint it after your policy allowed
+//! the read. A size must be in `thumb_sizes` and a format in `formats`
+//! under `[storage_routes]`: the routes answer any other with a 400 before
+//! they read the file, so nobody can make the server render a size no page
+//! uses. A source past `max_pixels` is a 413, read from its header before a
+//! pixel is decoded.
+
+use brocanth_storage::routes;
+use brocanth_storage::{ObjectKey, VariantFormat, VariantSpec};
+
+use crate::pages::Ctx;
+use crate::plugins::storage::FileStore;
+
+/// Where the file routes answer: `path` in `src/modules/storage_routes.rs`.
+const PATH: &str = @PATH@;
+
+/// One size and format, as `routes` spells them, or why not.
+fn spec(size: &str, format: Option<&str>) -> Result<VariantSpec, String> {
+    let spec = VariantSpec::parse(size).map_err(|e| format!("size `{size}`: {e}"))?;
+    let format = format
+        .map(|f| VariantFormat::parse(f).map_err(|e| format!("format `{f}`: {e}")))
+        .transpose()?;
+    Ok(spec.with_format(format))
+}
+
+fn files(ctx: &Ctx) -> Result<&FileStore, String> {
+    ctx.provided::<FileStore, _>()
+        .ok_or_else(|| "this Ctx has no file store: it was built by hand".to_string())
+}
+
+/// The link to one thumbnail of `key`: `<img src>`.
+#[allow(dead_code)]
+pub fn src(ctx: &Ctx, key: &ObjectKey, size: &str, format: Option<&str>) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    Ok(routes::thumb_url(PATH, key, &token, spec(size, format)?))
+}
+
+/// The links to several thumbnails of `key`, each with its width:
+/// `<img srcset>`. A size with no fixed width (`0xH`) is left out.
+#[allow(dead_code)]
+pub fn srcset(
+    ctx: &Ctx,
+    key: &ObjectKey,
+    sizes: &[&str],
+    format: Option<&str>,
+) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    let specs = sizes
+        .iter()
+        .map(|size| spec(size, format))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(routes::srcset(PATH, key, &token, &specs))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+    use brocanth_storage::ObjectInfo;
+
+    use super::*;
+
+    /// A PNG of one red pixel.
+    const PNG: [u8; 69] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38,
+        0x21, 0x27, 0x07, 0x00, 0x02, 0xb6, 0x01, 0x05, 0x34, 0xa6, 0x75, 0xaa, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[tokio::test]
+    async fn a_thumbnail_converts_to_a_listed_format_and_no_other() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        let key = files
+            .store
+            .put(&PNG, &ObjectInfo::new())
+            .await
+            .expect("stored");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
+
+        let webp = crate::app::handle(&app, get(&link("150x150t", Some("webp")))).await;
+        assert_eq!(webp.status, 200);
+        assert_eq!(webp.header("content-type"), Some("image/webp"));
+
+        // `png` is not in `formats` by default.
+        let png = crate::app::handle(&app, get(&link("150x150t", Some("png")))).await;
+        assert_eq!(png.status, 400);
+        // A size outside `thumb_sizes` is refused before anything renders.
+        let odd = crate::app::handle(&app, get(&link("151x150", Some("webp")))).await;
+        assert_eq!(odd.status, 400);
+    }
+
+    #[test]
+    fn srcset_gives_each_size_its_width_and_drops_a_free_one() {
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let tokens =
+            brocanth_storage::FileTokens::new(brocanth_storage::FileTokenKey::from_secret(b"test"));
+        let token = tokens.issue(&key);
+        let sizes = ["150x150t", "0x200", "600x600f"]
+            .iter()
+            .map(|size| spec(size, Some("webp")).expect("a valid spec"))
+            .collect::<Vec<_>>();
+        let set = routes::srcset(PATH, &key, &token, &sizes);
+        assert!(set.contains("&thumb=150x150t&fmt=webp 150w, "), "{set}");
+        assert!(set.ends_with("&thumb=600x600f&fmt=webp 600w"), "{set}");
+        assert!(!set.contains("0x200"), "{set}");
+        assert!(spec("150x150t", Some("gif")).is_err());
+    }
+
+    fn get(target: &str) -> Request {
+        let (path, query) = target.split_once('?').expect("a query");
+        let mut request = Request::new(Verb::Get, path);
+        request.query = query.to_string();
+        request
+    }
+}
+"##;
+
 const ROUTES_COMMENT: &str = "
         // -- file routes ---------------------------------------------------
         //
@@ -643,7 +843,7 @@ const ROUTES_AGENTS: &str = "\n\
     your policy allowed the read, and never log the URL. Do not write an\n\
     upload or download page beside these routes.\n";
 
-fn routes_settings(thumbnails: bool) -> Vec<Setting> {
+fn routes_settings(thumbnails: bool, image: bool) -> Vec<Setting> {
     let mut out = vec![
         Setting::integer(
             "max_bytes",
@@ -677,10 +877,45 @@ fn routes_settings(thumbnails: bool) -> Vec<Setting> {
             ),
         );
     }
+    if image {
+        out.push(
+            Setting::list(
+                "formats",
+                IMAGE_FORMATS,
+                "The formats &fmt= may convert a thumbnail to: webp, jpeg, png.",
+            )
+            .note(
+                "Each format is one more rendering per size and file, so list only the ones\n\
+                 the pages ask for. WebP here is lossless: right for a logo, larger than JPEG\n\
+                 for a photograph.",
+            ),
+        );
+        out.push(
+            Setting::integer(
+                "max_pixels",
+                IMAGE_MAX_PIXELS,
+                "The most pixels a source may declare before a thumbnail of it is a 413.",
+            )
+            .note(
+                "Read from the image header before anything is decoded, so a small file that\n\
+                 declares 40000x40000 costs a few bytes of reading. At most 50000000.",
+            ),
+        );
+    }
     out
 }
 
-fn routes_rs(project: &Project, thumbnails: bool) -> String {
+/// The formats `image` allows by default: WebP for graphics, JPEG for
+/// photographs. PNG is the default rendering of an image with alpha, so it
+/// needs no `&fmt=`.
+const IMAGE_FORMATS: &[&str] = &["webp", "jpeg"];
+
+/// The pixel cap `image` writes by default: a 24-megapixel camera photo.
+/// Lower than the crate's hard cap, so a source the decoder could take
+/// but no page needs is refused.
+const IMAGE_MAX_PIXELS: i64 = 24_000_000;
+
+fn routes_rs(project: &Project, thumbnails: bool, image: bool) -> String {
     let (derive, note) = settings_derive(project, "storage_routes");
     let pick = |off: &'static str, on: &'static str| if thumbnails { on } else { off };
     ROUTES_RS
@@ -688,22 +923,44 @@ fn routes_rs(project: &Project, thumbnails: bool) -> String {
         .replace("@NOTE@", &note)
         .replace(
             "@THUMB_DOC@",
-            pick(
-                "",
-                "\n//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists.",
-            ),
+            match (thumbnails, image) {
+                (_, true) => "\n//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists, and\n//! `&fmt=webp` to convert it to a format `formats` lists.",
+                (true, false) => "\n//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists.",
+                (false, false) => "",
+            },
         )
-        .replace("@SPEC_USE@", pick("", ", VariantSpec"))
-        .replace("@THUMB_FIELD@", pick("", THUMB_FIELD))
-        .replace("@THUMB_DEFAULT@", pick("", THUMB_DEFAULT))
-        .replace("@THUMB_PARSE@", pick("", THUMB_PARSE))
+        .replace(
+            "@SPEC_USE@",
+            if image {
+                ", VariantFormat, VariantSpec"
+            } else {
+                pick("", ", VariantSpec")
+            },
+        )
+        .replace(
+            "@THUMB_FIELD@",
+            &format!("{}{}", pick("", THUMB_FIELD), if image { IMAGE_FIELD } else { "" }),
+        )
+        .replace(
+            "@THUMB_DEFAULT@",
+            &format!("{}{}", pick("", THUMB_DEFAULT), if image { IMAGE_DEFAULT } else { "" }),
+        )
+        .replace(
+            "@THUMB_PARSE@",
+            &format!("{}{}", pick("", THUMB_PARSE), if image { IMAGE_PARSE } else { "" }),
+        )
         .replace(
             "@THUMBNAILS@",
-            pick(
-                "thumbnails: false,",
-                "thumbnails: true,\n            thumb_sizes,",
-            ),
+            if image {
+                "thumbnails: true,\n            thumb_sizes,\n            formats,\n            max_pixels: self.settings.max_pixels,"
+            } else {
+                pick(
+                    "thumbnails: false,",
+                    "thumbnails: true,\n            thumb_sizes,",
+                )
+            },
         )
+
         .replace("@PATH@", &module_ref("storage-routes", "path"))
         .replace("@PUBLIC@", &module_ref("storage-routes", "public"))
 }
@@ -717,6 +974,30 @@ const THUMB_DEFAULT: &str = "            thumb_sizes: brocanth_storage::routes::
                 .map(|size| size.to_string())
                 .collect(),
 ";
+
+const IMAGE_FIELD: &str = "    /// The formats `&fmt=` may convert a thumbnail to.
+    pub formats: Vec<String>,
+    /// The most pixels a source may declare before a thumbnail of it is a 413.
+    pub max_pixels: u64,
+";
+
+const IMAGE_DEFAULT: &str = "            formats: vec![\"webp\".to_string(), \"jpeg\".to_string()],
+            max_pixels: 24_000_000,
+";
+
+const IMAGE_PARSE: &str = r#"        let formats = self
+            .settings
+            .formats
+            .iter()
+            .map(|format| {
+                VariantFormat::parse(format).map_err(|e| {
+                    PluginError::new(format!(
+                        "[storage_routes] formats `{format}`: {e}\nhelp: list webp, jpeg or png"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+"#;
 
 const THUMB_PARSE: &str = r#"        let thumb_sizes = self
             .settings

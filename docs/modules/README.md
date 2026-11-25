@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 87. For all
+One page per module that `brocanth create` offers. There are 88. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -92,6 +92,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`storage`](storage.md) | uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3 | Enhancer, Middleware |  |
 | [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token | Middleware | storage |
 | [`storage-thumbnails`](storage-thumbnails.md) | ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders | Middleware | storage |
+| [`image`](image.md) | thumbnails converted on request (&fmt=webp), a pixel cap against decompression bombs, a srcset helper | Renderer |  |
 | [`input`](input.md) | a form or a JSON body, read into a struct, with every fault at once | Enhancer, Renderer |  |
 | [`client`](client.md) | a subcommand that calls this application's own API, built from its routes | Enhancer |  |
 | [`middleware`](middleware.md) | proxy headers, method override, canonical host, content types, CORS | Middleware |  |

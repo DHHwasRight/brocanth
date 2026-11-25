@@ -1780,3 +1780,39 @@ mod pg {
         });
     }
 }
+
+mod formats {
+    use super::*;
+    use crate::spec::VariantFormat;
+
+    #[test]
+    fn a_format_is_one_spelling_and_a_suffix_of_its_own_in_the_cache_path() {
+        let spec = VariantSpec::parse("300x200t").unwrap();
+        assert_eq!(spec.to_string(), "300x200t");
+        let webp = spec.with_format(Some(VariantFormat::WebP));
+        assert_eq!(webp.to_string(), "300x200t.webp");
+        assert_ne!(webp, spec);
+        assert_eq!(webp.with_format(None), spec);
+        assert_eq!(VariantFormat::parse("jpeg").unwrap(), VariantFormat::Jpeg);
+        for refused in ["jpg", "JPEG", "webp ", "", "gif"] {
+            assert!(VariantFormat::parse(refused).is_err(), "{refused:?}");
+        }
+        // The size text never carries a format: `fmt` is its own parameter.
+        assert!(VariantSpec::parse("300x200.webp").is_err());
+    }
+
+    #[test]
+    fn a_cached_variant_in_another_format_is_kept_apart_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalDisk::open(dir.path()).unwrap();
+        let key = block_on(store.put(b"source", &ObjectInfo::new())).unwrap();
+        let spec = VariantSpec::parse("30x20").unwrap();
+        let webp = spec.with_format(Some(VariantFormat::WebP));
+        block_on(store.put_variant(&key, webp, b"webp bytes")).unwrap();
+        assert_eq!(block_on(store.get_variant(&key, spec)).unwrap(), None);
+        assert_eq!(
+            block_on(store.get_variant(&key, webp)).unwrap().as_deref(),
+            Some(&b"webp bytes"[..])
+        );
+    }
+}
