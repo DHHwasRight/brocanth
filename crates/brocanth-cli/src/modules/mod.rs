@@ -154,9 +154,14 @@ pub const ALL: &[&dyn Module] = &[
     // The same rules one floor down: Postgres row-level security, declared
     // in Rust and written into the `db` module's migrations.
     &brocanth_rls::scaffold::Rls,
-    // Uploads on a local disk. The first module to write a `.gitignore`
-    // line, which is also why that slot is now read.
+    // Uploads, addressed by content hash, in the project's object store.
     &brocanth_storage::scaffold::FileStorage,
+    // The object store below it, one of four (`docs/object-storage.md`):
+    // a directory, the default the resolver adds; Postgres; S3; GCS.
+    &brocanth_storage::scaffold::StorageFs,
+    &brocanth_storage::scaffold::StorageDb,
+    &brocanth_storage::scaffold::StorageS3,
+    &brocanth_storage::scaffold::StorageGcs,
     // Its HTTP edge, off until asked for: an upload route behind the
     // project's guard, a download route behind a file token, thumbnails.
     &brocanth_storage::scaffold::StorageRoutes,

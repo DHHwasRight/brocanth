@@ -6267,6 +6267,11 @@ mod tests {
                     "cache-memory",
                     "sessions",
                     "db-embedded-prod",
+                    // One object store: `storage-db`, as `storage` with
+                    // `db` was before the Kind.
+                    "storage-fs",
+                    "storage-s3",
+                    "storage-gcs",
                 ]
                 .contains(key)
             })
@@ -6283,7 +6288,7 @@ mod tests {
             // Declared settings and no config file: the flags are the only
             // source, read by `main` with no command line, and by `clap`
             // with one.
-            ("flags", vec!["sessions", "storage"]),
+            ("flags", vec!["sessions", "storage", "storage-fs"]),
             ("flags-commands", vec!["sessions", "commands"]),
             ("default", DEFAULT.to_vec()),
             // Everything that can stand together: `logging` is the one
@@ -7448,7 +7453,13 @@ mod tests {
             "{refused:?}"
         );
         // A value of the wrong type.
-        let a = answers(&["middleware", "middleware-csrf", "storage", "storage-routes"]);
+        let a = answers(&[
+            "middleware",
+            "middleware-csrf",
+            "storage",
+            "storage-fs",
+            "storage-routes",
+        ]);
         let shapes = module_shapes(&a).expect("the modules agree");
         let mut files = scaffold(&a).expect("the modules agree");
         let options = given("storage-routes", "public", "yes");
@@ -7627,7 +7638,7 @@ mod tests {
             .1;
         assert!(
             full.contains(
-                "**Absent:** `logging`, `beacon`, `sessions`, `db-embedded-prod`, `cache-memory`, `static` —"
+                "**Absent:** `logging`, `beacon`, `sessions`, `db-embedded-prod`, `cache-memory`, `storage-fs`, `storage-s3`, `storage-gcs`, `static` —"
             ),
             "{full}"
         );
@@ -8466,7 +8477,11 @@ mod tests {
 
         // No config file and no command line: `main` reads the flags.
         let name = "flags-bare";
-        let bare = build(name, vec!["sessions", "storage"], &[set_cookie]);
+        let bare = build(
+            name,
+            vec!["sessions", "storage", "storage-fs"],
+            &[set_cookie],
+        );
         let secret = bare.join("secret.txt");
         std::fs::write(&secret, "\n").unwrap();
         let secret_flag = format!("--storage.secret_file={}", secret.display());
@@ -8558,7 +8573,7 @@ mod tests {
         let name = "flags-configured";
         let configured = build(
             name,
-            vec!["sessions", "storage", "config", "commands"],
+            vec!["sessions", "storage", "storage-fs", "config", "commands"],
             &[
                 set_cookie,
                 (
@@ -8641,7 +8656,11 @@ mod tests {
 
         // A secret's pointer beside a file, in a module whose flags are on.
         let name = "flags-secret";
-        let secret_root = build(name, vec!["storage", "config", "commands"], &[]);
+        let secret_root = build(
+            name,
+            vec!["storage", "storage-fs", "config", "commands"],
+            &[],
+        );
         let secret = secret_root.join("secret.txt");
         std::fs::write(&secret, "").unwrap();
         let pointer = format!("--storage.secret_file={}", secret.display());

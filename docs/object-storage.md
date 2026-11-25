@@ -226,13 +226,13 @@ All in `[storage]`. `secret` and `token_ttl` stay as they are.
 |---|---|---|---|
 | fs | `root` | `var/uploads` | unchanged |
 | db | `migrate` | `true` | unchanged |
-| s3 | `bucket` | (required) | empty fails at `configure` |
+| s3 | `bucket` | `uploads` | empty fails at `configure`; a missing bucket fails the start check |
 | s3 | `region` | `us-east-1` | R2: `auto` |
 | s3 | `endpoint` | empty (AWS) | MinIO, R2: the URL. `http://` allows plain HTTP |
 | s3 | `path_style` | `true` | `false` for virtual-hosted style |
 | s3 | `access_key_id` | empty | empty: the AWS credential chain |
 | s3 | `secret_access_key` | empty | secret: `_file` or `_env` only |
-| gcs | `bucket` | (required) | |
+| gcs | `bucket` | `uploads` | as for S3 |
 | gcs | `credentials` | empty | service-account JSON; secret: `_file` or `_env` only. Empty: ADC |
 | gcs | `endpoint` | empty | an emulator's URL (fake-gcs-server) |
 | s3, gcs | `prefix` | empty | a folder inside the bucket, so two applications share one |

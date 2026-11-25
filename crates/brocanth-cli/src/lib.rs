@@ -136,10 +136,17 @@ pub mod testing {
                     .join(", ")
             ));
         }
+        // As `create` does: the provider of a Kind nobody chose comes with
+        // the module that requires it (`storage` brings `storage-fs`).
+        let picks = crate::modules::with_extra(extra, || {
+            crate::resolve::resolve(picks, crate::commands::create::Door::Create)
+                .map(|(picks, _)| picks)
+                .unwrap_or_else(|_| picks.to_vec())
+        });
         let answers = crate::commands::create::Answers {
             name: name.to_string(),
             title: crate::ui::title_case(name),
-            picks: picks.to_vec(),
+            picks,
             local,
             git: false,
         };

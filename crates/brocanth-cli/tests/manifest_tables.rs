@@ -75,7 +75,7 @@ const SOURCES: &[Row] = &[
         files: &["brocanth-search/src/documents.rs"],
     },
     Row {
-        key: "storage",
+        key: "storage-db",
         files: &["brocanth-storage/src/postgres/sql.rs"],
     },
     Row {

@@ -69,7 +69,7 @@ pub mod testing;
 
 pub use kind::{
     AdminPanel, AgentsSection, CacheStore, ConfigCheck, ConfigSource, Contribution, JobQueue,
-    KindRef, Mount, MountRole, PgPool, Requirement, SessionCookie, Tab,
+    KindRef, Mount, MountRole, ObjectStore, PgPool, Requirement, SessionCookie, Tab,
 };
 
 use std::collections::BTreeMap;
@@ -273,6 +273,12 @@ pub struct Manifest {
     /// The Kinds this module gives, each with what it gives. Set with
     /// [`Manifest::provides`].
     pub provides: Vec<(KindRef, &'static str)>,
+    /// The Kinds this module is the default provider of. Set with
+    /// [`Manifest::default_for`].
+    ///
+    /// A requirement nobody meets, on a Kind with several providers, adds
+    /// the default; `add` of another provider replaces it.
+    pub defaults: Vec<KindRef>,
     /// The Kinds this module cannot be written without. Set with
     /// [`Manifest::requires`] and [`Manifest::requires_unless`].
     ///
@@ -364,6 +370,7 @@ impl Manifest {
             options: Vec::new(),
             development_only: None,
             provides: Vec::new(),
+            defaults: Vec::new(),
             requires: Vec::new(),
             uses: Vec::new(),
             contributions: Vec::new(),
@@ -377,6 +384,25 @@ impl Manifest {
     pub fn provides<K: kind::Kind>(mut self, what: &'static str) -> Self {
         self.provides.push((KindRef::of::<K>(), what));
         self
+    }
+
+    /// Be the default provider of `K`, which this module also
+    /// [`provides`](Manifest::provides).
+    ///
+    /// For a Kind with several providers, where the single-provider rule
+    /// cannot choose: a requirement nobody meets adds this module and says
+    /// so, and `brocanth add` of another provider replaces it.
+    /// `storage-fs` is the default `ObjectStore`. At most one default per
+    /// Kind, never a development-only one; a test over the registry holds
+    /// every module to that (`docs/object-storage.md` §3.2).
+    pub fn default_for<K: kind::Kind>(mut self) -> Self {
+        self.defaults.push(KindRef::of::<K>());
+        self
+    }
+
+    /// Whether this module is the default provider of `kind`.
+    pub fn is_default_for(&self, kind: &str) -> bool {
+        self.defaults.iter().any(|k| k.name == kind) && self.gives(kind)
     }
 
     /// Refuse to be written without a provider of `K`, and say what breaks.

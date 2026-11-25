@@ -6,8 +6,11 @@
 //!
 //! * none chosen, and one in the registry that is not development-only: it
 //!   is added, and the front door prints `added db: jobs requires PgPool`;
-//! * none chosen, and several (or only development-only ones): an error
-//!   that names each, because a backend is a real choice;
+//! * none chosen, several, and one of them the Kind's default
+//!   ([`Manifest::default_for`]): the default is added, and said:
+//!   `added storage-fs: storage requires ObjectStore`;
+//! * none chosen, and several with no default (or only development-only
+//!   ones): an error that names each, because a backend is a real choice;
 //! * two chosen for a Kind that takes one: an error that names both.
 //!
 //! A development-only provider is never added for a requirement. It binds
@@ -16,6 +19,8 @@
 //! The result stays explicit (ADR 1): the binding is a comment over the
 //! plugin chain and a `[bindings]` entry in `brocanth.toml`, and the chain
 //! names every plugin as before.
+//!
+//! [`Manifest::default_for`]: brocanth_scaffold::Manifest::default_for
 
 use brocanth_scaffold::kind::Cardinality;
 use brocanth_scaffold::{KindRef, Requirement};
@@ -64,6 +69,93 @@ pub fn single_provider(kind: &str) -> Option<&'static str> {
     deployable.next().is_none().then_some(first)
 }
 
+/// The default provider of `kind` ([`Manifest::default_for`]), when the
+/// registry names one that is not development-only.
+///
+/// [`Manifest::default_for`]: brocanth_scaffold::Manifest::default_for
+pub fn default_provider(kind: &str) -> Option<&'static str> {
+    providers(kind)
+        .into_iter()
+        .find(|key| about(key).is_default_for(kind) && about(key).development_only.is_none())
+}
+
+/// The provider the resolver adds for a requirement on `kind` nobody
+/// meets: the single deployable one, else the default.
+pub fn addable_provider(kind: &str) -> Option<&'static str> {
+    single_provider(kind).or_else(|| default_provider(kind))
+}
+
+/// A provider `add` took out because the module being added provides the
+/// same Kind, and the Kind is a backend choice (it has a default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The provider taken out.
+    pub key: &'static str,
+    /// The module being added that replaces it.
+    pub by: &'static str,
+    /// The Kind both provide.
+    pub kind: KindRef,
+}
+
+impl Replaced {
+    /// `replaced storage-fs: storage-s3 provides ObjectStore (an object store)`.
+    pub fn line(&self) -> String {
+        format!(
+            "replaced {}: {} provides {} ({})",
+            self.key, self.by, self.kind, self.kind.gist
+        )
+    }
+}
+
+/// `picks` with every other provider of a backend-choice Kind taken out,
+/// for each module in `adding` that provides one. A Kind is a backend
+/// choice when the registry names a default for it: `ObjectStore` is,
+/// `SessionCookie` is not, so adding `sessions` beside `auth` is still
+/// refused as two cookies (`docs/object-storage.md` §3.3).
+pub fn replace(
+    picks: &[&'static str],
+    adding: &[&'static str],
+) -> (Vec<&'static str>, Vec<Replaced>) {
+    let mut out = picks.to_vec();
+    let mut replaced = Vec::new();
+    for by in adding {
+        for (kind, _) in about(by).provides {
+            if kind.cardinality != Cardinality::One || default_provider(kind.name).is_none() {
+                continue;
+            }
+            out.retain(|key| {
+                let goes = !adding.contains(key) && about(key).gives(kind.name);
+                if goes {
+                    replaced.push(Replaced { key, by, kind });
+                }
+                !goes
+            });
+        }
+    }
+    (out, replaced)
+}
+
+/// A project recorded before the `ObjectStore` Kind: `storage` and no
+/// provider of it. Today's `storage` with `db` kept the bytes in Postgres,
+/// so it reads as `storage-db`; without `db`, as `storage-fs`. `add` and
+/// `remove` call it on the record, so neither moves a project's files in
+/// silence (`docs/object-storage.md` §3.4). Answers what it added.
+pub fn upgrade_record(picks: &mut Vec<&'static str>) -> Option<&'static str> {
+    if !picks.contains(&"storage") || picks.iter().any(|p| about(p).gives("ObjectStore")) {
+        return None;
+    }
+    let backend = if picks.iter().any(|p| about(p).gives("PgPool")) {
+        "storage-db"
+    } else {
+        "storage-fs"
+    };
+    let order = crate::commands::create::all();
+    let key = order.iter().copied().find(|k| *k == backend)?;
+    picks.push(key);
+    picks.sort_by_key(|p| order.iter().position(|k| k == p));
+    Some(key)
+}
+
 /// Each chosen module's requirement that no chosen module provides, in
 /// registry order.
 fn unmet(picks: &[&'static str]) -> Vec<(&'static str, Requirement)> {
@@ -93,10 +185,21 @@ pub fn resolve(
     let mut added: Vec<Added> = Vec::new();
     loop {
         let missing = unmet(&picks);
-        let Some((by, r)) = missing.first() else {
+        if missing.is_empty() {
             return Ok((picks, added));
-        };
-        let Some(key) = single_provider(r.kind.name) else {
+        }
+        // A single provider first, a default after: the provider a default
+        // requires may arrive with a single-provider requirement
+        // (`storage-db` and `jobs` both bring `db`, once).
+        let pick = missing
+            .iter()
+            .find_map(|(by, r)| single_provider(r.kind.name).map(|key| (by, r, key)))
+            .or_else(|| {
+                missing
+                    .iter()
+                    .find_map(|(by, r)| default_provider(r.kind.name).map(|key| (by, r, key)))
+            });
+        let Some((by, r, key)) = pick else {
             return Err(refusals(&picks, door));
         };
         added.push(Added {
@@ -124,7 +227,7 @@ pub fn refusals(picks: &[&'static str], door: Door) -> Vec<Diagnostic> {
                 format!("`{pick}` requires {kind} ({})", kind.gist),
             )
             .note(r.why);
-            match (single_provider(kind.name), all.as_slice()) {
+            match (addable_provider(kind.name), all.as_slice()) {
                 (_, []) => d.help(format!(
                     "no module in this build provides {kind}; remove `{pick}`, or build the CLI with a module that provides it"
                 )),
@@ -136,7 +239,9 @@ pub fn refusals(picks: &[&'static str], door: Door) -> Vec<Diagnostic> {
 }
 
 /// Two chosen providers of a Kind that takes one. A child that provides
-/// its parent's Kind refines the parent, so that pair is not a conflict.
+/// its parent's Kind refines the parent, so that pair is not a conflict;
+/// two children of a parent that does not provide it (`storage-fs` and
+/// `storage-s3` under `storage`) are.
 pub fn doubled(picks: &[&'static str]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -151,9 +256,9 @@ pub fn doubled(picks: &[&'static str]) -> Vec<Diagnostic> {
                 .copied()
                 .filter(|p| about(p).gives(kind.name))
                 .filter(|p| {
-                    about(p)
-                        .parent
-                        .is_none_or(|parent| !picks.contains(&parent))
+                    about(p).parent.is_none_or(|parent| {
+                        !picks.contains(&parent) || !about(parent).gives(kind.name)
+                    })
                 })
                 .collect();
             if chosen.len() > 1 {
@@ -246,6 +351,10 @@ pub fn after(key: &str, picks: &[&'static str]) -> Vec<&'static str> {
 
 /// The modules among `stay` that require a Kind only `gone` provides, each
 /// with the Kind and the reason. `remove` refuses on them.
+///
+/// A Kind whose default provider is not `gone` orphans nobody: `remove`
+/// adds the default back (`brocanth remove storage-s3` returns to
+/// `storage-fs`).
 pub fn orphaned_by(
     gone: &str,
     stay: &[&'static str],
@@ -253,6 +362,9 @@ pub fn orphaned_by(
     let mut out = Vec::new();
     for (kind, _) in about(gone).provides {
         if stay.iter().any(|p| about(p).gives(kind.name)) {
+            continue;
+        }
+        if default_provider(kind.name).is_some_and(|d| d != gone) {
             continue;
         }
         for key in stay {
@@ -448,5 +560,100 @@ mod tests {
         let keys: Vec<&str> = orphans.iter().map(|(k, _, _)| *k).collect();
         assert_eq!(keys, ["jobs", "flags"]);
         assert!(orphaned_by("db", &["jobs", "jobs-memory"]).is_empty());
+    }
+
+    // -- the default provider (docs/object-storage.md §3) ------------------
+
+    #[test]
+    fn a_default_is_one_per_kind_deployable_and_among_several() {
+        let mut seen: Vec<&str> = Vec::new();
+        for key in available() {
+            let m = about(key);
+            for kind in &m.defaults {
+                assert!(
+                    m.gives(kind.name),
+                    "`{key}` defaults {kind} it does not provide"
+                );
+                assert!(m.development_only.is_none(), "`{key}` is development-only");
+                assert_eq!(kind.cardinality, Cardinality::One, "{kind}");
+                assert!(providers(kind.name).len() > 1, "{kind} has one provider");
+                assert!(!seen.contains(&kind.name), "two defaults for {kind}");
+                seen.push(kind.name);
+            }
+        }
+        assert_eq!(default_provider("ObjectStore"), Some("storage-fs"));
+        assert_eq!(default_provider("CacheStore"), None);
+    }
+
+    #[test]
+    fn storage_brings_the_default_store_and_says_so() {
+        let (picks, added) = resolve(&["storage"], Door::Create).expect("resolves");
+        assert_eq!(picks, ["storage", "storage-fs"]);
+        assert_eq!(
+            added[0].line(),
+            "added storage-fs: storage requires ObjectStore (an object store)"
+        );
+        // A chosen backend meets the requirement: nothing is added.
+        let (picks, added) = resolve(&["storage", "storage-s3"], Door::Create).expect("resolves");
+        assert!(added.is_empty());
+        assert_eq!(bindings(&picks), [("ObjectStore", "storage-s3")]);
+        // `storage-db` brings `db`, once, with `jobs` beside it.
+        let (picks, _) =
+            resolve(&["storage", "storage-db", "jobs"], Door::Create).expect("resolves");
+        assert_eq!(picks.iter().filter(|p| **p == "db").count(), 1);
+        assert!(!picks.contains(&"storage-fs"));
+    }
+
+    #[test]
+    fn two_object_stores_conflict_under_one_parent() {
+        let said = doubled(&["storage", "storage-fs", "storage-s3"])[0].render();
+        assert!(
+            said.contains("`storage-fs` and `storage-s3` each provide ObjectStore"),
+            "{said}"
+        );
+        // A child that refines a parent which provides the Kind still does
+        // not conflict.
+        assert!(doubled(&["cache", "cache-redis"]).is_empty());
+    }
+
+    #[test]
+    fn adding_a_backend_replaces_the_one_recorded_and_nothing_else() {
+        let (picks, replaced) = replace(&["storage", "storage-fs"], &["storage-s3"]);
+        assert_eq!(picks, ["storage"]);
+        assert_eq!(
+            replaced[0].line(),
+            "replaced storage-fs: storage-s3 provides ObjectStore (an object store)"
+        );
+        let (picks, _) = replace(&["storage", "storage-s3"], &["storage-gcs"]);
+        assert_eq!(picks, ["storage"]);
+        // A Kind with no default is not a backend choice: two cookies stay
+        // two cookies, and `doubled` refuses them.
+        let (picks, replaced) = replace(&["auth"], &["sessions"]);
+        assert_eq!(picks, ["auth"]);
+        assert!(replaced.is_empty());
+    }
+
+    #[test]
+    fn removing_a_backend_brings_the_default_back() {
+        assert!(orphaned_by("storage-s3", &["storage"]).is_empty());
+        let (picks, added) = resolve(&["storage"], Door::Add).expect("resolves");
+        assert!(picks.contains(&"storage-fs"));
+        assert_eq!(added[0].key, "storage-fs");
+        // The default itself cannot leave while `storage` stays.
+        let orphans = orphaned_by("storage-fs", &["storage"]);
+        assert_eq!(orphans[0].0, "storage");
+    }
+
+    #[test]
+    fn a_record_from_before_the_kind_keeps_its_backend() {
+        let mut with_db = vec!["db", "storage"];
+        assert_eq!(upgrade_record(&mut with_db), Some("storage-db"));
+        assert!(with_db.contains(&"storage-db"));
+        let mut alone = vec!["storage"];
+        assert_eq!(upgrade_record(&mut alone), Some("storage-fs"));
+        let mut current = vec!["storage", "storage-s3"];
+        assert_eq!(upgrade_record(&mut current), None);
+        let mut none = vec!["db"];
+        assert_eq!(upgrade_record(&mut none), None);
     }
 }

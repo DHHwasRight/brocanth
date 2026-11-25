@@ -182,7 +182,7 @@ puts the crate in a new project.
 | [`brocanth-cache`](crates/brocanth-cache/README.md) | A cache on unlogged Postgres tables, with tags; `MemoryCache` for tests and development | `cache`, `cache-memory` |
 | [`brocanth-cache-redis`](crates/brocanth-cache-redis/README.md) | The cache on Redis or Valkey, behind the same `Cache` trait | `cache-redis` |
 | [`brocanth-cache-conformance`](crates/brocanth-cache-conformance/README.md) | The `Cache` contract as a test suite for any backend | |
-| [`brocanth-storage`](crates/brocanth-storage/README.md) | File storage: one trait, local disk, content-addressed names, image variants | `storage`, `storage-routes` |
+| [`brocanth-storage`](crates/brocanth-storage/README.md) | File storage: one trait over a local disk, S3, GCS or Postgres, content-addressed names, image variants | `storage`, `storage-fs`, `storage-db`, `storage-s3`, `storage-gcs`, `storage-routes` |
 | [`brocanth-auth`](crates/brocanth-auth/README.md) | argon2id accounts, server-side sessions, OAuth 2.0 and OIDC with PKCE | `auth` |
 | [`brocanth-policy`](crates/brocanth-policy/README.md) | Typed predicates: SQL for a list, evaluation for one row | `policy` |
 | [`brocanth-policy-macros`](crates/brocanth-policy-macros/README.md) | The `policy!` macro, re-exported by `brocanth-policy` behind `macro` | |
@@ -317,7 +317,7 @@ else.
 | Jobs | `brocanth-jobs`: typed jobs, cron and a panel over the `brocanth-queue` engine | `brocanth-queue` (below) | another queue `Backend` |
 | Queue | `PgQueue`, `PgOutbox` in `brocanth-queue-postgres` | `Backend`, `Outbox`, `Inspect` | The `Bulk` lane moves to another `Backend`. The contract is written against SQS limits. |
 | Cache | `PgCache` on unlogged tables | `Cache` (tags, `CacheExt`) | Another `Cache` impl |
-| Files | `Postgres` in `brocanth-storage` (`postgres` feature) | `Storage` | `LocalDisk` exists. An object store would be another `Storage` impl. |
+| Files | `LocalDisk` (default), `PgStorage`, S3 and GCS through `ObjectStorage` in `brocanth-storage` | `Storage`; `Bucket` below it | Another `Bucket` impl (Azure is one `object_store` feature away) |
 | Realtime | `NotifySink` over `LISTEN/NOTIFY` | `ChangeSink`, `Notifier` | Another `ChangeSink` |
 | Accounts | `PgStore` in `brocanth-auth` (`postgres` feature) | `AuthStore` and friends | Another `AuthStore` impl. `MemoryStore` is for tests. |
 

@@ -89,7 +89,11 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`impersonate`](impersonate.md) | staff act as a customer, with a banner on every page, the operator on the session and an audit entry | Routes, Middleware, Enhancer |  |
 | [`policy`](policy.md) | typed predicates over an entity's columns; no ORM, no driver, no core | Middleware |  |
 | [`rls`](rls.md) | Postgres row-level security declared in Rust; `rls make` writes the migration | Enhancer |  |
-| [`storage`](storage.md) | uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3 | Enhancer, Middleware |  |
+| [`storage`](storage.md) | uploads addressed by content hash, in the project's object store: a disk, S3, GCS or Postgres | Enhancer, Middleware |  |
+| [`storage-fs`](storage-fs.md) | the object store is a directory on this machine's disk; the default | Enhancer | storage |
+| [`storage-db`](storage-db.md) | the object store is two tables in the project's Postgres database | Enhancer | storage |
+| [`storage-s3`](storage-s3.md) | the object store is an S3 bucket, or one on MinIO or R2; checked at start | Enhancer | storage |
+| [`storage-gcs`](storage-gcs.md) | the object store is a Google Cloud Storage bucket; checked at start | Enhancer | storage |
 | [`storage-routes`](storage-routes.md) | POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token | Middleware | storage |
 | [`storage-thumbnails`](storage-thumbnails.md) | ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders | Middleware | storage |
 | [`image`](image.md) | thumbnails converted on request (&fmt=webp), a pixel cap against decompression bombs, a srcset helper | Renderer |  |

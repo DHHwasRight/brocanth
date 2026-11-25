@@ -27,7 +27,7 @@
 //! | `deploy/migrate` | warning | a module's `migrate` is true, or unset where the module contributed the check (it defaults to true) |
 //! | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
 //! | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
-//! | `deploy/storage-local` | warning | the project has `storage` and no `db`, so its files are on one machine's disk |
+//! | `deploy/storage-local` | warning | the object store is `storage-fs` (or, before the Kind, `storage` with no `db`), so its files are on one machine's disk |
 //! | `deploy/csrf-off` | error | `[bindings]` binds `SessionCookie` and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
@@ -690,13 +690,22 @@ fn deploy(
     }
     out.extend(migrate(project, &file, config, checks));
     out.extend(observability(project, config, &file));
-    if project.has("storage") && !project.binds("PgPool") {
+    // `storage-fs` is the object store, or a project from before the
+    // `ObjectStore` Kind has `storage` with no pool to keep the files in.
+    let on_disk = project.has("storage-fs")
+        || (project.has("storage")
+            && !project.recorded("ObjectStore")
+            && !["storage-db", "storage-s3", "storage-gcs"]
+                .iter()
+                .any(|k| project.has(k))
+            && !project.binds("PgPool"));
+    if on_disk {
         let mut d = Finding::warning(
             "deploy/storage-local",
             "file storage is a directory on this machine's disk",
         )
         .note("a second instance does not see the files the first one stored, and a new machine has none")
-        .help("add the `db` module so the files live in Postgres, or run one instance on a disk that outlives it");
+        .help("`brocanth add storage-s3` (or `storage-gcs`, `storage-db`) so every instance sees the files, or run one instance on a disk that outlives it");
         if let Some(v) = get(config, "storage.root") {
             d = d.at(place(project, v));
         }
@@ -1015,6 +1024,22 @@ secret = "development only: replace before anything is uploaded in anger"
         assert!(ids(&local).contains(&"deploy/storage-local"));
         let db = deploy(&project(&["storage", "db"]), &config, &src, &|_| None, &[]);
         assert!(!ids(&db).contains(&"deploy/storage-local"));
+        // With the `ObjectStore` Kind the backend is a module of its own,
+        // and only the directory is one machine's.
+        for (picks, local) in [
+            (&["storage", "storage-fs"][..], true),
+            (&["storage", "storage-fs", "db"][..], true),
+            (&["storage", "storage-s3"][..], false),
+            (&["storage", "storage-gcs"][..], false),
+            (&["storage", "storage-db", "db"][..], false),
+        ] {
+            let found = deploy(&project(picks), &config, &src, &|_| None, &[]);
+            assert_eq!(
+                ids(&found).contains(&"deploy/storage-local"),
+                local,
+                "{picks:?}"
+            );
+        }
     }
 
     #[test]

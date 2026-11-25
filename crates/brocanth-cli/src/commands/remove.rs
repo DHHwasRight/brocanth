@@ -122,6 +122,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
         .filter(|key| project.enabled.contains(key) && !removing.contains(key))
         .collect();
     still_needed(&after_picks, &removing)?;
+    // A backend-choice Kind left with no provider gets its default back:
+    // `added storage-fs: storage requires ObjectStore`.
+    let (after_picks, added) = crate::resolve::resolve(&after_picks, create::Door::Add)?;
     create::selection(&after_picks, create::Door::Add)?;
 
     let manifest_path = root.join("Cargo.toml");
@@ -146,6 +149,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     let after: BTreeMap<String, String> = create::scaffold(&after_answers)?.into_iter().collect();
 
     ui.heading("remove", removing.join(", "));
+    for line in &added {
+        ui.note(format!("  {}", line.line()));
+    }
 
     // A project from before `src/modules/`: its `src/flags.rs` moves into
     // the module files, those of the leaving modules included, which stay.
@@ -643,8 +649,10 @@ fn still_needed(stay: &[&'static str], removing: &[&'static str]) -> Result<(), 
                 .help(format!("brocanth remove {} {gone}", children.join(" "))),
             );
         }
-        // The provider of a Kind is not re-added here: `remove` takes out
-        // what it was told to, or refuses and says who still requires it.
+        // The provider of a Kind is not re-added here, except a Kind's
+        // default: `remove` takes out what it was told to, or refuses and
+        // says who still requires it. `orphaned_by` passes over a Kind
+        // whose default stays available, and the caller adds it back.
         let orphans = crate::resolve::orphaned_by(gone, stay);
         if !orphans.is_empty() {
             let names: Vec<&str> = orphans.iter().map(|(key, _, _)| *key).collect();

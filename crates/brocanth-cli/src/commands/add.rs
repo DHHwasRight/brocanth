@@ -149,6 +149,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         .into_iter()
         .filter(|key| project.enabled.contains(key) || adding.contains(key))
         .collect();
+    // A new backend replaces the one recorded for the same Kind, when the
+    // Kind is a backend choice: `replaced storage-fs: storage-s3 provides
+    // ObjectStore`.
+    let (after_picks, replaced) = crate::resolve::replace(&after_picks, &adding);
     // The provider of a Kind a new module requires comes with it, and is
     // said: `added db: jobs requires PgPool`.
     let (after_picks, added) = crate::resolve::resolve(&after_picks, create::Door::Add)?;
@@ -187,6 +191,9 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     )?;
 
     ui.heading("add", adding.join(", "));
+    for line in &replaced {
+        ui.note(format!("  {}", line.line()));
+    }
     for line in &added {
         ui.note(format!("  {}", line.line()));
     }
@@ -559,7 +566,7 @@ pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
         .help("add the list by hand -- `[modules]` then `enabled = [\"logging\", ..]` -- naming what `brocanth create` was asked for")]);
     };
 
-    let mut enabled = Vec::new();
+    let mut enabled: Vec<&'static str> = Vec::new();
     let mut unknown = Vec::new();
     for value in listed.iter() {
         let Some(key) = value.as_str() else { continue };
@@ -582,6 +589,9 @@ pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
             "install the brocanth that made this project, or the crate that module lives in",
         )]);
     }
+
+    // A project from before the `ObjectStore` Kind keeps its backend.
+    crate::resolve::upgrade_record(&mut enabled);
 
     let title = doc
         .get("project")

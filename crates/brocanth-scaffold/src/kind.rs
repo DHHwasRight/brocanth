@@ -153,6 +153,19 @@ kind!(
 );
 
 kind!(
+    /// The project's object store: where uploads live. A caller reads
+    /// `Arc<dyn brocanth_storage::Storage>` and never the backend below it:
+    /// a directory from `storage-fs` (the default), S3 from `storage-s3`,
+    /// Google Cloud Storage from `storage-gcs`, Postgres from `storage-db`
+    /// (`docs/object-storage.md`).
+    ObjectStore,
+    group = "storage",
+    runtime = "dyn brocanth_storage::Storage",
+    gist = "an object store",
+    One
+);
+
+kind!(
     /// The session cookie on each request. `sessions` gives an empty seam,
     /// `auth` a signed session. A project takes one: two session cookies
     /// are a bug, not a choice.

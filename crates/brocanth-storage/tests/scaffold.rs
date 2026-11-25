@@ -78,8 +78,39 @@ fn thumbnails_link_the_decoders_and_list_the_sizes() {
 
 /// With `db`: the objects live in Postgres, on the `db` pool.
 #[test]
+fn with_s3_the_objects_live_in_a_bucket() {
+    shape("storage-s3", &["config", "storage", "storage-s3"]);
+}
+
+#[test]
+fn with_gcs_the_objects_live_in_a_bucket() {
+    shape("storage-gcs", &["config", "storage", "storage-gcs"]);
+}
+
+/// No backend chosen: the resolver adds the default, `storage-fs`.
+#[test]
+fn with_no_backend_the_objects_live_on_the_disk() {
+    let modules: [&dyn brocanth_scaffold::Module; 1] = [&FileStorage];
+    let files = brocanth_cli::testing::generate("my-photos", &["storage"], &modules)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let toml = &files.iter().find(|(p, _)| p == "brocanth.toml").unwrap().1;
+    assert!(
+        toml.contains(
+            r#"ObjectStore = { provider = "storage-fs", why = "storage requires ObjectStore" }"#
+        ),
+        "{toml}"
+    );
+    let plugin = &files
+        .iter()
+        .find(|(p, _)| p == "src/plugins/storage/mod.rs")
+        .unwrap()
+        .1;
+    assert!(plugin.contains("LocalDisk::open"), "{plugin}");
+}
+
+#[test]
 fn with_db_the_objects_live_in_postgres() {
-    shape("storage-db", &["config", "db", "storage"]);
+    shape("storage-db", &["config", "db", "storage", "storage-db"]);
 }
 
 /// Without a config file: the settings are literals and flags.

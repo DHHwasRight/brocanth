@@ -639,7 +639,7 @@ pub mod page {
             .map(|r| {
                 (
                     r.kind.name,
-                    crate::resolve::single_provider(r.kind.name).unwrap_or("(provider)"),
+                    crate::resolve::addable_provider(r.kind.name).unwrap_or("(provider)"),
                 )
             })
             .collect();

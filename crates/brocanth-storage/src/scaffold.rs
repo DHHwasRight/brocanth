@@ -12,11 +12,17 @@
 //!
 //! # Where the objects live
 //!
-//! On a local disk under `[storage] root`, or, with `db`, in the `db`
-//! database on its pool ([`PgStorage`](crate::PgStorage)). The db pool opens
-//! at the `db` plugin's `before_start`, after the file routes are built, so
-//! the plugin publishes a [`Deferred`](crate::Deferred) store at `configure`
-//! and puts the Postgres store behind it at `before_start`.
+//! In the project's object store, the module bound to the `ObjectStore`
+//! Kind (`docs/object-storage.md`): `storage-fs`, a directory under
+//! `[storage] root` and the default; `storage-s3` and `storage-gcs`, a
+//! bucket ([`CloudBucket`](crate::cloud) behind
+//! [`ObjectStorage`](crate::ObjectStorage)); `storage-db`, the `db`
+//! database on its pool ([`PgStorage`](crate::PgStorage)). The backend
+//! modules write no file: this one writes the open code for the bound one.
+//! The db pool opens at the `db` plugin's `before_start`, after the file
+//! routes are built, so the plugin publishes a
+//! [`Deferred`](crate::Deferred) store at `configure` and puts the Postgres
+//! store behind it at `before_start`.
 //!
 //! # What it does not write
 //!
@@ -39,14 +45,42 @@ use brocanth_scaffold::snippet::{
     configurable, configurable_hooking, module_ref, redact_secrets, settings_derive, Hooking,
 };
 use brocanth_scaffold::{
-    AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, MountRole, Opt, PgPool,
-    Project, Scaffold, Setting, Slot,
+    AgentsSection, Category, Contribution, Dep, Hook, Manifest, Module, MountRole, ObjectStore,
+    Opt, PgPool, Project, Scaffold, Setting, Slot,
 };
 
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
 /// its first words, and the generated plugin refuses it outside
 /// development.
 const DEVELOPMENT_SECRET: &str = "development only: replace before anything is uploaded in anger";
+
+/// Which backend holds the objects: the module bound to `ObjectStore`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backend {
+    Fs,
+    Db,
+    S3,
+    Gcs,
+}
+
+impl Backend {
+    /// The provider of `ObjectStore` in `project`. All four are this
+    /// crate's own modules, so the branch stays inside one crate
+    /// (`docs/module-capabilities.md` §9). An unresolved selection, which
+    /// only a test builds, writes the disk store.
+    fn of(project: &Project) -> Self {
+        match project.provider::<ObjectStore>() {
+            Some("storage-db") => Self::Db,
+            Some("storage-s3") => Self::S3,
+            Some("storage-gcs") => Self::Gcs,
+            _ => Self::Fs,
+        }
+    }
+
+    fn cloud(self) -> bool {
+        matches!(self, Self::S3 | Self::Gcs)
+    }
+}
 
 /// File storage, as a choice on the `brocanth create` menu.
 ///
@@ -58,19 +92,19 @@ impl Module for FileStorage {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             "storage",
-            "uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3",
+            "uploads addressed by content hash, in the project's object store: a disk, S3, GCS or Postgres",
         )
-        .tables(&["brocanth_object_variants", "brocanth_objects"])
         .category(Category::Enhancer)
         .category(Category::Middleware)
-        .uses::<PgPool>(
-            "the objects live in the `db` database, on its pool, and not on one machine's disk",
+        .requires::<ObjectStore>(
+            "the files live in the project's object store; with none chosen, a directory on this machine",
         )
-        .asked_in(
-            "data",
-            "Uploads on disk or in Postgres, addressed by content hash",
+        .contributes::<AgentsSection>(
+            Contribution::new("storage", "where the files live, and how code reaches them"),
+            true,
         )
-        .krate(Dep::brocanth("brocanth-storage").feature_with("db", "postgres"))
+        .asked_in("data", "Uploads, addressed by content hash")
+        .krate(Dep::brocanth("brocanth-storage"))
         .absent(
             "brocanth-storage",
             "no file storage; an upload has nowhere to go and no address to be read back from",
@@ -78,10 +112,10 @@ impl Module for FileStorage {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let db = project.provider::<PgPool>().is_some();
+        let backend = Backend::of(project);
         s.file(
             "src/plugins/storage/mod.rs",
-            redact_secrets(&plugin_rs(project, db), &settings(db)),
+            redact_secrets(&plugin_rs(project, backend), &settings(backend)),
         );
         s.at(Slot::PluginsMod).line("pub mod storage;");
         // What makes the store a thing the project reads rather than a
@@ -95,21 +129,149 @@ impl Module for FileStorage {
             \x20   crate::plugins::say!(info, \"storage: ready, download links last {ttl}s\"; ttl);"
                 .to_string(),
         );
-        configurable(s, project, "storage", "Files", settings(db));
+        configurable(s, project, "storage", "Files", settings(backend));
+        s.at(Slot::AgentsSections).block(agents(backend));
         // No `.gitignore` line: `LocalDisk::open` writes one holding `*` into
         // the root, so the rule moves when `root` does.
     }
 }
 
+/// `storage-fs`: the objects in a directory. The default `ObjectStore`.
+///
+/// It writes no file: `storage` writes `LocalDisk` into its own plugin
+/// when this module is bound. One machine's disk fits one binary with
+/// embedded Postgres; a second instance does not see the files, and
+/// `brocanth check --deploy` says so.
+pub struct StorageFs;
+
+impl Module for StorageFs {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "storage-fs",
+            "the object store is a directory on this machine's disk; the default",
+        )
+        .category(Category::Enhancer)
+        .part_of_but_off("storage")
+        .because("it is where the parent's files live; the parent writes the code that opens it")
+        .provides::<ObjectStore>("objects in a directory under `[storage] root`")
+        .default_for::<ObjectStore>()
+        .asked_in("data", "Uploads on this machine's disk")
+        .krate(Dep::brocanth("brocanth-storage"))
+    }
+
+    fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
+}
+
+/// `storage-db`: the objects in Postgres, in `bytea` columns, on the `db`
+/// pool. What `storage` with `db` wrote before the `ObjectStore` Kind.
+pub struct StorageDb;
+
+impl Module for StorageDb {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "storage-db",
+            "the object store is two tables in the project's Postgres database",
+        )
+        .tables(&["brocanth_object_variants", "brocanth_objects"])
+        .category(Category::Enhancer)
+        .part_of_but_off("storage")
+        .because("it is where the parent's files live; the parent writes the code that opens it")
+        .provides::<ObjectStore>("objects in `bytea` columns, on the `db` pool")
+        .requires::<PgPool>(
+            "the objects live in the `db` database, on its pool, and not on one machine's disk",
+        )
+        .asked_in("data", "Uploads in Postgres")
+        .krate(Dep::brocanth("brocanth-storage").feature("postgres"))
+    }
+
+    fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
+}
+
+/// `storage-s3`: the objects in an S3 bucket, or an S3-compatible one
+/// (MinIO, R2).
+pub struct StorageS3;
+
+impl Module for StorageS3 {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "storage-s3",
+            "the object store is an S3 bucket, or one on MinIO or R2; checked at start",
+        )
+        .category(Category::Enhancer)
+        .part_of_but_off("storage")
+        .because("it is where the parent's files live; the parent writes the code that opens it")
+        .provides::<ObjectStore>("objects in an S3 bucket, under `[storage] prefix`")
+        .asked_in("data", "Uploads in an S3 bucket (or MinIO, R2)")
+        .krate(Dep::brocanth("brocanth-storage").feature("s3"))
+    }
+
+    fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
+}
+
+/// `storage-gcs`: the objects in a Google Cloud Storage bucket.
+pub struct StorageGcs;
+
+impl Module for StorageGcs {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "storage-gcs",
+            "the object store is a Google Cloud Storage bucket; checked at start",
+        )
+        .category(Category::Enhancer)
+        .part_of_but_off("storage")
+        .because("it is where the parent's files live; the parent writes the code that opens it")
+        .provides::<ObjectStore>("objects in a GCS bucket, under `[storage] prefix`")
+        .asked_in("data", "Uploads in a Google Cloud Storage bucket")
+        .krate(Dep::brocanth("brocanth-storage").feature("gcs"))
+    }
+
+    fn contribute(&self, _project: &Project, _s: &mut Scaffold) {}
+}
+
+/// The `AGENTS.md` section: one store, behind the trait, and the module
+/// that moves it.
+fn agents(backend: Backend) -> String {
+    let (here, next) = match backend {
+        Backend::Fs => (
+            "a directory on this machine\n(`storage-fs`, `[storage] root`)",
+            "`brocanth add storage-s3` (or `storage-gcs`,\n`storage-db`) moves new uploads",
+        ),
+        Backend::Db => (
+            "Postgres, on the `db` pool\n(`storage-db`)",
+            "`brocanth add storage-s3` (or `storage-gcs`)\nmoves new uploads to a bucket",
+        ),
+        Backend::S3 => (
+            "an S3 bucket\n(`storage-s3`, `[storage] bucket`)",
+            "`brocanth remove storage-s3` returns to\na directory",
+        ),
+        Backend::Gcs => (
+            "a Google Cloud Storage bucket\n(`storage-gcs`, `[storage] bucket`)",
+            "`brocanth remove storage-gcs` returns to\na directory",
+        ),
+    };
+    format!(
+        "\n## Files\n\
+         \n\
+         Uploads live in {here}.\n\
+         {next}.\n\
+         Code reaches them through `FileStore::store`, an `Arc<dyn Storage>`:\n\
+         never name `LocalDisk`, `PgStorage` or `CloudBucket` outside\n\
+         `src/plugins/storage/mod.rs`. Keep the address (`key.to_hex()`) on your\n\
+         record. A signed URL or a file token is a bearer credential: mint one\n\
+         only after your policy allowed the read. Secrets come from\n\
+         `--storage.<key>_file`, never a flag.\n"
+    )
+}
+
 /// The `[storage]` settings: where the objects live, the one secret, and the
 /// token's life.
 ///
-/// The secret has no flag. A flag is in `ps` output for every user on the
-/// host, and this one mints download links for every object.
-fn settings(db: bool) -> Vec<Setting> {
+/// The secrets have no flag. A flag is in `ps` output for every user on the
+/// host; `--storage.<key>_file` and `--storage.<key>_env` read them instead.
+fn settings(backend: Backend) -> Vec<Setting> {
     let mut out = Vec::new();
-    if db {
-        out.push(
+    match backend {
+        Backend::Db => out.push(
             Setting::bool(
                 "migrate",
                 true,
@@ -119,15 +281,86 @@ fn settings(db: bool) -> Vec<Setting> {
                 "Development only: see `PgStorage::migrate` and `brocanth_storage::postgres::sql`\n\
                  for the statements to put in a migration instead.",
             ),
-        );
-    } else {
-        out.push(
+        ),
+        Backend::Fs => out.push(
             Setting::text("root", "var/uploads", "Where uploads are stored.").note(
                 "Created with a `.gitignore` that holds `*`, so an upload is never source.\n\
                  It is one machine's disk: a second instance does not see these files. Add\n\
-                 the `db` module and the files live in Postgres instead.",
+                 `storage-s3`, `storage-gcs` or `storage-db` and the files live there instead.",
             ),
+        ),
+        Backend::S3 => {
+            out.push(
+                Setting::text("bucket", "uploads", "The S3 bucket.")
+                    .note("It must exist: the start checks it before the server listens."),
+            );
+            out.push(Setting::text(
+                "region",
+                "us-east-1",
+                "The bucket's region. R2 takes `auto`.",
+            ));
+            out.push(
+                Setting::text("endpoint", "", "An S3-compatible server's URL.").note(
+                    "MinIO, R2: such as \"http://localhost:9000\". Empty means AWS. An http:// URL\n\
+                     allows plain HTTP.",
+                ),
+            );
+            out.push(Setting::bool(
+                "path_style",
+                true,
+                "Path-style requests (endpoint/bucket/key), which MinIO wants.",
+            ));
+            out.push(
+                Setting::text("access_key_id", "", "The access key.").note(
+                    "Empty, with an empty secret_access_key: the AWS credential chain answers\n\
+                     (the AWS_* variables, a web identity token, the instance role).",
+                ),
+            );
+            out.push(
+                Setting::text("secret_access_key", "", "The secret key.")
+                    .note("No flag: read it with --storage.secret_access_key_file=PATH.")
+                    .secret(),
+            );
+        }
+        Backend::Gcs => {
+            out.push(
+                Setting::text("bucket", "uploads", "The GCS bucket.")
+                    .note("It must exist: the start checks it before the server listens."),
+            );
+            out.push(
+                Setting::text("credentials", "", "A service-account key, as JSON.")
+                    .note(
+                        "No flag: read it with --storage.credentials_file=PATH. Empty: the\n\
+                         application default credentials (workload identity, the metadata server).",
+                    )
+                    .secret(),
+            );
+            out.push(Setting::text(
+                "endpoint",
+                "",
+                "An emulator's URL, such as \"http://localhost:4443\". Empty means Google.",
+            ));
+        }
+    }
+    if backend.cloud() {
+        out.push(Setting::text(
+            "prefix",
+            "",
+            "A folder inside the bucket, so two applications share one.",
+        ));
+        out.push(
+            Setting::bool(
+                "probe",
+                true,
+                "Check the bucket and the credentials before the server listens.",
+            )
+            .note("Off for a start with no network; the first upload then finds the problem."),
         );
+        out.push(Setting::integer(
+            "max_object_bytes",
+            67_108_864,
+            "The largest object stored, in bytes.",
+        ));
     }
     out.push(
         Setting::text(
@@ -153,36 +386,73 @@ fn settings(db: bool) -> Vec<Setting> {
     out
 }
 
-fn plugin_rs(project: &Project, db: bool) -> String {
+fn plugin_rs(project: &Project, backend: Backend) -> String {
     let (derive, note) = settings_derive(project, "storage");
-    let pick = |local: &'static str, on_db: &'static str| if db { on_db } else { local };
+    // Each part: the disk, Postgres, S3, GCS.
+    let pick = |parts: [&'static str; 4]| match backend {
+        Backend::Fs => parts[0],
+        Backend::Db => parts[1],
+        Backend::S3 => parts[2],
+        Backend::Gcs => parts[3],
+    };
     PLUGIN_RS
         .replace("@NOTE@", &note)
         .replace("@DERIVE@", &derive)
         .replace("@SECRET@", DEVELOPMENT_SECRET)
-        .replace("@WHERE@", pick(WHERE_LOCAL, WHERE_DB))
-        .replace("@STD_USES@", pick(STD_USES_LOCAL, STD_USES_DB))
-        .replace("@STORAGE_ITEMS@", pick(ITEMS_LOCAL, ITEMS_DB))
-        .replace("@FIELDS@", pick(FIELDS_LOCAL, FIELDS_DB))
-        .replace("@DEFAULTS@", pick(DEFAULTS_LOCAL, DEFAULTS_DB))
-        .replace("@PLUGIN_FIELD@", pick("", PLUGIN_FIELD_DB))
-        .replace("@PLUGIN_NONE@", pick("", PLUGIN_NONE_DB))
-        .replace("@ROOT_CHECK@", pick(ROOT_CHECK, ""))
-        .replace("@OPEN@", pick(OPEN_LOCAL, OPEN_DB))
-        .replace("@KEEP@", pick("", KEEP_DB))
-        .replace("@BEFORE_START@", pick("", BEFORE_START_DB))
+        .replace(
+            "@WHERE@",
+            pick([WHERE_LOCAL, WHERE_DB, WHERE_S3, WHERE_GCS]),
+        )
+        .replace(
+            "@STD_USES@",
+            pick([STD_USES_LOCAL, STD_USES_DB, STD_USES_LOCAL, STD_USES_LOCAL]),
+        )
+        .replace(
+            "@STORAGE_ITEMS@",
+            pick([ITEMS_LOCAL, ITEMS_DB, ITEMS_CLOUD, ITEMS_CLOUD]),
+        )
+        .replace("@CLOUD_USE@", pick(["", "", CLOUD_USE_S3, CLOUD_USE_GCS]))
+        .replace(
+            "@FIELDS@",
+            pick([FIELDS_LOCAL, FIELDS_DB, FIELDS_S3, FIELDS_GCS]),
+        )
+        .replace(
+            "@DEFAULTS@",
+            pick([DEFAULTS_LOCAL, DEFAULTS_DB, DEFAULTS_S3, DEFAULTS_GCS]),
+        )
+        .replace("@HELPERS@", pick(["", "", HELPERS_CLOUD, HELPERS_CLOUD]))
+        .replace("@PLUGIN_FIELD@", pick(["", PLUGIN_FIELD_DB, "", ""]))
+        .replace("@PLUGIN_NONE@", pick(["", PLUGIN_NONE_DB, "", ""]))
+        .replace("@ROOT_CHECK@", pick([ROOT_CHECK, "", "", ""]))
+        .replace("@OPEN@", pick([OPEN_LOCAL, OPEN_DB, OPEN_S3, OPEN_GCS]))
+        .replace("@KEEP@", pick(["", KEEP_DB, "", ""]))
+        .replace("@BEFORE_START@", pick(["", BEFORE_START_DB, "", ""]))
 }
 
 const WHERE_LOCAL: &str = "\
 //! The objects live under `root`, on this machine's disk. A second instance
-//! does not see them, and `brocanth check --deploy` says so: add the `db`
-//! module and they live in Postgres instead.
+//! does not see them, and `brocanth check --deploy` says so: add the
+//! `storage-s3`, `storage-gcs` or `storage-db` module and they live there.
 ";
 
 const WHERE_DB: &str = "\
 //! The objects live in the `db` database, in `bytea` columns, on the `db`
 //! plugin's pool: every instance sees every file, and a backup of the
 //! database holds them.
+";
+
+const WHERE_S3: &str = "\
+//! The objects live in an S3 bucket, or one on MinIO or R2, under `prefix`:
+//! every instance sees every file. The bucket and the credentials are
+//! checked before the server listens; `probe = false` skips that for a
+//! start with no network.
+";
+
+const WHERE_GCS: &str = "\
+//! The objects live in a Google Cloud Storage bucket, under `prefix`: every
+//! instance sees every file. The bucket and the credentials are checked
+//! before the server listens; `probe = false` skips that for a start with
+//! no network.
 ";
 
 const STD_USES_LOCAL: &str = "use std::sync::Arc;\n";
@@ -195,6 +465,12 @@ const ITEMS_LOCAL: &str = "FileTokenKey, FileTokens, HashKey, LocalDisk, Storage
 const ITEMS_DB: &str =
     "\n    Deferred, FileTokenKey, FileTokens, HashKey, ObjectKey, PgStorage, Storage,\n";
 
+const ITEMS_CLOUD: &str = "FileTokenKey, FileTokens, HashKey, ObjectStorage, Storage";
+
+const CLOUD_USE_S3: &str = "use brocanth_storage::cloud::{CloudBucket, S3Config};\n";
+
+const CLOUD_USE_GCS: &str = "use brocanth_storage::cloud::{CloudBucket, GcsConfig};\n";
+
 const FIELDS_LOCAL: &str =
     "    /// Where the objects live, relative to the working directory or absolute.
     /// Created if it is not there.
@@ -205,9 +481,70 @@ const FIELDS_DB: &str = "    /// Create the two storage tables at startup if the
     pub migrate: bool,
 ";
 
+const FIELDS_S3: &str = "    /// The S3 bucket.
+    pub bucket: String,
+    /// The bucket's region. R2 takes `auto`.
+    pub region: String,
+    /// An S3-compatible server's URL (MinIO, R2). Empty means AWS.
+    pub endpoint: String,
+    /// Path-style requests, which MinIO wants.
+    pub path_style: bool,
+    /// The access key. Empty, with the secret: the AWS credential chain.
+    pub access_key_id: String,
+    /// The secret key. No flag: `--storage.secret_access_key_file`.
+    pub secret_access_key: String,
+    /// A folder inside the bucket.
+    pub prefix: String,
+    /// Check the bucket and the credentials before the server listens.
+    pub probe: bool,
+    /// The largest object stored, in bytes.
+    pub max_object_bytes: u64,
+";
+
+const FIELDS_GCS: &str = "    /// The GCS bucket.
+    pub bucket: String,
+    /// A service-account key, as JSON. Empty: application default
+    /// credentials. No flag: `--storage.credentials_file`.
+    pub credentials: String,
+    /// An emulator's URL. Empty means Google.
+    pub endpoint: String,
+    /// A folder inside the bucket.
+    pub prefix: String,
+    /// Check the bucket and the credentials before the server listens.
+    pub probe: bool,
+    /// The largest object stored, in bytes.
+    pub max_object_bytes: u64,
+";
+
 const DEFAULTS_LOCAL: &str = "            root: \"var/uploads\".to_string(),\n";
 
 const DEFAULTS_DB: &str = "            migrate: true,\n";
+
+const DEFAULTS_S3: &str = "            bucket: \"uploads\".to_string(),
+            region: \"us-east-1\".to_string(),
+            endpoint: String::new(),
+            path_style: true,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            prefix: String::new(),
+            probe: true,
+            max_object_bytes: 67_108_864,
+";
+
+const DEFAULTS_GCS: &str = "            bucket: \"uploads\".to_string(),
+            credentials: String::new(),
+            endpoint: String::new(),
+            prefix: String::new(),
+            probe: true,
+            max_object_bytes: 67_108_864,
+";
+
+const HELPERS_CLOUD: &str = "
+/// A setting as an option: empty means none.
+fn set(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+";
 
 const PLUGIN_FIELD_DB: &str =
     "    /// The store the routes hold; the Postgres store goes behind it at\n    /// `before_start`, once the `db` pool is open.\n    deferred: Option<Deferred>,\n";
@@ -242,6 +579,71 @@ const OPEN_DB: &str = r#"        // The `db` pool opens at the `db` plugin's `be
         // `before_start` below puts the Postgres store behind it.
         let deferred = Deferred::new();
         let store: Arc<dyn Storage> = Arc::new(deferred.clone());
+"#;
+
+const OPEN_S3: &str = r#"        // Builds the client and sends nothing: a missing bucket or a bad
+        // endpoint stops the start here, and the bucket and the
+        // credentials are checked before the server listens, below.
+        let bucket = CloudBucket::s3(&S3Config {
+            bucket: self.settings.bucket.clone(),
+            region: self.settings.region.clone(),
+            endpoint: set(&self.settings.endpoint),
+            path_style: self.settings.path_style,
+            access_key_id: set(&self.settings.access_key_id),
+            secret_access_key: set(&self.settings.secret_access_key),
+            prefix: set(&self.settings.prefix),
+        })
+        .map_err(|e| PluginError::new(e.to_string()))?;
+        let objects = ObjectStorage::new(Arc::new(bucket))
+            .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()))
+            .with_max_object_bytes(self.settings.max_object_bytes);
+        // `serve` awaits this once before it listens, so a bucket that is
+        // not there or a key it refuses stops the start with a `help:` line.
+        if self.settings.probe {
+            let probe = objects.clone();
+            lc.ready_when(move || {
+                let probe = probe.clone();
+                // The check's report names the plugin already.
+                async move {
+                    probe.probe().await.map_err(|e| {
+                        let said = e.to_string();
+                        said.strip_prefix("[storage] ").unwrap_or(&said).to_string()
+                    })
+                }
+            });
+        }
+        let store: Arc<dyn Storage> = Arc::new(objects);
+"#;
+
+const OPEN_GCS: &str = r#"        // Builds the client and sends nothing: a missing bucket or a key
+        // that is not JSON stops the start here, and the bucket and the
+        // credentials are checked before the server listens, below.
+        let bucket = CloudBucket::gcs(&GcsConfig {
+            bucket: self.settings.bucket.clone(),
+            credentials: set(&self.settings.credentials),
+            endpoint: set(&self.settings.endpoint),
+            prefix: set(&self.settings.prefix),
+        })
+        .map_err(|e| PluginError::new(e.to_string()))?;
+        let objects = ObjectStorage::new(Arc::new(bucket))
+            .with_hash_key(HashKey::from_secret(self.settings.secret.as_bytes()))
+            .with_max_object_bytes(self.settings.max_object_bytes);
+        // `serve` awaits this once before it listens, so a bucket that is
+        // not there or a key it refuses stops the start with a `help:` line.
+        if self.settings.probe {
+            let probe = objects.clone();
+            lc.ready_when(move || {
+                let probe = probe.clone();
+                // The check's report names the plugin already.
+                async move {
+                    probe.probe().await.map_err(|e| {
+                        let said = e.to_string();
+                        said.strip_prefix("[storage] ").unwrap_or(&said).to_string()
+                    })
+                }
+            });
+        }
+        let store: Arc<dyn Storage> = Arc::new(objects);
 "#;
 
 const KEEP_DB: &str = "        self.deferred = Some(deferred);\n";
@@ -361,7 +763,7 @@ const PLUGIN_RS: &str = r##"//! File storage, as this application registers it.
 @STD_USES@
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::{ContextBuilder, ContextItem, ProvidesContext};
-use brocanth_storage::{@STORAGE_ITEMS@};
+@CLOUD_USE@use brocanth_storage::{@STORAGE_ITEMS@};
 
 /// What this plugin is built from.
 ///
@@ -387,7 +789,7 @@ impl Default for Settings {
 
 /// The scaffold's secret, which the repository shows to anybody.
 const DEVELOPMENT_SECRET: &str = "@SECRET@";
-
+@HELPERS@
 /// Whether this process runs in development or a test: `$<APP>_ENV` unset,
 /// `development` or `test`. The variable the config plugin reads too.
 fn development() -> bool {
