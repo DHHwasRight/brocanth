@@ -254,7 +254,10 @@ fn wire_source(_ctx: &Ctx) -> SharedData {
 /// The wire's data side with `admin-model`: the admin's models over the
 /// ORM, compiled a second time from the admin's own file.
 const WIRE_SOURCE_ORM: &str = r#"/// The admin's models, compiled a second time from the admin's own file,
-/// as `src/bin/backoffice.rs` compiles the application.
+/// as `src/bin/backoffice.rs` compiles the application. The admin keeps its
+/// own `mod models` private, so this is a second copy of one list, not a
+/// second list (docs/backoffice.md §7.5, W9).
+#[allow(clippy::duplicate_mod)]
 #[path = "../admin/models.rs"]
 mod models;
 
@@ -587,7 +590,10 @@ mod tests {
         let built = brocanth::plugin_app::AppBuilder::new()
             .plugin(super::Backoffice::new(settings))
             .build();
-        let error = built.err().expect("no secret").to_string();
+        let Err(error) = built else {
+            panic!("the wire without a secret must not build");
+        };
+        let error = error.to_string();
         assert!(error.contains("service_secret_file"), "{error}");
     }
 

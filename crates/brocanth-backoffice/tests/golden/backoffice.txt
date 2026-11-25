@@ -3355,7 +3355,10 @@ mod tests {
         let built = brocanth::plugin_app::AppBuilder::new()
             .plugin(super::Backoffice::new(settings))
             .build();
-        let error = built.err().expect("no secret").to_string();
+        let Err(error) = built else {
+            panic!("the wire without a secret must not build");
+        };
+        let error = error.to_string();
         assert!(error.contains("service_secret_file"), "{error}");
     }
 
