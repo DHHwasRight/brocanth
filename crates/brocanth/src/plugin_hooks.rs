@@ -1010,21 +1010,53 @@ pub struct Pipeline {
     error: Vec<Box<dyn ErrorHook>>,
     /// The hooks `hooks_off` dropped, as (instance, hook name).
     skipped: Vec<(&'static str, &'static str)>,
+    /// The qualified name of each installed hook, chain by chain, in the
+    /// order the chain runs them.
+    names: HookNames,
+}
+
+/// The qualified names of the installed hooks (`instance.hook`), one list
+/// per chain, each in the order its chain runs.
+///
+/// For a report: the routes command, a development panel. A name here is a
+/// hook that runs for every request its chain reaches, unless an earlier
+/// request hook answered.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HookNames {
+    /// The request hooks, sync and async, in declared order.
+    pub request: Vec<String>,
+    /// The response hooks.
+    pub response: Vec<String>,
+    /// The error hooks.
+    pub error: Vec<String>,
 }
 
 impl Pipeline {
     pub(crate) fn from_parts(
-        request: Vec<RequestStep>,
-        response: Vec<Box<dyn ResponseHook>>,
-        error: Vec<Box<dyn ErrorHook>>,
+        request: Vec<(String, RequestStep)>,
+        response: Vec<(String, Box<dyn ResponseHook>)>,
+        error: Vec<(String, Box<dyn ErrorHook>)>,
         skipped: Vec<(&'static str, &'static str)>,
     ) -> Self {
+        let (request_names, request) = request.into_iter().unzip();
+        let (response_names, response) = response.into_iter().unzip();
+        let (error_names, error) = error.into_iter().unzip();
         Self {
             request,
             response,
             error,
             skipped,
+            names: HookNames {
+                request: request_names,
+                response: response_names,
+                error: error_names,
+            },
         }
+    }
+
+    /// The qualified name of every installed hook, per chain, in run order.
+    pub fn hook_names(&self) -> &HookNames {
+        &self.names
     }
 
     /// The hooks that the application turned off with

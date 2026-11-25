@@ -59,6 +59,13 @@ impl Orm {
         ))
     }
 
+    /// The same ORM with `probe` counting every statement it issues: what
+    /// the `debug-toolbar` module installs in development.
+    pub fn probed(mut self, probe: &crate::Probe) -> Orm {
+        probe.install(&mut self.0);
+        self
+    }
+
     /// The SeaORM connection, for a call that takes `&C: ConnectionTrait`.
     pub fn connection(&self) -> &DatabaseConnection {
         &self.0

@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 88 modules. Each name links to its own page
+what to build next. There are 90 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -23,10 +23,12 @@ nothing holds this page.
 
 ## The modules
 
-### Middleware (24)
+### Middleware (26)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`debug`](modules/debug.md) | Development tools, refused by `check --deploy`; pick them below |  |  |  | development only |
+| [`debug-toolbar`](modules/debug-toolbar.md) | A panel on each HTML page in a debug build: timing, SQL statements, hooks, settings |  |  | part of `debug`, ticked with its parent | development only; inert in a release build |
 | [`analytics`](modules/analytics.md) | Page views counted on the server: no cookie, no script, no third party; rows in your Postgres |  |  | needs `db`: the views are rows in the database the `db` module opens |  |
 | [`audit`](modules/audit.md) | Change history: who changed which row, when, and what; rows in your Postgres | Enhancer |  | needs `db`: the history is rows in the database the `db` module opens; `model`: it records the changes the model layer publishes |  |
 | [`auth`](modules/auth.md) | Argon2id accounts and signed sessions; no provider, so no HTTP client | Enhancer |  |  |  |

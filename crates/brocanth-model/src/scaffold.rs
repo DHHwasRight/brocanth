@@ -35,6 +35,10 @@ impl Module for Model {
             "the ORM runs over the pool the `db` plugin opens, and without `db` there is none",
         )
         .adapts_to("commands", "a `migrate` subcommand is written")
+        .adapts_to(
+            "debug-toolbar",
+            "the ORM reports each statement to the toolbar's probe, in a debug build",
+        )
         .asked_in("data", "An ORM with validations and migrations")
         // Postgres, the default driver: the pool it wraps is `brocanth-db`'s,
         // and that is Postgres. `db` builds `Orm` from a `Db`; `plugin`
@@ -112,6 +116,29 @@ impl Ctx {
 "#;
 
 fn plugin_rs(project: &Project) -> String {
+    let probed = if project.has("debug-toolbar") {
+        PROBED
+    } else {
+        ""
+    };
+    plugin_rs_text(project).replacen(
+        "        // For another plugin: `lc.require_service::<Orm>()`.\n",
+        &format!("{probed}        // For another plugin: `lc.require_service::<Orm>()`.\n"),
+        1,
+    )
+}
+
+/// With `debug-toolbar`: the toolbar registered its statement probe as a
+/// service, in a debug build only, and the ORM reports to it.
+const PROBED: &str = "        // The development panel counts this connection's statements. Its
+        // probe is a service only in a debug build.
+        let orm = match lc.services().get::<brocanth_model::Probe>() {
+            Some(probe) => orm.probed(probe),
+            None => orm,
+        };
+";
+
+fn plugin_rs_text(project: &Project) -> String {
     let (derive, note) = settings_derive(project, "model");
     // An empty struct has nothing to default by hand, so `Default` joins the
     // derive: one attribute, as rustfmt would merge two.

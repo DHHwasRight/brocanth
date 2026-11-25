@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 88. For all
+One page per module that `brocanth create` offers. There are 90. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -139,6 +139,8 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`humanize`](humanize.md) | readable values for a page: "3 minutes ago", 1.5 MB, 2nd, 1,234; no dependency | Renderer |  |
 | [`meta`](meta.md) | a title, a description, a canonical URL and Open Graph tags for each page | Renderer, Enhancer |  |
 | [`errors`](errors.md) | HTML 404 and 500 pages in your layouts, the cause in a debug build, a reporter hook | Renderer, Middleware |  |
+| [`debug`](debug.md) | development tools, refused by `check --deploy`; pick them below | Middleware |  |
+| [`debug-toolbar`](debug-toolbar.md) | a panel on each HTML page in a debug build: timing, SQL statements, hooks, settings | Middleware | debug |
 | [`docker`](docker.md) | a cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up | External |  |
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |

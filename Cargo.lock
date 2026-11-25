@@ -947,6 +947,7 @@ dependencies = [
  "brocanth-config",
  "brocanth-content",
  "brocanth-db",
+ "brocanth-debug",
  "brocanth-errors",
  "brocanth-filters",
  "brocanth-flags",
@@ -1071,6 +1072,20 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "brocanth-debug"
+version = "0.1.0"
+dependencies = [
+ "brocanth",
+ "brocanth-cli",
+ "brocanth-debug",
+ "brocanth-model",
+ "brocanth-scaffold",
+ "brocanth-test",
+ "http",
+ "serde",
 ]
 
 [[package]]

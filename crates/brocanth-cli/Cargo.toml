@@ -62,6 +62,7 @@ brocanth-openapi = { path = "../brocanth-openapi", version = "0.1.0", default-fe
 brocanth-robots = { workspace = true, features = ["scaffold"] }
 brocanth-sanitize = { path = "../brocanth-sanitize", version = "0.1.0", default-features = false, features = ["scaffold"] }
 brocanth-humanize = { path = "../brocanth-humanize", version = "0.1.0", default-features = false, features = ["scaffold"] }
+brocanth-debug = { workspace = true, features = ["scaffold"] }
 brocanth-markdown = { workspace = true, features = ["scaffold"] }
 brocanth-content = { workspace = true, features = ["scaffold"] }
 # Lists: one paginator.
@@ -158,5 +159,6 @@ brocanth-analytics = { workspace = true, features = ["runtime"] }
 brocanth-audit = { workspace = true, features = ["runtime"] }
 brocanth-errors = { workspace = true, features = ["runtime"] }
 brocanth-gtag = { workspace = true, features = ["runtime"] }
+brocanth-debug = { workspace = true, features = ["runtime"] }
 brocanth-i18n = { workspace = true, features = ["plugin"] }
 brocanth-middleware = { workspace = true, features = ["compression"] }

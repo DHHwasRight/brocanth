@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/model.rs`. A setting is read at r
 | Provides | none |
 | Requires | `PgPool` (a Postgres pool): the ORM runs over the pool the `db` plugin opens, and without `db` there is none; providers: [`db`](db.md) |
 | Uses | none |
-| Adapts to | [`commands`](commands.md): a `migrate` subcommand is written |
+| Adapts to | [`commands`](commands.md): a `migrate` subcommand is written; [`debug-toolbar`](debug-toolbar.md): the ORM reports each statement to the toolbar's probe, in a debug build |
 | Contributes | none |
 | Collects | none |
 | Exports | none |

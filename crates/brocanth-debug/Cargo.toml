@@ -1,0 +1,39 @@
+[package]
+name = "brocanth-debug"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Development tools for brocanth: a panel on each HTML page with the timing, the SQL statements, the hooks and the settings in effect. Inert in a release build."
+
+[dependencies]
+brocanth = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+# The statement probe lives in the model layer, because only SeaORM's
+# connection reports each statement. Off without the `model` module.
+brocanth-model = { workspace = true, optional = true }
+
+# `src/scaffold.rs`: the `debug` and `debug-toolbar` modules. Optional and
+# off: only the CLI asks for it.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+brocanth-debug = { path = ".", features = ["config", "scaffold"] }
+brocanth-test.workspace = true
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime"]
+# The plugin. Off only in the brocanth CLI, which links the scaffold side
+# alone (`brocanth-cli/tests/lean.rs`).
+runtime = ["dep:brocanth", "dep:http"]
+# `ToolbarConfig` read from `[debug_toolbar]` in a config file.
+config = ["runtime", "dep:serde"]
+# SQL statements and their count, from the ORM's probe.
+model = ["runtime", "dep:brocanth-model"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

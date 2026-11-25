@@ -229,6 +229,26 @@ impl UnitOfWork {
         self.build_report()
     }
 
+    /// Every statement shape seen so far, the most repeated first, each with
+    /// its count and its first statement. The report lists only the shapes
+    /// past the threshold; a development panel shows them all.
+    pub fn shapes(&self) -> Vec<Suspect> {
+        let Ok(state) = self.inner.state.lock() else {
+            return Vec::new();
+        };
+        let mut shapes: Vec<Suspect> = state
+            .shapes
+            .iter()
+            .map(|s| Suspect {
+                shape: s.shape.clone(),
+                count: s.count,
+                example: s.example.clone(),
+            })
+            .collect();
+        shapes.sort_by_key(|s| std::cmp::Reverse(s.count));
+        shapes
+    }
+
     /// End the unit and report.
     pub fn finish(mut self) -> Report {
         self.reported = true;
@@ -388,6 +408,21 @@ mod tests {
         assert_eq!(report.statements, 5);
         assert!(report.has_n_plus_one());
         assert_eq!(report.suspects[0].count, 4);
+    }
+
+    #[test]
+    fn shapes_lists_every_shape_the_most_repeated_first() {
+        let probe = Probe::new(ProbeConfig::default());
+        let unit = probe.unit_of_work("GET /posts");
+        probe.record(r#"SELECT * FROM "user""#);
+        for _ in 0..3 {
+            probe.record(r#"SELECT * FROM "post" WHERE "user_id" = ?"#);
+        }
+        let shapes = unit.shapes();
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(shapes[0].count, 3);
+        assert_eq!(shapes[1].shape, r#"SELECT * FROM "user""#);
+        assert_eq!(shapes[1].count, 1);
     }
 
     #[test]

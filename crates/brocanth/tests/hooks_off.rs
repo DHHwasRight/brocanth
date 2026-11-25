@@ -164,6 +164,34 @@ fn skipped_lists_each_off_hook_in_registration_order() {
 }
 
 #[test]
+fn hook_names_lists_the_installed_hooks_in_run_order_and_not_the_off_ones() {
+    let rec = Rec::default();
+    let app = AppBuilder::new()
+        .plugin_hooking(RateLimit::new(rec.clone()))
+        .plugin_hooking(Audit::new((
+            rec.clone(),
+            Order::new().before("rate_limit.count"),
+        )))
+        .hooks_off("rate_limit", ["headers"])
+        .build()
+        .unwrap();
+
+    let names = app.pipeline().hook_names();
+    let mut installed = names.request.clone();
+    installed.sort();
+    assert_eq!(
+        installed,
+        vec!["audit.trail", "rate_limit.consent-log", "rate_limit.count"]
+    );
+    let at = |name: &str| names.request.iter().position(|n| n == name);
+    assert!(at("audit.trail") < at("rate_limit.count"), "{names:?}");
+    assert!(names.response.is_empty() && names.error.is_empty());
+    // The names are the order the chain runs.
+    run(&app);
+    assert_eq!(rec.take(), names.request);
+}
+
+#[test]
 fn an_empty_list_changes_nothing() {
     let rec = Rec::default();
     let app = AppBuilder::new()

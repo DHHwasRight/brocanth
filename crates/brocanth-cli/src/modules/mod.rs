@@ -279,6 +279,10 @@ pub const ALL: &[&dyn Module] = &[
     // HTML 404 and 500 pages inside the layouts, the cause in a debug
     // build, and the reporter hook.
     &brocanth_errors::scaffold::ErrorPages,
+    // Development tools, refused by `check --deploy`: a parent, and the
+    // panel on each page with its timing, SQL, hooks and settings.
+    &brocanth_debug::scaffold::Debug,
+    &brocanth_debug::scaffold::DebugToolbar,
     // Shipping: the image, a deployment of it, and the checks on every
     // push, each a choice because each is one way among several.
     &docker::Docker,

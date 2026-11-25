@@ -186,6 +186,23 @@ pub enum BuildError {
     },
 }
 
+/// Each hook with its qualified name beside it, so the sorted chain keeps
+/// the names [`Pipeline::hook_names`] reports.
+fn named<T>(items: Vec<Ordered<T>>) -> Vec<Ordered<(String, T)>> {
+    items
+        .into_iter()
+        .map(|o| {
+            let name = o.id.qualified();
+            Ordered {
+                id: o.id,
+                phase: o.phase,
+                order: o.order,
+                value: (name, o.value),
+            }
+        })
+        .collect()
+}
+
 #[doc(hidden)]
 pub fn mount_hint(suggestion: &Option<String>) -> String {
     match suggestion {
@@ -958,9 +975,9 @@ impl<E, H> AppBuilder<E, H> {
         }
 
         let pipeline = Pipeline::from_parts(
-            sort(request)?,
-            sort(response)?,
-            sort(error)?,
+            sort(named(request))?,
+            sort(named(response))?,
+            sort(named(error))?,
             skipped
                 .iter()
                 .map(|s| (s.instance, s.name))

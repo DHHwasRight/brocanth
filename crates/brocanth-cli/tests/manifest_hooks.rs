@@ -70,6 +70,11 @@ const PLUGINS: &[Row] = &[
         registered: || names(&brocanth_audit::AuditPlugin::new(Default::default())),
     },
     Row {
+        key: "debug-toolbar",
+        ty: "brocanth_debug::DebugToolbar",
+        registered: || names(&brocanth_debug::DebugToolbar::new(Default::default())),
+    },
+    Row {
         key: "errors",
         ty: "brocanth_errors::Errors",
         registered: || names(&brocanth_errors::Errors::new(Default::default())),
