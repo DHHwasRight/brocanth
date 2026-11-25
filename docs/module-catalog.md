@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 90 modules. Each name links to its own page
+what to build next. There are 91 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -69,10 +69,11 @@ nothing holds this page.
 | [`pagination`](modules/pagination.md) | Offset and keyset pages, with links that keep the query; the admin and `resource` page with it too |  |  |  | static-site safe |
 | [`filters`](modules/filters.md) | Typed filters and a sort from the query string, ANDed with the policy's rule in the WHERE |  |  | needs `policy`: a filter is a `Pred` over a policy entity's columns | static-site safe |
 
-### Routes (14)
+### Routes (15)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
+| [`notifications`](modules/notifications.md) | In-app notifications: an inbox per account at /notifications, unread count, mark read | Enhancer |  | needs `auth`, `middleware-csrf` | with `mail`: by mail too; with `realtime`: a live change |
 | [`admin`](modules/admin.md) | A Django-shaped backoffice at /admin, locked until you say who may in | Enhancer |  |  |  |
 | [`admin-model`](modules/admin-model.md) | The admin's rows over SeaORM, one line per entity |  |  | part of `admin`, off until you tick it; needs `model`: it reads rows through the ORM, and without `model` there is none |  |
 | [`auth-oauth`](modules/auth-oauth.md) | Sign-in with GitHub, Google, Microsoft or GitLab at /oauth; links an HTTP client | Enhancer |  | part of `auth`, off until you tick it |  |

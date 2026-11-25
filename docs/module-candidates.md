@@ -42,11 +42,16 @@ then what the module unblocks. Both scans put `mail` first.
 | 22 | `admin-actions` | Bulk actions with a confirm page, then inlines. **Built**, without inlines (`brocanth-admin`). | Django admin actions, ActiveAdmin batch actions | M |
 
 Built after these: `markdown` ([page](modules/markdown.md)), `content`
-([page](modules/content.md)) and `feed` ([page](modules/feed.md)).
+([page](modules/content.md)) and `feed` ([page](modules/feed.md)); then
+`image` ([page](modules/image.md)), `debug-toolbar`
+([page](modules/debug-toolbar.md)), `notifications`
+([page](modules/notifications.md)), `ci-security`
+([page](modules/ci-security.md)) and `humanize`
+([page](modules/humanize.md)).
 
-Next: `image`,
-~~`auth-otp` and `auth-mfa`~~ (built), `debug-toolbar`, ~~`impersonate`~~ (built),
-`notifications`, `ci-security` (`cargo audit`), `humanize`.
+Next: ~~`image`~~ (built for stored images; `assets/` images wait),
+~~`auth-otp` and `auth-mfa`~~ (built), ~~`debug-toolbar`~~ (built), ~~`impersonate`~~ (built),
+~~`notifications`~~, ~~`ci-security`~~, ~~`humanize`~~ (built).
 
 **Needs a decision first:** `storage-s3`. It is high value, but PLAN.md §4
 says no S3. **Declined by PLAN.md §12:** backups, a JavaScript hook VM,
@@ -149,7 +154,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `sanitize` | Allow-list HTML sanitizer (ammonia) as a template filter | bleach / nh3; `sanitize` helper | yes (`sanitize`) | Renderer | S | 4 | Needed before any user HTML or Markdown reaches a page |
 | `rich-text` | Rich text field: an editor island, sanitized storage, attachments | django-ckeditor-5, Wagtail RichText; Action Text (Trix) | no | Renderer | L | 3 | Needs `sanitize` and `attachments`; one JS island |
 | `impersonate` | Staff signs in as a user, with a banner and an audit line | django-hijack; pretender, devise_masquerade | yes (`impersonate`) | Routes | S | 3 | Built: admin tab, banner hook, audit entry |
-| `notifications` | In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |
+| `notifications` | **Built** ([page](modules/notifications.md)). In-app notifications plus delivery by mail and realtime | django-notifications-hq; Noticed | no | Enhancer | M | 3 | Common SaaS need; composes `mail`, `realtime`, `jobs` |
 | `feeds` | RSS and Atom from a list | contrib.syndication; `atom_feed` builder | yes (`feed`: Atom from the `content` collection) | Routes | S | 3 | **Built** ([page](modules/feed.md)). Atom only; a feed over a database query is not built |
 | `redirects` | Old-URL to new-URL table, checked on 404 | contrib.redirects, django-redirects; – | no | Middleware | S | 3 | Keeps SEO after URL changes; admin edits rows |
 | `humanize` | **Built** ([page](modules/humanize.md)). `time_ago`, `intcomma`, `filesizeformat`, pluralize, number and currency formats | contrib.humanize; ActionView number and date helpers | no | Renderer | S | 3 | Small helpers every page uses; locale from `i18n` |
@@ -198,8 +203,8 @@ Rank = value first, then effort, then what it unblocks.
 14. **`flags`** (M, 4). Flipper / waffle with an admin panel.
 15. **`admin-actions`** (M, 4). Bulk actions with a confirm page, then inlines.
 
-Next after these: `debug-toolbar`, `storage-s3` with `attachments`, ~~`impersonate`~~ (built),
-`notifications`, `ci-security`, `humanize`.
+Next after these: ~~`debug-toolbar`~~ (built), `storage-s3` with `attachments`, ~~`impersonate`~~ (built),
+~~`notifications`~~, ~~`ci-security`~~, ~~`humanize`~~ (built).
 
 ## Next.js and PocketBase scan
 

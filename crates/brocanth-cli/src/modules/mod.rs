@@ -228,6 +228,8 @@ pub const ALL: &[&dyn Module] = &[
     // transport that streams is a change to the hook contract.
     &brocanth_realtime::scaffold::Sse,
     &brocanth_realtime::scaffold::WebSocket,
+    // An inbox per account, after mail and realtime, which it adapts to.
+    &brocanth_notifications::scaffold::Notifications,
     &commands::Commands,
     &rsx::Rsx,
     // The second renderer, and the reason there is a seam for one. It

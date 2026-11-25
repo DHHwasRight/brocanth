@@ -1,0 +1,54 @@
+[package]
+name = "brocanth-notifications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "In-app notifications for brocanth: one table, an inbox per account, an unread count, mark read; mail and live push when the project has them."
+
+[dependencies]
+brocanth = { workspace = true, optional = true }
+# Rows in the application's own Postgres, through the `db` module's pool.
+brocanth-db = { workspace = true, optional = true }
+# The columns as a policy entity, so a page ANDs a rule into the inbox's
+# `WHERE`, as every list in brocanth does.
+brocanth-policy = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = { version = "2", optional = true }
+# `publish`: a new notification as a change on the realtime broker. Off
+# without the `realtime` module.
+brocanth-realtime = { workspace = true, optional = true }
+brocanth-events = { workspace = true, optional = true }
+
+# `src/scaffold.rs` is the module `brocanth create` offers under the key
+# `notifications`. Optional and off: only the CLI asks for it.
+brocanth-scaffold = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+brocanth-notifications = { path = ".", features = ["config", "realtime", "scaffold"] }
+brocanth-scaffold = { workspace = true, features = ["testing"] }
+brocanth-cli = { path = "../brocanth-cli" }
+
+[features]
+default = ["runtime"]
+# The store, the plugin and the policy entity. Off only in the brocanth CLI,
+# which links the scaffold side alone (`brocanth-cli/tests/lean.rs`).
+runtime = [
+    "dep:brocanth",
+    "dep:brocanth-db",
+    "dep:brocanth-policy",
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:thiserror",
+]
+# `NotificationsConfig` read from `[notifications]` in a config file.
+config = ["runtime", "dep:serde"]
+# `publish`, for the `realtime` module.
+realtime = ["runtime", "dep:brocanth-realtime", "dep:brocanth-events"]
+scaffold = ["dep:brocanth-scaffold"]
+
+[lints.rust]
+missing_docs = "warn"

@@ -51,6 +51,10 @@ const SOURCES: &[Row] = &[
         key: "flags",
         files: &["brocanth-flags/src/postgres.rs"],
     },
+    Row {
+        key: "notifications",
+        files: &["brocanth-notifications/src/store.rs"],
+    },
     // The queue's own tables are `queue_*`, shared with every queue user.
     Row {
         key: "jobs",

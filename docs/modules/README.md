@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 90. For all
+One page per module that `brocanth create` offers. There are 91. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -120,6 +120,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`realtime`](realtime.md) | one write is a map lookup, not a query per subscriber | Enhancer, Middleware |  |
 | [`realtime-sse`](realtime-sse.md) | one long response per subscriber, frames written as they are made | Routes | realtime |
 | [`realtime-websocket`](realtime-websocket.md) | a duplex socket per subscriber, frames both ways | Routes | realtime |
+| [`notifications`](notifications.md) | in-app notifications: an inbox per account at /notifications, unread count, mark read | Routes, Enhancer |  |
 | [`commands`](commands.md) | this project's own command line, `serve` plus whatever you add | Enhancer |  |
 | [`rsx`](rsx.md) | `.rsx` templates compiled into the binary; without it a page builds a String | Renderer |  |
 | [`jt`](jt.md) | `.jt` templates compiled into the binary; a JSON answer without a struct per shape | Renderer, Routes |  |

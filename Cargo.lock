@@ -961,6 +961,7 @@ dependencies = [
  "brocanth-meta",
  "brocanth-middleware",
  "brocanth-model",
+ "brocanth-notifications",
  "brocanth-oauth-client",
  "brocanth-observe",
  "brocanth-openapi",
@@ -1329,6 +1330,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "brocanth-notifications"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "brocanth",
+ "brocanth-cli",
+ "brocanth-db",
+ "brocanth-events",
+ "brocanth-notifications",
+ "brocanth-policy",
+ "brocanth-realtime",
+ "brocanth-scaffold",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
