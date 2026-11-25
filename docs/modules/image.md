@@ -27,7 +27,7 @@ An option is set at build time in `src/modules/image.rs`. A setting is read at r
 | After | [`storage-thumbnails`](storage-thumbnails.md), [`storage-routes`](storage-routes.md) |
 | Provides | none |
 | Requires | none |
-| Uses | none |
+| Uses | `PgPool` (a Postgres pool): the test that stores a PNG is left out: the files are rows in Postgres, and the tests have no database |
 | Adapts to | none |
 | Contributes | `AgentsSection` `image`: how a page links an image in a size and a format |
 | Collects | none |

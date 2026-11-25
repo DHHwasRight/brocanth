@@ -161,9 +161,16 @@ mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
 
+    /// The page at `path`, after one redirect: a locale segment, a
+    /// trailing slash.
     async fn page(path: &str) -> String {
         let app = crate::app::build().expect("the application builds");
-        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        let mut response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        if (300..400).contains(&response.status) {
+            if let Some(to) = response.header("location").map(str::to_string) {
+                response = crate::app::handle(&app, Request::new(Verb::Get, to)).await;
+            }
+        }
         String::from_utf8_lossy(response.body.bytes().expect("a whole body")).into_owned()
     }
 
@@ -178,7 +185,8 @@ mod tests {
             );
             return;
         }
-        assert!(body.contains("debug: GET / · 200 · "), "{body}");
+        assert!(body.contains("debug: GET /"), "{body}");
+        assert!(body.contains(" · 200 · "), "{body}");
         assert!(body.contains("debug_toolbar.start"), "{body}");
         assert!(body.contains("debug_toolbar.max_statements"), "{body}");
     }

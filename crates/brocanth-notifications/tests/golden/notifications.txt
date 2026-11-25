@@ -4392,7 +4392,13 @@ mod tests {
     #[tokio::test]
     async fn a_visitor_with_no_session_has_no_inbox() {
         let app = crate::app::build().expect("the application builds");
-        let response = crate::app::handle(&app, Request::new(Verb::Get, "/notifications")).await;
+        let mut response =
+            crate::app::handle(&app, Request::new(Verb::Get, "/notifications")).await;
+        // One redirect, for a locale segment.
+        if (300..400).contains(&response.status) {
+            let to = response.header("location").expect("a location").to_string();
+            response = crate::app::handle(&app, Request::new(Verb::Get, to)).await;
+        }
         assert_eq!(response.status, 401);
     }
 

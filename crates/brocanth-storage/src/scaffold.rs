@@ -658,6 +658,9 @@ impl Module for Image {
             "it converts the thumbnails `storage-thumbnails` renders; without them there is no image to convert",
         )
         .after("storage-routes")
+        .uses::<PgPool>(
+            "the test that stores a PNG is left out: the files are rows in Postgres, and the tests have no database",
+        )
         .asked_in("data", "Images: thumbnails in WebP or JPEG, a srcset helper")
         .absent(
             "image",
@@ -665,15 +668,60 @@ impl Module for Image {
         )
     }
 
-    fn contribute(&self, _project: &Project, s: &mut Scaffold) {
+    fn contribute(&self, project: &Project, s: &mut Scaffold) {
+        let convert = if project.provider::<PgPool>().is_some() {
+            ""
+        } else {
+            IMAGE_CONVERT_TEST
+        };
         s.file(
             "src/plugins/image/mod.rs",
-            IMAGE_RS.replace("@PATH@", &module_ref("storage-routes", "path")),
+            IMAGE_RS
+                .replace("@PATH@", &module_ref("storage-routes", "path"))
+                .replace("@CONVERT@", convert),
         );
         s.at(Slot::PluginsMod).line("pub mod image;");
         s.at(Slot::AgentsSections).block(IMAGE_AGENTS.to_string());
     }
 }
+
+/// The test that stores a PNG and asks for it in WebP. Left out when the
+/// files are rows in Postgres: a generated project's tests have no database.
+const IMAGE_CONVERT_TEST: &str = r#"    /// A PNG of one red pixel.
+    const PNG: [u8; 69] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38,
+        0x21, 0x27, 0x07, 0x00, 0x02, 0xb6, 0x01, 0x05, 0x34, 0xa6, 0x75, 0xaa, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[tokio::test]
+    async fn a_thumbnail_converts_to_a_listed_format() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        let key = files
+            .store
+            .put(&PNG, &brocanth_storage::ObjectInfo::new())
+            .await
+            .expect("stored");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
+
+        let webp = crate::app::handle(&app, get(&link("150x150t", Some("webp")))).await;
+        assert_eq!(webp.status, 200);
+        assert_eq!(webp.header("content-type"), Some("image/webp"));
+    }
+
+"#;
 
 const IMAGE_AGENTS: &str = "\n\
     ## Images\n\
@@ -754,29 +802,16 @@ pub fn srcset(
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
-    use brocanth_storage::ObjectInfo;
 
     use super::*;
 
-    /// A PNG of one red pixel.
-    const PNG: [u8; 69] = [
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
-        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38,
-        0x21, 0x27, 0x07, 0x00, 0x02, 0xb6, 0x01, 0x05, 0x34, 0xa6, 0x75, 0xaa, 0x00, 0x00, 0x00,
-        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-    ];
-
-    #[tokio::test]
-    async fn a_thumbnail_converts_to_a_listed_format_and_no_other() {
+@CONVERT@    #[tokio::test]
+    async fn a_format_or_a_size_off_the_lists_is_refused_before_the_file_is_read() {
         let app = crate::app::build().expect("the application builds");
         let cx = app.core.context();
         let files: &FileStore = cx.extract();
-        let key = files
-            .store
-            .put(&PNG, &ObjectInfo::new())
-            .await
-            .expect("stored");
+        // No file at this address: the lists are checked first.
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
         let token = files.tokens.issue(&key);
         let link = |size: &str, format: Option<&str>| {
             routes::thumb_url(
@@ -786,11 +821,6 @@ mod tests {
                 spec(size, format).expect("a valid spec"),
             )
         };
-
-        let webp = crate::app::handle(&app, get(&link("150x150t", Some("webp")))).await;
-        assert_eq!(webp.status, 200);
-        assert_eq!(webp.header("content-type"), Some("image/webp"));
-
         // `png` is not in `formats` by default.
         let png = crate::app::handle(&app, get(&link("150x150t", Some("png")))).await;
         assert_eq!(png.status, 400);

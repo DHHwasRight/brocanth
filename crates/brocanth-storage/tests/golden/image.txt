@@ -3023,7 +3023,6 @@ pub fn srcset(
 mod tests {
     use brocanth::routing::Verb;
     use brocanth_server::Request;
-    use brocanth_storage::ObjectInfo;
 
     use super::*;
 
@@ -3037,13 +3036,13 @@ mod tests {
     ];
 
     #[tokio::test]
-    async fn a_thumbnail_converts_to_a_listed_format_and_no_other() {
+    async fn a_thumbnail_converts_to_a_listed_format() {
         let app = crate::app::build().expect("the application builds");
         let cx = app.core.context();
         let files: &FileStore = cx.extract();
         let key = files
             .store
-            .put(&PNG, &ObjectInfo::new())
+            .put(&PNG, &brocanth_storage::ObjectInfo::new())
             .await
             .expect("stored");
         let token = files.tokens.issue(&key);
@@ -3059,7 +3058,24 @@ mod tests {
         let webp = crate::app::handle(&app, get(&link("150x150t", Some("webp")))).await;
         assert_eq!(webp.status, 200);
         assert_eq!(webp.header("content-type"), Some("image/webp"));
+    }
 
+    #[tokio::test]
+    async fn a_format_or_a_size_off_the_lists_is_refused_before_the_file_is_read() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        // No file at this address: the lists are checked first.
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
         // `png` is not in `formats` by default.
         let png = crate::app::handle(&app, get(&link("150x150t", Some("png")))).await;
         assert_eq!(png.status, 400);
