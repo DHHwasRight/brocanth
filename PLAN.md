@@ -107,6 +107,14 @@ image upload and a welcome email, and never leaves the documentation.**
 delete, metrics, tracing, pubsub, notifications, factories, fixtures, debug
 toolbar, S3, and any deployment tooling beyond a Dockerfile.
 
+**S3 is no longer cut (owner, 2026-11-24).** Object storage is one
+abstraction with three backends: a local directory (the default, which
+fits one binary with embedded Postgres), S3 and S3-compatible stores, and
+Google Cloud Storage. Reason: a deployment with two instances, or on a
+platform with no persistent disk, has nowhere else to keep an upload, and
+the `Storage` trait was shaped for this from the start. ADR 13 records the
+decision; `docs/object-storage.md` has the design.
+
 **Three things on that list shipped anyway, and the list is wrong rather than
 the work.** OAuth and JWT arrived with `brocanth-auth`, because a framework
 whose first real application needs a login cannot cut the login. Cron arrived
@@ -942,3 +950,25 @@ file. In production the archive is pinned by version and by a SHA-256 per
 target in the source, the start never downloads, one process owns the
 server, the directory is an absolute path from a flag, and a data directory
 of another major version is refused.
+
+### ADR 13 — Object storage is one Kind with a filesystem default; S3 and GCS are backends below it.
+
+**Status:** accepted (2026-11-25). **Reverses:** the §4 cut of S3.
+**Touches:** `brocanth-storage` (features `s3`, `gcs`), `brocanth-scaffold`
+(Kind `ObjectStore`, `Manifest::default_for`), the resolver, the modules
+`storage-fs`, `storage-s3`, `storage-gcs`, `storage-db`. **Design:**
+`docs/object-storage.md`.
+
+Callers keep `Arc<dyn Storage>`. A backend implements a raw `Bucket` trait
+(put and get with streams, ranges, head, delete, list, signed URLs), and
+one `ObjectStorage` turns any `Bucket` into a `Storage`, so the address,
+dedupe and variant rules exist once. `LocalDisk` and `PgStorage` stay.
+The S3 and GCS clients come from `object_store`, one maintained crate on
+the tokio and reqwest the workspace already links.
+
+A project has exactly one provider of `ObjectStore`. When a module
+requires the Kind and none is chosen, the resolver adds the default,
+`storage-fs`. Reason: the owner chose the disk as the default, and the
+`db` rule (add the single provider) does not reach a Kind with four. A
+project recorded before this change keeps its backend: `storage` with
+`db` reads as `storage-db`.
