@@ -1,6 +1,6 @@
 # Modules
 
-One page per module that `brocanth create` offers. There are 76. For all
+One page per module that `brocanth create` offers. There are 86. For all
 of them on one page, and what to build next, see
 [module-catalog.md](../module-catalog.md). The list
 and its order come from `ALL` in `crates/brocanth-cli/src/modules/mod.rs`.
@@ -141,6 +141,7 @@ A hyphenated key (`parent-child`) is part of the module before the dash.
 | [`docker-kubernetes`](docker-kubernetes.md) | deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain | External | docker |
 | [`ci`](ci.md) | fmt, clippy and the tests on every push; pick the provider below | External |  |
 | [`ci-github`](ci-github.md) | .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image | External | ci |
+| [`ci-security`](ci-security.md) | .github/workflows/security.yml: cargo audit and cargo deny on each push and each day; deny.toml | External | ci |
 
 ## Blocked
 

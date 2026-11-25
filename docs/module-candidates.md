@@ -168,7 +168,7 @@ Date: 2026-11-09. brocanth read at `25e908a` (44 modules, `docs/module-catalog.m
 | `money` | Money type with currency and exact decimal | django-money; money-rails | no | Enhancer | S | 2 | A `rust_decimal` newtype; small audience |
 | `tags` | Tags on any model, tag cloud, filter | django-taggit; acts-as-taggable-on | no | Enhancer | M | 2 | Needs generic relations, which brocanth has none of |
 | `deploy-kamal` | `config/deploy.yml` for Kamal or a similar tool | – ; Kamal 2 | no | External | S | 3 | Docker exists; one file finishes the deploy story |
-| `ci-security` | `cargo audit` and `cargo deny` steps in CI | bandit, pip-audit; Brakeman, bundler-audit | no | External | S | 3 | 31% of Rails teams run Brakeman; two CI lines |
+| `ci-security` | **Built** ([page](modules/ci-security.md)). `cargo audit` and `cargo deny` steps in CI | bandit, pip-audit; Brakeman, bundler-audit | no | External | S | 3 | 31% of Rails teams run Brakeman; two CI lines |
 | `dev-loop` | `brocanth dev`: watch, rebuild, restart, CSS watch together | `runserver` autoreload; `bin/dev`, Procfile.dev | partly: `cargo watch` by hand, `css -W` | External | S | 3 | Every user wants one command |
 | `inbound-mail` | Receive mail through a webhook and route it to a handler | django-anymail inbound; Action Mailbox | no | Routes | L | 2 | Few apps need it |
 | `pages-cms` | Editable static pages or a CMS tree | contrib.flatpages, Wagtail, django CMS | no | Routes | L | 2 | Wagtail is popular, but a CMS is a product, not a module |

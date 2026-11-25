@@ -1,7 +1,7 @@
 # Module catalog and roadmap
 
 Every module `brocanth create` and `brocanth add` offer, on one page, and
-what to build next. There are 85 modules. Each name links to its own page
+what to build next. There are 86 modules. Each name links to its own page
 in `docs/modules/`, which lists the files it writes and its settings.
 
 This page is a summary. When it disagrees with a module page or the code,
@@ -116,12 +116,13 @@ nothing holds this page.
 | [`oauth-client-memory`](modules/oauth-client-memory.md) | The connected accounts in this process's memory; for tests and development, gone at restart |  |  | part of `oauth`, off until you tick it; needs `oauth-client` | `check --deploy` refuses it |
 | [`superuser`](modules/superuser.md) | Operator accounts that pass every admin check, and a createsuperuser command |  |  | needs `auth`: a superuser is an account with a flag, and `auth` holds the accounts |  |
 
-### External (6)
+### External (7)
 
 | Module | What it does | Also | Default | Needs / part of | Notes |
 |---|---|---|---|---|---|
 | [`ci`](modules/ci.md) | Fmt, clippy and the tests on every push; pick the provider below |  | yes |  | static-site safe |
 | [`ci-github`](modules/ci-github.md) | .github/workflows/ci.yml: fmt, clippy, tests, a Postgres service when there is a database, the image |  | yes | part of `ci`, ticked with its parent | static-site safe |
+| [`ci-security`](modules/ci-security.md) | .github/workflows/security.yml: cargo audit and cargo deny on each push and each day; deny.toml |  |  | part of `ci`, off until you tick it; needs `ci-github` | static-site safe |
 | [`docker`](modules/docker.md) | A cargo-chef Dockerfile: slim Debian, a user that is not root, a HEALTHCHECK on /up |  | yes |  |  |
 | [`docker-kubernetes`](modules/docker-kubernetes.md) | Deploy/kubernetes.yaml: a Deployment and a Service whose probes and grace period match the drain |  |  | part of `docker`, off until you tick it; needs `observability-health`: its liveness and readiness probes are `/up` and `/readyz` |  |
 | [`rsx-tailwind`](modules/rsx-tailwind.md) | A CSS build over the class names in your templates; needs node | Enhancer |  | part of `rsx`, ticked with its parent; needs `commands`: the CSS build is `brocanth css`, a subcommand, and a project with no command line has nowhere to put it | static-site safe |

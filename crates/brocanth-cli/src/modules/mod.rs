@@ -279,6 +279,8 @@ pub const ALL: &[&dyn Module] = &[
     &docker::Kubernetes,
     &ci::Ci,
     &ci::GitHub,
+    // The dependency checks, a second child of `ci`: off with it.
+    &ci::Security,
 ];
 
 thread_local! {
