@@ -447,3 +447,108 @@ async fn the_roles_tab_runs_on_postgres() {
         assert_eq!(left, 0, "the cascade removed the assignment row");
     });
 }
+
+/// The roles tab over the backoffice wire, on Postgres: the backoffice's
+/// tab reads and writes the application's roles tables through the
+/// loopback, with the data side checking each call (docs/backoffice.md
+/// §7.6).
+#[cfg(feature = "admin")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_roles_tab_runs_over_the_wire_on_postgres() {
+    use brocanth_admin::panel::remote::{Grants, Loopback};
+    use brocanth_admin::policy::Principal;
+    use brocanth_admin::{Admin, AdminConfig, Fixture as Blog, Submission};
+    use brocanth_auth::admin::{RolesPanel, StaffPolicy};
+    use brocanth_auth::storage::StaffStore;
+    use brocanth_auth::Staff;
+
+    with_store!(None, |store| {
+        let grants = |principal: &Principal<'_>| match principal.downcast::<Staff>() {
+            Some(staff) => Grants {
+                superuser: staff.is_superuser(),
+                permissions: staff.permissions().iter().cloned().collect(),
+            },
+            None => Grants::default(),
+        };
+        let wire = AdminConfig::new()
+            .panel(RolesPanel::new(store.clone()))
+            .panel_serves()
+            .into_iter()
+            .fold(Loopback::new(grants), |wire, (tab, serve)| {
+                wire.panel(tab, serve)
+            })
+            .shared();
+        let admin = Admin::new(
+            Arc::new(Blog::blog()),
+            AdminConfig::new()
+                .panel(RolesPanel::new(Arc::new(
+                    brocanth_auth::memory::MemoryStore::new(),
+                )))
+                .panels_through(wire)
+                .with_policy(StaffPolicy),
+        );
+        let new = |email: &str| NewAccount {
+            email: Some(EmailAddress::parse(email).unwrap()),
+            email_verified: true,
+            ..NewAccount::default()
+        };
+        let ops = store
+            .create_account(new("ops@example.com"))
+            .await
+            .unwrap()
+            .id;
+        let ed = store
+            .create_account(new("ed@example.com"))
+            .await
+            .unwrap()
+            .id;
+        store.set_superuser(&ops, true).await.unwrap();
+        let ops = Staff::load(&*store, &ops).await.unwrap().unwrap();
+        let post = |who: &Staff, body: &str| {
+            let submission = Submission::from_urlencoded(body);
+            let admin = &admin;
+            let who = who.clone();
+            async move {
+                admin
+                    .dispatch(
+                        Principal::new(&who),
+                        "POST",
+                        "/admin/roles",
+                        "",
+                        &submission,
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(
+            post(
+                &ops,
+                "do=define&role=editor&permissions=roles.read+post.edit"
+            )
+            .await,
+            303
+        );
+        assert_eq!(
+            post(&ops, "do=assign&role=editor&email=ed%40example.com").await,
+            303
+        );
+        assert_eq!(store.roles_of(&ed).await.unwrap(), ["editor"]);
+        let ed_staff = Staff::load(&*store, &ed).await.unwrap().unwrap();
+        let seen = admin
+            .dispatch(
+                Principal::new(&ed_staff),
+                "GET",
+                "/admin/roles",
+                "",
+                &Submission::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(seen.status(), 200);
+        assert!(seen.html().unwrap().contains("ed@example.com"));
+        assert_eq!(post(&ops, "do=delete&role=editor").await, 303);
+        assert!(store.roles_of(&ed).await.unwrap().is_empty());
+    });
+}

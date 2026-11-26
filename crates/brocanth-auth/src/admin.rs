@@ -65,7 +65,10 @@ pub mod impersonate;
 mod staff;
 
 pub use impersonate::{ImpersonatePanel, IMPERSONATE_KEY};
-pub use staff::{permission, MemberRow, RoleRow, RolesCtx, RolesPanel, StaffPolicy, ROLES_KEY};
+pub use staff::{
+    permission, MemberRow, RemoteRoles, RoleRow, RoleView, RolesAnswer, RolesCall, RolesChange,
+    RolesCtx, RolesData, RolesOutcome, RolesPanel, RolesServe, RolesView, StaffPolicy, ROLES_KEY,
+};
 
 /// The panel's stylesheet, built from `style/panel.css`. Inlined by every
 /// screen, because the admin mounts no asset route and a panel is in no

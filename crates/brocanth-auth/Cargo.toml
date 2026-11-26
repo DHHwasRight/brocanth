@@ -238,7 +238,7 @@ scaffold = ["dep:brocanth-scaffold"]
 # The backoffice tab. Off, like every other way out of this crate. `admin` off
 # means the code is absent and not merely unreachable: `src/admin.rs` and the
 # templates beside it are `#[cfg]`-ed out of the crate entirely.
-admin = ["runtime", "dep:brocanth-admin", "dep:rsx"]
+admin = ["runtime", "dep:brocanth-admin", "dep:rsx", "dep:serde", "dep:serde_json"]
 
 # `Staff::gate`, over `brocanth-policy`. See the dependency line above.
 policy = ["runtime", "dep:brocanth-policy"]

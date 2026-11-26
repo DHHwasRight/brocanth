@@ -32,21 +32,28 @@
 //! [`RolesPanel::late`] takes a [`Late`] cell that the admin fills from the
 //! first request that carries the store. Until then the tab says the store
 //! is not ready.
+//!
+//! The tab reads and changes through [`RolesData`] (docs/backoffice.md
+//! §7.6): in this process over the store, or over the backoffice wire
+//! ([`RemoteRoles`], answered by [`RolesServe`]). The wire's data side
+//! checks the rule above from the call's claim: reading needs `roles.read`
+//! or to own a resource, a grant needs the superuser flag or the owner of
+//! its resource, and every other button the superuser flag.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::late::Late;
+use brocanth_admin::panel::remote::{Grants, PanelServe, PanelWire};
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::policy::{Action, Level, Policy, Principal, Request};
 use brocanth_admin::view::render;
+use serde::{Deserialize, Serialize};
 
 use crate::identity::{AccountId, EmailAddress};
 use crate::staff::Staff;
 use crate::storage::{AccountDirectory, Role, StaffStore};
-
-use super::failed;
 
 /// The roles tab's key, and the subject of its policy questions.
 pub const ROLES_KEY: &str = "roles";
@@ -104,28 +111,423 @@ impl Policy for StaffPolicy {
     }
 }
 
+/// What the roles tab reads and changes (docs/backoffice.md §7.6, P1).
+///
+/// In this process it runs on the store; [`RemoteRoles`] sends it over the
+/// backoffice wire, and [`RolesServe`] answers it there. The tab narrows
+/// each button to what the person may give; on the wire the data side
+/// checks the same rule from the claim ([`RolesCall::allows`]).
+#[async_trait]
+pub trait RolesData: Send + Sync + 'static {
+    /// Every role, with its permissions and its members.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text, with a `help:` line.
+    async fn read(&self, who: &Principal<'_>) -> Result<RolesView, String>;
+
+    /// Runs one button.
+    ///
+    /// # Errors
+    ///
+    /// The store's failure as text. A refusal the tab explains (no such
+    /// role, no such account) is a [`RolesOutcome`], not an error.
+    async fn change(
+        &self,
+        who: &Principal<'_>,
+        change: RolesChange,
+    ) -> Result<RolesOutcome, String>;
+}
+
+/// The roles, as the tab shows them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolesView {
+    /// Whether the roles stay when the process stops.
+    pub durable: bool,
+    /// Every role, by name.
+    pub roles: Vec<RoleView>,
+}
+
+/// One role.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleView {
+    /// Its name.
+    pub name: String,
+    /// Its permissions, sorted.
+    pub permissions: Vec<String>,
+    /// Who holds it: the account id and its address, or the id.
+    pub members: Vec<(String, String)>,
+}
+
+/// One button of the roles tab.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RolesChange {
+    /// Defines `role` with `permissions`, or redefines it. A superuser's.
+    Define {
+        /// The role.
+        role: String,
+        /// Its permission strings.
+        permissions: Vec<String>,
+    },
+    /// Deletes `role`. A superuser's.
+    Delete {
+        /// The role.
+        role: String,
+    },
+    /// Gives `role` to the account at `email`. A superuser's.
+    Assign {
+        /// The role.
+        role: String,
+        /// The account's address.
+        email: String,
+    },
+    /// Takes `role` from `account`. A superuser's.
+    Unassign {
+        /// The role.
+        role: String,
+        /// The account id.
+        account: String,
+    },
+    /// Gives (`give`) or takes `level` on `resource` to or from `role`. A
+    /// superuser's, or the owner's of `resource` for `read` and `edit`.
+    Grant {
+        /// The role.
+        role: String,
+        /// The resource: a tab's or a model's key.
+        resource: String,
+        /// `read`, `edit` or `owner`.
+        level: String,
+        /// Give, or take.
+        give: bool,
+    },
+}
+
+impl RolesChange {
+    /// Whether `grants` may press this button: the rule of [`Grantor`].
+    fn allows(&self, grants: &Grants) -> bool {
+        match self {
+            RolesChange::Grant {
+                resource, level, ..
+            } => {
+                grants.superuser
+                    || Level::parse(level).is_some_and(|level| {
+                        level != Level::Owner && grants.holds(resource, Level::Owner)
+                    })
+            }
+            _ => grants.superuser,
+        }
+    }
+}
+
+/// What a button did: done, or the code of the tab's own sentence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RolesOutcome {
+    /// It changed the roles.
+    Done,
+    /// It changed nothing; the code says why (`no-role`).
+    Refused(String),
+}
+
+impl From<Option<Refusal>> for RolesOutcome {
+    fn from(refusal: Option<Refusal>) -> Self {
+        match refusal {
+            None => RolesOutcome::Done,
+            Some(refusal) => RolesOutcome::Refused(refusal.code().to_string()),
+        }
+    }
+}
+
+/// One call of [`RolesData`], as the wire carries it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RolesCall {
+    /// [`RolesData::read`]. Needs `roles.read`, or to own any resource.
+    Read,
+    /// [`RolesData::change`]. A superuser's, but for a grant an owner may
+    /// make.
+    Change(RolesChange),
+}
+
+impl RolesCall {
+    /// The level the call needs on `roles`, as the refusal names it.
+    pub fn level(&self) -> Level {
+        match self {
+            RolesCall::Read => Level::Read,
+            RolesCall::Change(_) => Level::Edit,
+        }
+    }
+
+    /// Whether `grants` may make this call: the rule [`StaffPolicy`] and
+    /// the tab apply in this process.
+    pub fn allows(&self, grants: &Grants) -> bool {
+        match self {
+            RolesCall::Read => {
+                grants.holds(ROLES_KEY, Level::Read) || grants.owned().next().is_some()
+            }
+            RolesCall::Change(change) => change.allows(grants),
+        }
+    }
+}
+
+/// What a [`RolesCall`] answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RolesAnswer {
+    /// To `Read`.
+    View(RolesView),
+    /// To `Change`.
+    Outcome(RolesOutcome),
+}
+
+/// The store in this process: empty until the first request that carries
+/// it.
+struct Stored<S>(Late<Arc<S>>);
+
+impl<S: StaffStore + AccountDirectory> Stored<S> {
+    fn store(&self) -> Result<&Arc<S>, String> {
+        self.0.get().ok_or_else(|| {
+            "this tab has no accounts store yet: no request with it on its context has come\n\
+             help: register the auth plugin, which puts its store on the request context"
+                .to_string()
+        })
+    }
+}
+
+fn store_failed(e: crate::storage::StoreError) -> String {
+    format!("the account store failed: {e}")
+}
+
+#[async_trait]
+impl<S: StaffStore + AccountDirectory> RolesData for Stored<S> {
+    async fn read(&self, _who: &Principal<'_>) -> Result<RolesView, String> {
+        let store = self.store()?;
+        let mut roles = Vec::new();
+        for role in store.roles().await.map_err(store_failed)? {
+            let mut members = Vec::new();
+            for id in store.members(&role.name).await.map_err(store_failed)? {
+                let label = match store.account(&id).await.map_err(store_failed)? {
+                    Some(account) => account
+                        .email
+                        .map_or_else(|| id.to_string(), |e| e.to_string()),
+                    None => id.to_string(),
+                };
+                members.push((id.to_string(), label));
+            }
+            roles.push(RoleView {
+                name: role.name,
+                permissions: role.permissions.into_iter().collect(),
+                members,
+            });
+        }
+        Ok(RolesView {
+            durable: store.is_durable(),
+            roles,
+        })
+    }
+
+    async fn change(
+        &self,
+        _who: &Principal<'_>,
+        change: RolesChange,
+    ) -> Result<RolesOutcome, String> {
+        let store = self.store()?;
+        let refused = |refusal: Refusal| Ok(RolesOutcome::from(Some(refusal)));
+        match change {
+            RolesChange::Define { role, permissions } => {
+                if !valid_name(&role) {
+                    return refused(Refusal::BadName);
+                }
+                let role = Role::new(role, permissions.into_iter().filter(|p| !p.is_empty()));
+                store.put_role(&role).await.map_err(store_failed)?;
+            }
+            RolesChange::Delete { role } => {
+                store.delete_role(&role).await.map_err(store_failed)?;
+            }
+            RolesChange::Assign { role, email } => {
+                let Ok(address) = EmailAddress::parse(&email) else {
+                    return refused(Refusal::NotAnAddress);
+                };
+                let Some(account) = store
+                    .account_by_email(&address)
+                    .await
+                    .map_err(store_failed)?
+                else {
+                    return refused(Refusal::NoAccount);
+                };
+                if !store
+                    .assign_role(&account.id, &role)
+                    .await
+                    .map_err(store_failed)?
+                {
+                    return refused(Refusal::NoRole);
+                }
+            }
+            RolesChange::Unassign { role, account } => {
+                let account = AccountId::new(account);
+                store
+                    .unassign_role(&account, &role)
+                    .await
+                    .map_err(store_failed)?;
+            }
+            RolesChange::Grant {
+                role,
+                resource,
+                level,
+                give,
+            } => {
+                let Some(level) = Level::parse(&level) else {
+                    return refused(Refusal::NoLevel);
+                };
+                if !valid_resource(&resource) {
+                    return refused(Refusal::BadResource);
+                }
+                let roles = store.roles().await.map_err(store_failed)?;
+                let Some(mut found) = roles.into_iter().find(|candidate| candidate.name == role)
+                else {
+                    return refused(Refusal::NoRole);
+                };
+                let permission = level.on(&resource);
+                if give {
+                    found.permissions.insert(permission);
+                } else {
+                    found.permissions.remove(&permission);
+                }
+                store.put_role(&found).await.map_err(store_failed)?;
+            }
+        }
+        Ok(RolesOutcome::Done)
+    }
+}
+
+/// The data side of the roles tab on the backoffice wire: decodes a
+/// [`RolesCall`], checks it with [`RolesCall::allows`], and runs it on a
+/// [`RolesData`].
+pub struct RolesServe(Arc<dyn RolesData>);
+
+impl RolesServe {
+    /// Serves `data`.
+    pub fn new(data: Arc<dyn RolesData>) -> RolesServe {
+        RolesServe(data)
+    }
+
+    /// As the wire server takes it.
+    pub fn shared(self) -> Arc<dyn PanelServe> {
+        Arc::new(self)
+    }
+}
+
+impl std::fmt::Debug for RolesServe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RolesServe")
+    }
+}
+
+fn decode(call: &str) -> Result<RolesCall, String> {
+    serde_json::from_str(call).map_err(|e| format!("a roles call did not decode: {e}"))
+}
+
+#[async_trait]
+impl PanelServe for RolesServe {
+    fn level(&self, call: &str) -> Result<Level, String> {
+        decode(call).map(|call| call.level())
+    }
+
+    fn allows(&self, _tab: &str, call: &str, grants: &Grants) -> Result<bool, String> {
+        decode(call).map(|call| call.allows(grants))
+    }
+
+    async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String> {
+        let answer = match decode(call)? {
+            RolesCall::Read => RolesAnswer::View(self.0.read(who).await?),
+            RolesCall::Change(change) => RolesAnswer::Outcome(self.0.change(who, change).await?),
+        };
+        serde_json::to_string(&answer).map_err(|e| format!("a roles answer did not encode: {e}"))
+    }
+}
+
+/// The roles tab's data in another process, through the backoffice wire.
+pub struct RemoteRoles(Arc<dyn PanelWire>);
+
+impl RemoteRoles {
+    /// The roles behind `wire`.
+    pub fn new(wire: Arc<dyn PanelWire>) -> RemoteRoles {
+        RemoteRoles(wire)
+    }
+
+    async fn ask(&self, who: &Principal<'_>, call: &RolesCall) -> Result<RolesAnswer, String> {
+        let text =
+            serde_json::to_string(call).map_err(|e| format!("a roles call did not encode: {e}"))?;
+        let answer = self.0.send(who, ROLES_KEY, text).await?;
+        serde_json::from_str(&answer).map_err(|e| format!("a roles answer did not decode: {e}"))
+    }
+}
+
+impl std::fmt::Debug for RemoteRoles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteRoles")
+    }
+}
+
+#[async_trait]
+impl RolesData for RemoteRoles {
+    async fn read(&self, who: &Principal<'_>) -> Result<RolesView, String> {
+        match self.ask(who, &RolesCall::Read).await? {
+            RolesAnswer::View(view) => Ok(view),
+            RolesAnswer::Outcome(_) => Err("the data side answered a read with an outcome".into()),
+        }
+    }
+
+    async fn change(
+        &self,
+        who: &Principal<'_>,
+        change: RolesChange,
+    ) -> Result<RolesOutcome, String> {
+        match self.ask(who, &RolesCall::Change(change)).await? {
+            RolesAnswer::Outcome(outcome) => Ok(outcome),
+            RolesAnswer::View(_) => Err("the data side answered a change with the roles".into()),
+        }
+    }
+}
+
+/// Where the tab reads its roles.
+enum Source<S> {
+    /// The store, which arrives with the first request.
+    Local(Late<Arc<S>>),
+    /// Any data side: another process, through the wire.
+    Data(Arc<dyn RolesData>),
+}
+
 /// Roles as a tab: who holds which permissions, and the buttons that change
 /// it.
 pub struct RolesPanel<S: StaffStore + AccountDirectory> {
-    store: Late<Arc<S>>,
+    source: Source<S>,
 }
 
 impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
     /// The tab over a store the application already holds.
     pub fn new(store: Arc<S>) -> Self {
-        Self {
-            store: Late::ready(store),
-        }
+        Self::late(Late::ready(store))
     }
 
     /// The tab over a store that arrives later, in `cell`: the admin fills
     /// it from the first request that carries the auth services.
     pub fn late(cell: Late<Arc<S>>) -> Self {
-        Self { store: cell }
+        Self {
+            source: Source::Local(cell),
+        }
     }
 
-    fn store(&self) -> Result<&Arc<S>, AdminError> {
-        self.store.require("accounts store")
+    /// The tab over any [`RolesData`]: [`RemoteRoles`] in the backoffice
+    /// binary, which reads the roles through the wire (§7.6).
+    pub fn over(data: Arc<dyn RolesData>) -> Self {
+        Self {
+            source: Source::Data(data),
+        }
+    }
+
+    fn data(&self) -> Arc<dyn RolesData> {
+        match &self.source {
+            Source::Local(cell) => Arc::new(Stored(cell.clone())),
+            Source::Data(data) => Arc::clone(data),
+        }
     }
 }
 
@@ -166,6 +568,19 @@ impl<S: StaffStore + AccountDirectory> Panel for RolesPanel<S> {
         "Roles".to_string()
     }
 
+    fn serve(&self) -> Option<Arc<dyn PanelServe>> {
+        match &self.source {
+            Source::Local(_) => Some(RolesServe::new(self.data()).shared()),
+            Source::Data(_) => None,
+        }
+    }
+
+    fn remote(&self, wire: Arc<dyn PanelWire>) -> Option<Arc<dyn Panel>> {
+        Some(Arc::new(RolesPanel::<S>::over(Arc::new(RemoteRoles::new(
+            wire,
+        )))))
+    }
+
     async fn render(&self, r: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {
         if !r.path.is_empty() {
             return Ok(None);
@@ -179,30 +594,13 @@ impl<S: StaffStore + AccountDirectory> Panel for RolesPanel<S> {
 
 impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
     async fn list(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
-        let store = self.store()?;
+        let view = self.data().read(&r.principal).await.map_err(failed)?;
         let grantor = Grantor::of(&r.principal);
-        let mut rows = Vec::new();
-        for role in store.roles().await.map_err(failed)? {
-            let mut members = Vec::new();
-            for id in store.members(&role.name).await.map_err(failed)? {
-                let label = match store.account(&id).await.map_err(failed)? {
-                    Some(account) => account
-                        .email
-                        .map_or_else(|| id.to_string(), |e| e.to_string()),
-                    None => id.to_string(),
-                };
-                members.push(MemberRow {
-                    account: id.to_string(),
-                    label,
-                });
-            }
-            rows.push(RoleRow {
-                permissions: role
-                    .permissions
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" "),
+        let rows = view
+            .roles
+            .into_iter()
+            .map(|role| RoleRow {
+                permissions: role.permissions.join(" "),
                 grants: role
                     .permissions
                     .iter()
@@ -215,11 +613,15 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
                     })
                     .collect(),
                 name: role.name,
-                members,
-            });
-        }
+                members: role
+                    .members
+                    .into_iter()
+                    .map(|(account, label)| MemberRow { account, label })
+                    .collect(),
+            })
+            .collect();
         let ctx = RolesCtx {
-            volatile: !store.is_durable(),
+            volatile: !view.durable,
             can_act: r.can_act && grantor.superuser,
             can_grant: r.can_act && (grantor.superuser || !grantor.owns.is_empty()),
             grantable: grantor.owns.clone(),
@@ -244,7 +646,6 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
 
     /// Every button. The form's `do` field says which.
     async fn act(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
-        let store = self.store()?;
         let field = |name: &str| r.submission.get(name).unwrap_or("").trim().to_string();
         let back = |refusal: Option<Refusal>| match refusal {
             None => PanelPage::redirect(r.url("")),
@@ -261,45 +662,53 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
         if !grantor.superuser {
             return Ok(back(Some(Refusal::NotYours)));
         }
-        match action.as_str() {
+        let change = match action.as_str() {
             "define" => {
                 if !valid_name(&name) {
                     return Ok(back(Some(Refusal::BadName)));
                 }
-                let permissions = field("permissions");
-                let role = Role::new(
-                    name,
-                    permissions
+                RolesChange::Define {
+                    role: name,
+                    permissions: field("permissions")
                         .split(|c: char| c.is_whitespace() || c == ',')
-                        .filter(|p| !p.is_empty()),
-                );
-                store.put_role(&role).await.map_err(failed)?;
-            }
-            "delete" => {
-                store.delete_role(&name).await.map_err(failed)?;
-            }
-            "assign" => {
-                let Ok(address) = EmailAddress::parse(&field("email")) else {
-                    return Ok(back(Some(Refusal::NotAnAddress)));
-                };
-                let Some(account) = store.account_by_email(&address).await.map_err(failed)? else {
-                    return Ok(back(Some(Refusal::NoAccount)));
-                };
-                if !store
-                    .assign_role(&account.id, &name)
-                    .await
-                    .map_err(failed)?
-                {
-                    return Ok(back(Some(Refusal::NoRole)));
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect(),
                 }
             }
-            "unassign" => {
-                let account = AccountId::new(field("account"));
-                store.unassign_role(&account, &name).await.map_err(failed)?;
-            }
+            "delete" => RolesChange::Delete { role: name },
+            "assign" => RolesChange::Assign {
+                role: name,
+                email: field("email"),
+            },
+            "unassign" => RolesChange::Unassign {
+                role: name,
+                account: field("account"),
+            },
             _ => return Ok(back(Some(Refusal::NoAction))),
-        }
-        Ok(back(None))
+        };
+        self.changed(r, change).await
+    }
+
+    /// Runs `change` and goes back to the tab, with the refusal's code.
+    async fn changed(
+        &self,
+        r: &PanelRequest<'_>,
+        change: RolesChange,
+    ) -> Result<PanelPage, AdminError> {
+        let outcome = self
+            .data()
+            .change(&r.principal, change)
+            .await
+            .map_err(failed)?;
+        Ok(match outcome {
+            RolesOutcome::Done => PanelPage::redirect(r.url("")),
+            // A code the tab did not write shows nothing (`Refusal`).
+            RolesOutcome::Refused(code) => {
+                let code = Refusal::from_code(&code).map_or("", Refusal::code);
+                PanelPage::redirect(format!("{}?error={code}", r.url("")))
+            }
+        })
     }
 
     /// Gives or takes one level on one resource to or from a role.
@@ -310,7 +719,6 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
         role: &str,
         give: bool,
     ) -> Result<PanelPage, AdminError> {
-        let store = self.store()?;
         let back = |refusal: Option<Refusal>| match refusal {
             None => PanelPage::redirect(r.url("")),
             Some(refusal) => PanelPage::redirect(format!("{}?error={}", r.url(""), refusal.code())),
@@ -336,19 +744,18 @@ impl<S: StaffStore + AccountDirectory> RolesPanel<S> {
         if !grantor.may_grant(&resource, level) {
             return Ok(back(Some(Refusal::NotYours)));
         }
-        let roles = store.roles().await.map_err(failed)?;
-        let Some(mut found) = roles.into_iter().find(|candidate| candidate.name == role) else {
-            return Ok(back(Some(Refusal::NoRole)));
+        let change = RolesChange::Grant {
+            role: role.to_string(),
+            resource,
+            level: level.as_str().to_string(),
+            give,
         };
-        let permission = level.on(&resource);
-        if give {
-            found.permissions.insert(permission);
-        } else {
-            found.permissions.remove(&permission);
-        }
-        store.put_role(&found).await.map_err(failed)?;
-        Ok(back(None))
+        self.changed(r, change).await
     }
+}
+
+fn failed(e: String) -> AdminError {
+    AdminError::Render(rsx::Error::custom(e))
 }
 
 /// `jobs.edit` as `("jobs", Level::Edit)`, or `None` for a permission that
