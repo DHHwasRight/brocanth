@@ -63,6 +63,7 @@ impl std::error::Error for StoreError {}
 
 /// One line of a breakdown: a page, a referrer, a browser.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line {
     /// What is counted: `/pricing`, `https://news.example`, `Firefox`.
     pub label: String,
@@ -74,6 +75,7 @@ pub struct Line {
 
 /// What a breakdown is grouped by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub enum Dimension {
     /// The stored path.
     Path,
@@ -126,6 +128,7 @@ impl Dimension {
 
 /// The numbers for one site over a range of days, both ends included.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Report {
     /// Page views.
     pub views: i64,

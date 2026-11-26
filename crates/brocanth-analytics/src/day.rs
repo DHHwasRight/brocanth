@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// narrows a visit down, and a daily report has no use for it. The salt
 /// rotates on the same boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Day(pub i32);
 
 impl Day {

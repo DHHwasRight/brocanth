@@ -13,60 +13,336 @@
 //! Locked like every tab: reading it is `Action::ViewPanel` on `analytics`,
 //! which the admin's shipped `DenyAll` refuses until the application says
 //! who may.
+//!
+//! The tab reads through [`AnalyticsData`] (docs/backoffice.md §7.6): in
+//! this process over the recorder, or over the backoffice wire
+//! ([`RemoteAnalytics`], answered by [`AnalyticsServe`]). Both calls are
+//! reads and need `analytics.read` on the data side, which also holds a
+//! range to [`MAX_RANGE`] days.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::late::Late;
+use brocanth_admin::panel::remote::{PanelServe, PanelWire};
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts;
+use brocanth_admin::policy::{Level, Principal};
+use serde::{Deserialize, Serialize};
 
 use crate::day::Day;
 use crate::recorder::Recorder;
 use crate::store::{Dimension, Line, Report};
 
+/// The tab's key: its RBAC resource, and its name on the backoffice wire.
+pub const TAB: &str = "analytics";
+
 /// The ranges the screen offers, in days.
 const RANGES: [u32; 3] = [7, 30, 90];
 
+/// What the analytics tab reads (docs/backoffice.md §7.6, P1).
+///
+/// In this process it reads the recorder; [`RemoteAnalytics`] sends it
+/// over the backoffice wire, and [`AnalyticsServe`] answers it there.
+#[async_trait]
+pub trait AnalyticsData: Send + Sync + 'static {
+    /// The sites, today, and the recorder's counters.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text, with a `help:` line.
+    async fn overview(&self, who: &Principal<'_>) -> Result<AnalyticsOverview, String>;
+
+    /// The numbers for `site` from `from` to `to`, both included.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text: a range longer than [`MAX_RANGE`] days, or the
+    /// store's error.
+    async fn report(
+        &self,
+        who: &Principal<'_>,
+        site: &str,
+        from: Day,
+        to: Day,
+    ) -> Result<Report, String>;
+}
+
+/// What the screen shows around the report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsOverview {
+    /// This server's site.
+    pub site: String,
+    /// This server's site first, then every static site that sent a beacon.
+    pub sites: Vec<String>,
+    /// Today, by the recorder's clock.
+    pub today: Day,
+    /// Views written since the process started.
+    pub written: u64,
+    /// Views waiting to be written.
+    pub pending: usize,
+    /// Views dropped because the buffer was full.
+    pub dropped: u64,
+    /// What the last write failed with.
+    pub last_error: Option<String>,
+}
+
+/// One call of [`AnalyticsData`], as the wire carries it. Both need `read`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnalyticsCall {
+    /// [`AnalyticsData::overview`].
+    Overview,
+    /// [`AnalyticsData::report`].
+    Report {
+        /// The site.
+        site: String,
+        /// The first day.
+        from: Day,
+        /// The last day.
+        to: Day,
+    },
+}
+
+/// What an [`AnalyticsCall`] answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnalyticsAnswer {
+    /// To `Overview`.
+    Overview(AnalyticsOverview),
+    /// To `Report`.
+    Report(Report),
+}
+
+/// The recorder in this process: empty until the first request that
+/// carries it.
+struct Recorded(Late<Recorder>);
+
+impl Recorded {
+    fn recorder(&self) -> Result<&Recorder, String> {
+        self.0.get().ok_or_else(|| {
+            "the analytics plugin is not registered in this application\nhelp: register it, \
+             which puts the recorder on the request context"
+                .to_string()
+        })
+    }
+}
+
+#[async_trait]
+impl AnalyticsData for Recorded {
+    async fn overview(&self, _who: &Principal<'_>) -> Result<AnalyticsOverview, String> {
+        let recorder = self.recorder()?;
+        Ok(AnalyticsOverview {
+            site: recorder.site().to_string(),
+            sites: recorder
+                .sites()
+                .await
+                .unwrap_or_else(|_| vec![recorder.site().to_string()]),
+            today: recorder.today(),
+            written: recorder.written(),
+            pending: recorder.pending(),
+            dropped: recorder.dropped(),
+            last_error: recorder.last_error(),
+        })
+    }
+
+    async fn report(
+        &self,
+        _who: &Principal<'_>,
+        site: &str,
+        from: Day,
+        to: Day,
+    ) -> Result<Report, String> {
+        if from > to || to.0 - from.0 >= MAX_RANGE as i32 {
+            return Err(format!(
+                "a report covers one to {MAX_RANGE} days, not {from} to {to}\nhelp: ask for a \
+                 shorter range"
+            ));
+        }
+        self.recorder()?
+            .report_for(site, from, to)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The data side of the analytics tab on the backoffice wire: decodes an
+/// [`AnalyticsCall`] and runs it on an [`AnalyticsData`].
+pub struct AnalyticsServe(Arc<dyn AnalyticsData>);
+
+impl AnalyticsServe {
+    /// Serves `data`.
+    pub fn new(data: Arc<dyn AnalyticsData>) -> AnalyticsServe {
+        AnalyticsServe(data)
+    }
+
+    /// As the wire server takes it.
+    pub fn shared(self) -> Arc<dyn PanelServe> {
+        Arc::new(self)
+    }
+}
+
+impl std::fmt::Debug for AnalyticsServe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AnalyticsServe")
+    }
+}
+
+fn decode(call: &str) -> Result<AnalyticsCall, String> {
+    serde_json::from_str(call).map_err(|e| format!("an analytics call did not decode: {e}"))
+}
+
+#[async_trait]
+impl PanelServe for AnalyticsServe {
+    fn level(&self, call: &str) -> Result<Level, String> {
+        decode(call).map(|_| Level::Read)
+    }
+
+    async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String> {
+        let answer = match decode(call)? {
+            AnalyticsCall::Overview => AnalyticsAnswer::Overview(self.0.overview(who).await?),
+            AnalyticsCall::Report { site, from, to } => {
+                AnalyticsAnswer::Report(self.0.report(who, &site, from, to).await?)
+            }
+        };
+        serde_json::to_string(&answer)
+            .map_err(|e| format!("an analytics answer did not encode: {e}"))
+    }
+}
+
+/// The analytics tab's data in another process, through the backoffice
+/// wire.
+pub struct RemoteAnalytics(Arc<dyn PanelWire>);
+
+impl RemoteAnalytics {
+    /// The analytics behind `wire`.
+    pub fn new(wire: Arc<dyn PanelWire>) -> RemoteAnalytics {
+        RemoteAnalytics(wire)
+    }
+
+    async fn ask(
+        &self,
+        who: &Principal<'_>,
+        call: &AnalyticsCall,
+    ) -> Result<AnalyticsAnswer, String> {
+        let text = serde_json::to_string(call)
+            .map_err(|e| format!("an analytics call did not encode: {e}"))?;
+        let answer = self.0.send(who, TAB, text).await?;
+        serde_json::from_str(&answer)
+            .map_err(|e| format!("an analytics answer did not decode: {e}"))
+    }
+}
+
+impl std::fmt::Debug for RemoteAnalytics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteAnalytics")
+    }
+}
+
+#[async_trait]
+impl AnalyticsData for RemoteAnalytics {
+    async fn overview(&self, who: &Principal<'_>) -> Result<AnalyticsOverview, String> {
+        match self.ask(who, &AnalyticsCall::Overview).await? {
+            AnalyticsAnswer::Overview(overview) => Ok(overview),
+            AnalyticsAnswer::Report(_) => Err("the data side answered with a report".into()),
+        }
+    }
+
+    async fn report(
+        &self,
+        who: &Principal<'_>,
+        site: &str,
+        from: Day,
+        to: Day,
+    ) -> Result<Report, String> {
+        let site = site.to_string();
+        match self
+            .ask(who, &AnalyticsCall::Report { site, from, to })
+            .await?
+        {
+            AnalyticsAnswer::Report(report) => Ok(report),
+            AnalyticsAnswer::Overview(_) => Err("the data side answered with no report".into()),
+        }
+    }
+}
+
+/// Where the tab reads.
+enum Source {
+    /// The recorder, which arrives with the first request.
+    Local(Late<Recorder>),
+    /// Any data side: another process, through the wire.
+    Data(Arc<dyn AnalyticsData>),
+}
+
 /// The analytics tab.
 pub struct AnalyticsPanel {
-    recorder: Late<Recorder>,
+    source: Source,
 }
 
 impl AnalyticsPanel {
     /// A tab over this recorder.
     pub fn new(recorder: Recorder) -> Self {
-        Self {
-            recorder: Late::ready(recorder),
-        }
+        Self::late(Late::ready(recorder))
     }
 
     /// A tab over a recorder that arrives later, in `cell`: for a generated
     /// admin, which mounts before the plugin is built. The admin fills the
     /// cell from the first request that carries the [`Recorder`].
     pub fn late(cell: Late<Recorder>) -> Self {
-        Self { recorder: cell }
+        Self {
+            source: Source::Local(cell),
+        }
     }
 
-    fn recorder(&self) -> Option<Recorder> {
-        self.recorder.get().cloned()
+    /// A tab over any [`AnalyticsData`]: [`RemoteAnalytics`] in the
+    /// backoffice binary, which reads the numbers through the wire (§7.6).
+    pub fn over(data: Arc<dyn AnalyticsData>) -> Self {
+        Self {
+            source: Source::Data(data),
+        }
+    }
+
+    /// What the tab reads through, or `None` before the recorder arrived.
+    fn data(&self) -> Option<Arc<dyn AnalyticsData>> {
+        match &self.source {
+            Source::Local(cell) => cell
+                .get()
+                .is_some()
+                .then(|| Arc::new(Recorded(cell.clone())) as Arc<dyn AnalyticsData>),
+            Source::Data(data) => Some(Arc::clone(data)),
+        }
     }
 }
 
 #[async_trait]
 impl Panel for AnalyticsPanel {
     fn key(&self) -> &str {
-        "analytics"
+        TAB
     }
 
     fn label(&self) -> String {
         "Analytics".to_string()
     }
 
+    fn serve(&self) -> Option<Arc<dyn PanelServe>> {
+        match &self.source {
+            Source::Local(cell) => {
+                Some(AnalyticsServe::new(Arc::new(Recorded(cell.clone()))).shared())
+            }
+            Source::Data(_) => None,
+        }
+    }
+
+    fn remote(&self, wire: Arc<dyn PanelWire>) -> Option<Arc<dyn Panel>> {
+        Some(Arc::new(AnalyticsPanel::over(Arc::new(
+            RemoteAnalytics::new(wire),
+        ))))
+    }
+
     async fn render(&self, r: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {
         if r.post || !r.path.is_empty() {
             return Ok(None);
         }
-        let Some(recorder) = self.recorder() else {
+        let Some(data) = self.data() else {
             return Ok(Some(PanelPage::body(
                 "Analytics",
                 format!(
@@ -75,30 +351,40 @@ impl Panel for AnalyticsPanel {
                 ),
             )));
         };
-        let today = recorder.today();
-        let (from, to, current) = range(&r, today);
+        let who = &r.principal;
+        let overview = match data.overview(who).await {
+            Ok(overview) => overview,
+            Err(e) => {
+                return Ok(Some(PanelPage::body(
+                    "Analytics",
+                    format!(
+                        "<p role=\"alert\" class=\"{}\">The numbers could not be read: {}</p>",
+                        parts::muted(),
+                        escape(&e)
+                    ),
+                )))
+            }
+        };
+        let (from, to, current) = range(&r, overview.today);
         // This server's site first, then every static site that sent a
         // beacon. A `site` that is not one of them is this server's: the
         // parameter picks from the list, it never names a new one.
-        let sites = recorder
-            .sites()
-            .await
-            .unwrap_or_else(|_| vec![recorder.site().to_string()]);
+        let sites = &overview.sites;
         let site = r
             .param("site")
             .filter(|s| sites.contains(s))
-            .unwrap_or_else(|| recorder.site().to_string());
+            .unwrap_or_else(|| overview.site.clone());
         let mut html = String::new();
-        html.push_str(&ranges(&r, current, from, to, &sites, &site));
-        match recorder.report_for(&site, from, to).await {
+        html.push_str(&ranges(&r, current, from, to, sites, &site));
+        match data.report(who, &site, from, to).await {
             Ok(report) => html.push_str(&screen(&report, from, to)),
             Err(e) => html.push_str(&format!(
                 "<p class=\"{}\">The report failed: {}</p>",
                 parts::muted(),
-                escape(&e.to_string())
+                escape(&e)
             )),
         }
-        html.push_str(&status(&recorder));
+        html.push_str(&status(&overview));
         Ok(Some(PanelPage::body("Analytics", html)))
     }
 }
@@ -282,20 +568,16 @@ fn breakdown(dimension: Dimension, lines: &[Line]) -> String {
     )
 }
 
-fn status(recorder: &Recorder) -> String {
+fn status(recorder: &AnalyticsOverview) -> String {
     let mut lines = vec![format!(
         "{} written since start, {} waiting",
-        recorder.written(),
-        recorder.pending()
+        recorder.written, recorder.pending
     )];
-    if recorder.dropped() > 0 {
-        lines.push(format!(
-            "{} dropped: the buffer was full",
-            recorder.dropped()
-        ));
+    if recorder.dropped > 0 {
+        lines.push(format!("{} dropped: the buffer was full", recorder.dropped));
     }
-    if let Some(e) = recorder.last_error() {
-        lines.push(format!("last write failed: {}", escape(&e)));
+    if let Some(e) = &recorder.last_error {
+        lines.push(format!("last write failed: {}", escape(e)));
     }
     format!("<p class=\"{}\">{}</p>", parts::muted(), lines.join(" · "))
 }
