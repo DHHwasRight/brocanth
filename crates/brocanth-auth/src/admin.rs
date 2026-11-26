@@ -64,7 +64,10 @@ use crate::storage::{AccountDirectory, SessionRecord, StoreError};
 pub mod impersonate;
 mod staff;
 
-pub use impersonate::{ImpersonatePanel, IMPERSONATE_KEY};
+pub use impersonate::{
+    ImpersonatePanel, RemoteSubjects, Subjects, SubjectsCall, SubjectsData, SubjectsServe,
+    IMPERSONATE_KEY,
+};
 pub use staff::{
     permission, MemberRow, RemoteRoles, RoleRow, RoleView, RolesAnswer, RolesCall, RolesChange,
     RolesCtx, RolesData, RolesOutcome, RolesPanel, RolesServe, RolesView, StaffPolicy, ROLES_KEY,
