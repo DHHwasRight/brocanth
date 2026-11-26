@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-flags"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Feature flags for brocanth: on for everyone, a percentage of users, or a list of users and groups. Rows in your Postgres, read from an in-process copy."

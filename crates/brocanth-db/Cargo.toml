@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-db"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The database layer for brocanth: a Postgres pool with session settings, and sea-query statements run through sqlx. No entities."

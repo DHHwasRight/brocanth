@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-realtime"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A realtime broker indexed by topic and addressed by audience, so one write is a map lookup rather than one query per subscriber."

@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-pagination"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "One paginator for every list: offset pages with a total, keyset pages with a cursor, and links that keep the rest of the query string."

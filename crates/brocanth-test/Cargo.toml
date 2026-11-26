@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-test"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "An HTTP test client for brocanth: drives a built App through a request and answers questions about the page it produced."

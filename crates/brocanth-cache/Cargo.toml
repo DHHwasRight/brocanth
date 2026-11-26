@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-cache"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A cache for brocanth, kept in Postgres, so a small deployment has one moving part instead of two."

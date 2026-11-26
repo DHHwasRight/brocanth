@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-audit"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Change history for brocanth: who changed which row, when, and what changed. A ChangeSink for the model layer, a journal for the admin, rows in your own Postgres."

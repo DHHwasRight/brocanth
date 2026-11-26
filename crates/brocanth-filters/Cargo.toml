@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-filters"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Typed list filters and a sort from the query string, compiled into a brocanth-policy predicate, so they go into the WHERE beside the rule."

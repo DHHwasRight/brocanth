@@ -1,6 +1,7 @@
 [package]
 name = "nested-cards"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "prerender's nested-cards, served by brocanth: four layouts, and a click that replaces only what changed."

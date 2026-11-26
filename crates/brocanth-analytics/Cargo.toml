@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-analytics"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "First-party page-view counting for brocanth: a request hook, a daily-rotating visitor hash, rows in your own Postgres. No cookie, no script, no third party."

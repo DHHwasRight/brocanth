@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-rls"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Postgres row-level security declared in Rust: roles, functions, grants and policies, ordered by their dependencies, diffed against a snapshot into a migration."

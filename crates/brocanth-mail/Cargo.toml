@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-mail"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Mail for brocanth: one trait, an in-memory backend that records what was sent, an SMTP backend behind a feature that is off, and headers that cannot carry a newline."

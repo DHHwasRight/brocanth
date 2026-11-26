@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-bundle"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Build-time JS and CSS bundles for assets/: rolldown and lightningcss, called from build.rs."

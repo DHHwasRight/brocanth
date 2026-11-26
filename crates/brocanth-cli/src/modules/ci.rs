@@ -227,9 +227,10 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-org = { github = ["DHHwasRight"] }
 
 [licenses]
-# Not run in CI yet: brocanth's crates and this project declare no
-# `license` in Cargo.toml, and `cargo deny` fails a crate with none. When
-# every crate declares one, add `licenses` to the `cargo deny check` step.
+# Not run in CI yet: brocanth's crates are MIT, but this project and the
+# `zod` crate declare no `license` in Cargo.toml, and `cargo deny` fails a
+# crate with none. When every crate declares one, add `licenses` to the
+# `cargo deny check` step.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

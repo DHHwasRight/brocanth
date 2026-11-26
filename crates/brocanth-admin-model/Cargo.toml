@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-admin-model"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The admin's data source over SeaORM: one macro, one line per entity, every write through an ActiveModel."

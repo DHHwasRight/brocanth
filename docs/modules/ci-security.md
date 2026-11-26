@@ -74,9 +74,9 @@ that installs a tool is code that runs with the repository's token.
   runs. To bump: change both variables, and take the hash from the
   release's `.sha256` file, not from your own download.
 
-**Licenses are not checked yet.** brocanth's crates and the generated
-project declare no `license` in `Cargo.toml`, and `cargo deny` fails a
-crate with none. `deny.toml` has a `[licenses]` allow-list ready. Add
+**Licenses are not checked yet.** brocanth's crates are MIT, but the
+generated project declares no `license` in `Cargo.toml`, and neither does
+the `zod` crate it builds on. `cargo deny` fails a crate with none. `deny.toml` has a `[licenses]` allow-list ready. Add
 `licenses` to the `cargo deny check` step when every crate declares one.
 
 **Why two tools.** `cargo audit` is the RustSec reference and reads

@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-openapi"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "An OpenAPI 3.1 document derived from a brocanth route table, plus a drift check that turns `the spec is out of date` into a build failure."

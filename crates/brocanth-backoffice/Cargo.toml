@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-backoffice"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The backoffice as a service of its own: the tab data contract the admin reaches its rows through, and the `backoffice` module that builds a second binary serving only the admin."

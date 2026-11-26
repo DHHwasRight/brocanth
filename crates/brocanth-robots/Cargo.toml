@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-robots"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A robots.txt and a sitemap.xml written from builders, checked before they are served, and the `robots` and `sitemap` modules that serve them."

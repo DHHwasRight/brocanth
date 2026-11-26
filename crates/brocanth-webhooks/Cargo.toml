@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-webhooks"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Webhooks for brocanth: verified incoming deliveries with a replay window and an idempotency key, and signed outgoing deliveries with retries and a log."

@@ -1,6 +1,7 @@
 [package]
 name = "brocanth-model"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The brocanth model layer: validations, correct eager loading, hook-safe bulk writes, N+1 detection and dirty tracking over SeaORM."
