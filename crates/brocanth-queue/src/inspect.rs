@@ -166,7 +166,7 @@ impl Default for Page {
 /// One struct for all four [`View`]s rather than one per view. The screens
 /// show different columns of it, and a row that moves from `Running` to
 /// `Retrying` between two refreshes should not change type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRow {
     /// The job.
     pub id: JobId,
@@ -223,7 +223,7 @@ impl JobRow {
 /// kept rather than logged because a log line cannot be put back on the
 /// queue. [`DynInspect::requeue`] is why `max_attempts` and `unique_key`
 /// are here: without them the row describes a job that cannot be rebuilt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeadRow {
     /// The dead letter's own id, which is what a requeue or a discard names.
     pub id: DeadId,
@@ -253,7 +253,7 @@ pub struct DeadRow {
 }
 
 /// The whole queue in one row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Stats {
     /// Claimable right now.
     pub ready: u64,
@@ -276,7 +276,7 @@ pub struct Stats {
 }
 
 /// One queue's share of [`Stats`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueDepth {
     /// The queue's name.
     pub queue: String,
@@ -293,7 +293,7 @@ pub struct QueueDepth {
 }
 
 /// How wide a bucket [`DynInspect::finished`] counts into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Bucket {
     /// One bucket per hour.
     Hour,
@@ -348,7 +348,7 @@ impl Bucket {
 /// leaves one row. Read it as a lower bound on what ran. The wrong reading
 /// — "no row means it did not run" — is exactly the one somebody reaches
 /// for during the incident this history exists for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finished {
     /// The start of the bucket.
     pub at: SystemTime,
