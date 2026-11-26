@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/sitemap.rs`. A setting is read at
 | Provides | none |
 | Requires | none |
 | Uses | `Mount` (a mounted path): every `Backoffice` mount, such as the admin, is excluded, at the path its module file mounts it |
-| Adapts to | [`jt`](jt.md): the JSON page /status is excluded; [`realtime-sse`](realtime-sse.md): the event stream /realtime/events is excluded; [`static`](static.md): the note says the export publishes this file, so the base URL must be the published one; [`i18n-routing`](i18n-routing.md): each page is listed once per locale (/fr/about), never at the path that redirects; [`meta`](meta.md): the note says to keep the base URL equal to `[meta] base_url` |
+| Adapts to | [`jt`](jt.md): the JSON page /status is excluded; [`realtime-sse`](realtime-sse.md): the event stream /realtime/events is excluded; [`static`](static.md): the note says the export publishes this file, so the base URL must be the published one; [`i18n-routing`](i18n-routing.md): each page is listed once per locale (/fr/about), never at the path that redirects; [`meta`](meta.md): the note says to keep the base URL equal to `[meta] base_url`; [`content`](content.md): each published post and tag page is listed, with a `<lastmod>` from the post's `updated` or `date` |
 | Contributes | none |
 | Collects | none |
 | Exports | none |
@@ -74,6 +74,26 @@ that is not a full `http(s)` address stops the build with a `help:` line.
 To give a page a `<lastmod>`, call `path_modified` in the plugin's
 `sitemap` method. The builder accepts `2026-11-05` or a full W3C date and
 time.
+
+## With `content`
+
+Each published post and tag page of [`content`](content.md) is listed,
+with a `<lastmod>`:
+
+| Page | `<lastmod>` |
+|---|---|
+| `/posts/<slug>` | the post's `updated`, else its `date` |
+| `/posts/tags/<tag>` | the newest of its posts |
+| `/posts`, `/posts/tags` | the newest post (tagged, for `/posts/tags`) |
+
+The plugin's `content` method reads
+`brocanth_content::Collection::dated_paths()`: the paths the static export
+writes, never a draft and never a translation, whatever `[content] drafts`
+shows. Each `<loc>` is `base_url` and the path; with `i18n-routing`, one
+per locale. `exclude` applies to them too.
+
+Why `updated` before `date`: `<lastmod>` is the day the page last changed,
+and a crawler reads it to decide what to fetch again.
 
 ## With `robots`
 

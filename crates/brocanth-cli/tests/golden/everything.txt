@@ -17262,6 +17262,12 @@ mod tests {
         // The backoffice, wherever its module file mounts it.
         let admin = format!("{}</loc>", crate::modules::admin::MODULE.mount_at);
         assert!(!xml.contains(&admin), "{xml}");
+        // Each published post, dated, and each tag page.
+        assert!(
+            xml.contains("/en/posts/hello</loc>\n    <lastmod>2026-11-22</lastmod>"),
+            "{xml}"
+        );
+        assert!(xml.contains("/en/posts/tags/meta</loc>"), "{xml}");
     }
 }
 ===== src/pages/status.jt =====
@@ -25587,6 +25593,9 @@ pub async fn require(ctx: &Ctx, permission: &str) -> Result<Staff, Error> {
 //!
 //! With `i18n-routing`, each page is listed once per locale, as the `i18n`
 //! negotiator says: `/fr/about`, never `/about`, which redirects.
+//!
+//! With `content`, each published post and tag page is listed too, with
+//! the day it last changed: `content` below.
 
 use std::sync::OnceLock;
 
@@ -25688,6 +25697,31 @@ impl Sitemap {
         }
         Ok(xml)
     }
+
+    /// Adds each published post and tag page of the `content` collection,
+    /// with the day it last changed: the post's `updated`, else its
+    /// `date`; an index takes its newest post's day. A draft is never
+    /// listed, whatever `[content] drafts` shows. `exclude` applies.
+    fn content(
+        &self,
+        mut xml: Xml,
+        localized: &dyn Fn(&str) -> Vec<String>,
+    ) -> Result<Xml, PluginError> {
+        let posts = crate::plugins::content::collection()
+            .map_err(|e| PluginError::new(format!("[sitemap] the posts: {e}")))?;
+        for (path, modified) in posts.dated_paths() {
+            if self.settings.exclude.iter().any(|p| under(&path, p)) {
+                continue;
+            }
+            for url in localized(&path) {
+                xml = match modified {
+                    Some(day) => xml.path_modified(url, day.to_string()),
+                    None => xml.path(url),
+                };
+            }
+        }
+        Ok(xml)
+    }
 }
 
 impl Plugin for Sitemap {
@@ -25720,6 +25754,7 @@ impl Plugin for Sitemap {
                 .map_or_else(|| vec![path.to_string()], |n| n.localized(path))
         };
         let xml = self.sitemap(routes, &localized)?;
+        let xml = self.content(xml, &localized)?;
         let text = xml
             .render()
             .map_err(|e| PluginError::new(format!("[sitemap] {e}")))?;
@@ -25796,6 +25831,35 @@ mod tests {
             assert!(xml.contains(present), "{present} in {xml}");
         }
         assert!(!xml.contains("example.com/about</loc>"), "{xml}");
+    }
+
+    #[test]
+    fn each_published_post_is_listed_with_the_day_it_last_changed() {
+        let plugin = Sitemap::new(Settings {
+            base_url: Some("https://example.com".to_string()),
+            ..Settings::default()
+        });
+        let xml = plugin
+            .content(Xml::new("https://example.com"), &|path| {
+                vec![path.to_string()]
+            })
+            .unwrap()
+            .render()
+            .unwrap();
+        let posts = crate::plugins::content::collection().expect("build.rs checked every file");
+        for post in posts.published() {
+            let day = post.data.updated.unwrap_or(post.data.date);
+            let entry = format!(
+                "<loc>https://example.com{}</loc>\n    <lastmod>{day}</lastmod>",
+                post.path
+            );
+            assert!(xml.contains(&entry), "{entry} in {xml}");
+        }
+        for post in posts.all().iter().filter(|post| post.data.draft) {
+            let loc = format!("{}</loc>", post.path);
+            assert!(!xml.contains(&loc), "the draft {} in {xml}", post.source);
+        }
+        assert!(xml.contains("/posts/tags/meta</loc>"), "{xml}");
     }
 }
 ===== src/plugins/static_files/mod.rs =====
@@ -28832,7 +28896,7 @@ kind = ["routes"]
 files = ["src/modules/sitemap.rs", "src/pages/sitemap.xml.rs", "src/plugins/sitemap/"]
 config = ["sitemap"]
 crates = ["brocanth-robots"]
-adapted_to = ["jt", "realtime-sse", "i18n-routing", "meta"]
+adapted_to = ["jt", "realtime-sse", "i18n-routing", "meta", "content"]
 
 [modules.content]
 version = "0.1.0"
@@ -28970,4 +29034,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: 6db4f7518c42162e
+# brocanth-digest: d69adcb120113365

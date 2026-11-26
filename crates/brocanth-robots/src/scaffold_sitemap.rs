@@ -26,6 +26,12 @@
 //! plugin puts its negotiator in the services at `configure`, and this
 //! plugin, registered after it, asks it for each page's URLs.
 //!
+//! **With `content`, each published post and tag page is listed** with a
+//! `<lastmod>`: the post's `updated`, else its `date`; an index takes its
+//! newest post's day. `brocanth_content::Collection::dated_paths` gives
+//! them, the paths the static export writes. A draft is never listed, even
+//! where a debug build shows drafts.
+//!
 //! `outside_runtime`: the static export writes `/sitemap.xml` as the file
 //! `sitemap.xml`.
 //!
@@ -66,6 +72,10 @@ impl Module for Sitemap {
         .adapts_to(
             "meta",
             "the note says to keep the base URL equal to `[meta] base_url`",
+        )
+        .adapts_to(
+            "content",
+            "each published post and tag page is listed, with a `<lastmod>` from the post's `updated` or `date`",
         )
         .asked_in("pages", "A sitemap.xml that lists every page")
         .krate(Dep::brocanth("brocanth-robots"))
@@ -200,6 +210,23 @@ fn page_rs(project: &Project) -> String {
             )
         })
         .collect();
+    let content = if project.has("content") {
+        let (post, tag) = if project.has("i18n-routing") {
+            ("/en/posts/hello", "/en/posts/tags/meta")
+        } else {
+            ("/posts/hello", "/posts/tags/meta")
+        };
+        format!(
+            "        // Each published post, dated, and each tag page.\n        \
+             assert!(\n            \
+             xml.contains(\"{post}</loc>\\n    <lastmod>2026-11-22</lastmod>\"),\n            \
+             \"{{xml}}\"\n        \
+             );\n        \
+             assert!(xml.contains(\"{tag}</loc>\"), \"{{xml}}\");\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"{PAGE_RS}
 #[cfg(test)]
@@ -222,7 +249,7 @@ mod tests {{
 {index}        // No route with a parameter, and not this file itself.
         assert!(!xml.contains('{{'), "{{xml}}");
         assert!(!xml.contains("sitemap.xml"), "{{xml}}");
-{admin}    }}
+{admin}{content}    }}
 }}
 "#
     )
@@ -308,6 +335,17 @@ fn plugin_rs(project: &Project) -> String {
     } else {
         ""
     };
+    let (content_doc, content_fn, content_call, content_test) = if project.has("content") {
+        (
+            "//!\n//! With `content`, each published post and tag page is listed too, with\n\
+             //! the day it last changed: `content` below.\n",
+            CONTENT_FN,
+            "        let xml = self.content(xml, &localized)?;\n",
+            CONTENT_TEST,
+        )
+    } else {
+        ("", "", "", "")
+    };
     format!(
         r##"//! The sitemap.xml, as this application answers it.
 //!
@@ -322,7 +360,7 @@ fn plugin_rs(project: &Project) -> String {
 //! build, and a debug build takes the development address.
 //!
 //! To give a page a `<lastmod>`, call `path_modified` in `sitemap` below.
-{routing_doc}
+{routing_doc}{content_doc}
 use std::sync::OnceLock;
 
 use brocanth::plugin_api::{{Lifecycle, Plugin, PluginError}};
@@ -410,7 +448,7 @@ impl Sitemap {{
         }}
         Ok(xml)
     }}
-}}
+{content_fn}}}
 
 impl Plugin for Sitemap {{
     type Config = Settings;
@@ -423,7 +461,7 @@ impl Plugin for Sitemap {{
             .iter()
             .map(|(verb, pattern, _)| (*verb, *pattern));
 {localized}        let xml = self.sitemap(routes, &localized)?;
-        let text = xml
+{content_call}        let text = xml
             .render()
             .map_err(|e| PluginError::new(format!("[sitemap] {{e}}")))?;
         let _ = RENDERED.set(text);
@@ -480,7 +518,7 @@ mod tests {{
         .unwrap_err();
         assert!(error.contains("help:"), "{{error}}");
     }}
-{routing_test}}}
+{routing_test}{content_test}}}
 "##,
         lc = if project.has("i18n-routing") {
             "lc"
@@ -489,6 +527,66 @@ mod tests {{
         },
     )
 }
+
+/// With `content`: the posts and the tag pages, dated.
+const CONTENT_FN: &str = r#"
+    /// Adds each published post and tag page of the `content` collection,
+    /// with the day it last changed: the post's `updated`, else its
+    /// `date`; an index takes its newest post's day. A draft is never
+    /// listed, whatever `[content] drafts` shows. `exclude` applies.
+    fn content(
+        &self,
+        mut xml: Xml,
+        localized: &dyn Fn(&str) -> Vec<String>,
+    ) -> Result<Xml, PluginError> {
+        let posts = crate::plugins::content::collection()
+            .map_err(|e| PluginError::new(format!("[sitemap] the posts: {e}")))?;
+        for (path, modified) in posts.dated_paths() {
+            if self.settings.exclude.iter().any(|p| under(&path, p)) {
+                continue;
+            }
+            for url in localized(&path) {
+                xml = match modified {
+                    Some(day) => xml.path_modified(url, day.to_string()),
+                    None => xml.path(url),
+                };
+            }
+        }
+        Ok(xml)
+    }
+"#;
+
+/// With `content`: the test that a post is listed with its day.
+const CONTENT_TEST: &str = r#"
+    #[test]
+    fn each_published_post_is_listed_with_the_day_it_last_changed() {
+        let plugin = Sitemap::new(Settings {
+            base_url: Some("https://example.com".to_string()),
+            ..Settings::default()
+        });
+        let xml = plugin
+            .content(Xml::new("https://example.com"), &|path| {
+                vec![path.to_string()]
+            })
+            .unwrap()
+            .render()
+            .unwrap();
+        let posts = crate::plugins::content::collection().expect("build.rs checked every file");
+        for post in posts.published() {
+            let day = post.data.updated.unwrap_or(post.data.date);
+            let entry = format!(
+                "<loc>https://example.com{}</loc>\n    <lastmod>{day}</lastmod>",
+                post.path
+            );
+            assert!(xml.contains(&entry), "{entry} in {xml}");
+        }
+        for post in posts.all().iter().filter(|post| post.data.draft) {
+            let loc = format!("{}</loc>", post.path);
+            assert!(!xml.contains(&loc), "the draft {} in {xml}", post.source);
+        }
+        assert!(xml.contains("/posts/tags/meta</loc>"), "{xml}");
+    }
+"#;
 
 /// The URLs of one page, with no locale segment.
 const LOCALIZED_PLAIN: &str = "        let localized = |path: &str| vec![path.to_string()];\n";

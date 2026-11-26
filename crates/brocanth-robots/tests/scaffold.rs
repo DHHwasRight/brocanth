@@ -191,3 +191,25 @@ fn a_module_the_cli_does_not_list_joins_the_project() {
         "{plugins}"
     );
 }
+
+/// With `content`: each published post and tag page is in the sitemap,
+/// dated by the post. The page test asks the whole application.
+#[test]
+fn with_content_each_published_post_is_listed_with_its_day() {
+    shape(
+        "sitemap-content",
+        &["config", "rsx", "markdown", "content", "sitemap"],
+    );
+    let files = brocanth_cli::testing::generate(
+        "my-blog",
+        &["config", "rsx", "markdown", "content", "sitemap"],
+        &[&Robots, &Sitemap],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let plugin = file(&files, "src/plugins/sitemap/mod.rs");
+    assert!(plugin.contains("posts.dated_paths()"), "{plugin}");
+    assert!(
+        plugin.contains("let xml = self.content(xml, &localized)?;"),
+        "{plugin}"
+    );
+}

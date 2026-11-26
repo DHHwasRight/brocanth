@@ -120,7 +120,9 @@ The `sitemap` module serves `/sitemap.xml`. Its page is
   and every plugin finishes a stage before the next starts.
 - **lastmod.** The builder takes one per page (`path_modified`). The
   settings do not: the page table has no dates, and one date for every page
-  says nothing true.
+  says nothing true. With `content`, each post and tag page carries the
+  post's `updated` or `date` (`docs/modules/sitemap.md`, "With
+  `content`").
 
 ### Where the base URL lives
 
