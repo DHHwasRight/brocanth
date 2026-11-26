@@ -23,7 +23,12 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::{read_name, FrontMatter};
+use crate::{is_slug, read_name, FrontMatter};
+
+/// The slugs no entry may take: `tags` is the tag index,
+/// `<base>/tags`. The router prefers a literal segment to a parameter, so
+/// an entry `tags.md` would never be served.
+pub const RESERVED: &[&str] = &["tags"];
 
 /// Checks every `*.md` file in `dir` against `T`, and writes
 /// `$OUT_DIR/content_<name>.rs` with the list of them, where `<name>` is the
@@ -39,9 +44,10 @@ use crate::{read_name, FrontMatter};
 /// # Errors
 ///
 /// Every bad file, one paragraph each: the path, the line, what is wrong,
-/// and a `help:` line. A file name that is not a slug, front matter that
-/// does not read as `T`, an empty title, and a translation
-/// (`hello.fr.md`) with no file in the default language (`hello.md`).
+/// and a `help:` line. A file name that is not a slug, or is the slug
+/// [`RESERVED`]; front matter that does not read as `T`; an empty title; a
+/// tag that is not a slug; and a translation (`hello.fr.md`) with no file
+/// in the default language (`hello.md`).
 pub fn collection<T: FrontMatter>(dir: &str) -> Result<(), String> {
     let root = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
@@ -95,6 +101,13 @@ pub(crate) fn check<T: FrontMatter>(root: &Path, dir: &str) -> Result<String, St
                 continue;
             }
         };
+        if RESERVED.contains(&slug) {
+            errors.push(format!(
+                "{path}: the slug `{slug}` is the collection's tag index, `<base>/{slug}`\n\
+                 help: rename the file: `about-{slug}.md`"
+            ));
+            continue;
+        }
         let file = full.join(name);
         let text = match std::fs::read_to_string(&file) {
             Ok(text) => text,
@@ -107,7 +120,15 @@ pub(crate) fn check<T: FrontMatter>(root: &Path, dir: &str) -> Result<String, St
             Ok(doc) if doc.data.title().trim().is_empty() => errors.push(format!(
                 "{path}: the title is empty\nhelp: give the entry a title in its front matter: `title = \"Hello\"`"
             )),
-            Ok(_) => {}
+            Ok(doc) => {
+                // A tag is the last segment of its page, `<base>/tags/<tag>`.
+                for tag in doc.data.tags().iter().filter(|tag| !is_slug(tag)) {
+                    errors.push(format!(
+                        "{path}: the tag `{tag}` cannot be a URL segment: its page is `<base>/tags/<tag>`\n\
+                         help: write it with lower case letters, digits and single `-`: `rust-web`"
+                    ));
+                }
+            }
             Err(e) => errors.push(format!("{path}: {e}")),
         }
         match locale {
@@ -154,12 +175,17 @@ mod tests {
         title: String,
         date: Date,
         #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
         draft: bool,
     }
 
     impl FrontMatter for Post {
         fn title(&self) -> &str {
             &self.title
+        }
+        fn tags(&self) -> &[String] {
+            &self.tags
         }
     }
 
@@ -242,6 +268,36 @@ mod tests {
             "{e}"
         );
         assert_eq!(e.matches("\nhelp: ").count(), 5, "{e}");
+    }
+
+    #[test]
+    fn the_tag_index_slug_and_a_tag_that_is_no_url_segment_are_refused() {
+        let root = tree(
+            "content-tags",
+            &[
+                ("tags.md", "+++\ntitle = \"x\"\ndate = 2026-01-01\n+++\n"),
+                (
+                    "spaced.md",
+                    "+++\ntitle = \"x\"\ndate = 2026-01-01\ntags = [\"rust\", \"Web Dev\"]\n+++\n",
+                ),
+                (
+                    "fine.md",
+                    "+++\ntitle = \"x\"\ndate = 2026-01-01\ntags = [\"rust-web\"]\n+++\n",
+                ),
+            ],
+        );
+        let e = check::<Post>(&root, "content/posts").unwrap_err();
+        assert!(e.starts_with("2 bad file(s) in content/posts"), "{e}");
+        assert!(
+            e.contains("content/posts/tags.md: the slug `tags` is the collection's tag index"),
+            "{e}"
+        );
+        assert!(
+            e.contains("content/posts/spaced.md: the tag `Web Dev` cannot be a URL segment"),
+            "{e}"
+        );
+        assert!(!e.contains("fine.md"), "{e}");
+        assert_eq!(e.matches("\nhelp: ").count(), 2, "{e}");
     }
 
     #[test]

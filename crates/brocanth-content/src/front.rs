@@ -74,14 +74,7 @@ pub fn read_name(name: &str) -> Result<(&str, Option<&str>), String> {
         Some((slug, locale)) => (slug, Some(locale)),
         None => (stem, None),
     };
-    let slug_ok = !slug.is_empty()
-        && slug.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        });
-    if !slug_ok {
+    if !is_slug(slug) {
         return Err(format!(
             "`{slug}` cannot be a URL segment\n\
              help: rename the file with lower case letters, digits and single `-`: `my-first-post.md`"
@@ -101,6 +94,19 @@ pub fn read_name(name: &str) -> Result<(&str, Option<&str>), String> {
         }
     }
     Ok((slug, locale))
+}
+
+/// Whether `text` is a URL segment as a collection writes one: lower case
+/// letters, digits and single `-`, not at either end. A file name's slug
+/// and a tag are both.
+pub fn is_slug(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
 }
 
 #[cfg(test)]

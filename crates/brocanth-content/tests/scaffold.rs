@@ -40,12 +40,19 @@ fn file<'a>(files: &'a [(String, String)], path: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{path} is generated"))
 }
 
-/// The collection alone: a post, its type, the build step and two pages.
+/// The collection alone: a post, its type, the build step and four pages:
+/// the list, the post, the tags and one tag.
 #[test]
-fn a_blog_gets_a_post_its_type_and_two_pages() {
+fn a_blog_gets_a_post_its_type_and_four_pages() {
     let files = shape("content", &["rsx", "markdown", "content"]);
     let build = file(&files, "build.rs");
     assert!(build.contains("brocanth_content::build::collection::<posts::Post>(\"content/posts\")"));
+    let tags = file(&files, "src/pages/posts/tags/index.rs");
+    assert!(tags.contains("posts.collection().tag_path(tag)"), "{tags}");
+    let tag = file(&files, "src/pages/posts/tags/[tag].rs");
+    assert!(tag.contains("posts.tagged(&tag, None)"), "{tag}");
+    file(&files, "src/pages/posts/tags/index.rsx");
+    file(&files, "src/pages/posts/tags/[tag].rsx");
     let manifest = file(&files, "Cargo.toml");
     assert!(manifest.contains("[build-dependencies]"), "{manifest}");
 }

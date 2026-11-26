@@ -49,7 +49,7 @@ impl Module for StaticSite {
         .adapts_to("rsx-htmx", "the export writes dp-swap and the partials")
         .adapts_to(
             "content",
-            "the export writes /posts and each published post, never a draft",
+            "the export writes /posts, each published post, /posts/tags and each tag page, never a draft",
         )
         .asked_in("pages", "Compile the pages to files any static host serves")
         .needs("commands", "`export` is a subcommand of this binary")
@@ -187,8 +187,8 @@ const ASSETS_EMBEDDED: &str = "
                     .map(|asset| (asset.published, asset.body)),
             )";
 
-/// The posts of the `content` collection: `/posts` and each published
-/// post. A draft is never written.
+/// The pages of the `content` collection: `/posts`, each published post,
+/// `/posts/tags` and each tag page. A draft is never written.
 const CONTENT_PATHS: &str = "
             .paths(crate::plugins::content::paths())";
 

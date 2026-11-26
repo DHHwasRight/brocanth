@@ -38,4 +38,4 @@ pub use collection::{Collection, Entry, View};
 #[cfg(any(feature = "build", feature = "runtime"))]
 pub use date::Date;
 #[cfg(any(feature = "build", feature = "runtime"))]
-pub use front::{read_name, FrontMatter, Source};
+pub use front::{is_slug, read_name, FrontMatter, Source};

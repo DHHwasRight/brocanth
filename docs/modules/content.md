@@ -12,7 +12,7 @@ The wizard calls it: *A blog: Markdown posts with typed front matter*.
 | Presets | none |
 | Part of | nothing |
 | Conflicts | none |
-| Outside the runtime | yes: the static export writes the list and each published post |
+| Outside the runtime | yes: the static export writes the list, each published post and each tag page |
 | Crates | `brocanth-content`, and `brocanth-content` (feature `build`) and `serde` in `[build-dependencies]` |
 | Without it | no content collections; a post is a page written by hand, with no checked front matter |
 
@@ -53,7 +53,13 @@ Files:
   request's context. Its tests read every post.
 - `src/pages/posts/index.rs` and `index.rsx`: `/posts`, newest first.
 - `src/pages/posts/[slug].rs` and `[slug].rsx`: `/posts/{slug}`, one post;
-  a slug with no file, or a hidden draft, is a 404.
+  a slug with no file, or a hidden draft, is a 404. Each tag links to its
+  page.
+- `src/pages/posts/tags/index.rs` and `index.rsx`: `/posts/tags`, every
+  tag of the listed posts with how many carry it, most used first.
+- `src/pages/posts/tags/[tag].rs` and `[tag].rsx`: `/posts/tags/{tag}`,
+  the posts with that tag, newest first, in the request's locale; a tag no
+  listed post carries is a 404.
 
 Slots:
 
@@ -61,13 +67,16 @@ Slots:
 - src/plugins/mod.rs: `pub mod content;`
 - src/plugins/mod.rs (the builder chain)
 - src/plugins/mod.rs (the provider list): `content crate::plugins::content::Content`
-- src/pages/mod.rs (the route table test): `/posts`, `/posts/{slug}`
+- src/pages/mod.rs (the route table test): `/posts`, `/posts/tags`,
+  `/posts/tags/{tag}`, `/posts/{slug}`
 - config/<env>.toml: `[content]`
 - AGENTS.md: `## Content`
 
-The page tests ask for `/posts` and `/posts/hello` through `app::handle` and
-check the link, the date, the rendered heading and table, and the 404. With
-[`meta`](meta.md), the post's `<title>` too; with `i18n`, the French list.
+The page tests ask for `/posts`, `/posts/hello`, `/posts/tags` and
+`/posts/tags/meta` through `app::handle` and check the links, the date, the
+tag count, the rendered heading and table, and the 404s. With
+[`meta`](meta.md), the post's `<title>` too; with `i18n`, the French list
+and the French tag page.
 
 ## Settings
 
@@ -80,7 +89,13 @@ Section `[content]`. Environment variable: `$<APP>_CONTENT__<KEY>`. Flag: `--con
 Unset, drafts are shown in a debug build (`cargo run`) and hidden in a release
 build. With [`static`](static.md), unset is hidden. A draft is never in
 `paths()`, so never in the static export, and never in the
-[`feed`](feed.md).
+[`feed`](feed.md). The tag pages follow the same rule: a draft's tags count
+and list only where drafts are shown.
+
+`paths()` is the index, each published post, `/posts/tags` and each tag
+page, so the static export writes every tag page.
+`Collection::dated_paths()` gives the same paths with the day each last
+changed; the [`sitemap`](sitemap.md) reads it.
 
 ## Decisions
 
@@ -116,11 +131,11 @@ rewrites it on `add` and `remove`.
 **No database.** The posts are in the binary. A post is edited in git and
 deployed, as code is.
 
-**`rsx` is required.** The two pages are templates. A list built as a
+**`rsx` is required.** The pages are templates. A list built as a
 `String` is code an `rsx` project never writes.
 
 **One collection.** A second one copies the pattern: a directory, a type, a
-step in `build.rs`, a plugin and two pages. AGENTS.md says so. A generator for
+step in `build.rs`, a plugin and four pages. AGENTS.md says so. A generator for
 collections waits for the second request.
 
 **A translation is a file.** `hello.fr.md` beside `hello.md`. A page lists
@@ -129,8 +144,25 @@ the request's locale and falls back to the default file. With
 translation with no default file fails the build: the list, the feed and every
 other locale fall back to it.
 
-**Tags are data, not pages yet.** `View::tags()` and `View::tagged(tag, ..)`
-exist; a `/posts/tags/{tag}` page is deferred.
+**A tag is a page.** `/posts/tags` lists the tags, `/posts/tags/{tag}` the
+posts of one. They read `View::tags()` and `View::tagged(tag, locale)`, so
+the drafts rule is the list's.
+
+**A tag is a slug.** `build.rs` refuses a tag that is not lower case
+letters, digits and single `-`, with the file and a `help:` line. The tag
+is the last URL segment of its page and a file name in the static export,
+so `Web Dev` or `C++` would need an encoding and a second spelling.
+Mapping a tag to a slug (`Web Dev` to `web-dev`) was rejected: two tags
+would share one page, and the page would need the written form back.
+
+**A post cannot be `tags.md`.** The router prefers the literal segment
+`tags` to `{slug}`, so that post would never be served. `build.rs` refuses
+the slug (`brocanth_content::build::RESERVED`).
+
+**The default file decides a post's tags.** A tag belongs to the post, not
+to a translation: the tag page lists the same posts in every locale, each
+in its translation where there is one, and the post page links the default
+file's tags.
 
 ## Read more
 

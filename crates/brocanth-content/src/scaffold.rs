@@ -15,22 +15,25 @@
 //!   context, drafts shown or not by `[content] drafts`.
 //! - `src/pages/posts/index.rs` and `src/pages/posts/[slug].rs`, with their
 //!   `.rsx` templates: the list, newest first, and one post.
+//! - `src/pages/posts/tags/index.rs` and `src/pages/posts/tags/[tag].rs`,
+//!   with their templates: every tag with its count, and the posts of one
+//!   tag. A post's tags link to their pages.
 //!
 //! **Decision: the build checks, the binary renders.** A bad front matter
 //! is a mistake in the source, so it fails `cargo build`, never a request.
 //! The binary embeds the files and renders them once at start; the build
 //! script links no Markdown or HTML parser. There is no database.
 //!
-//! **Decision: rsx.** The two pages are templates, and a list of posts
+//! **Decision: rsx.** The pages are templates, and a list of posts
 //! built as a `String` is the code an `rsx` project never writes. So the
 //! module needs `rsx`.
 //!
 //! **Decision: one collection, `posts`.** A second one is a copy of the
-//! directory, the type, the build step and the two pages under a new name;
+//! directory, the type, the build step and the four pages under a new name;
 //! AGENTS.md says how. A generator for collections is a later step.
 //!
 //! It is `outside_runtime`: the static export renders the pages and writes
-//! each published post, through `src/commands/export.rs`.
+//! each published post and each tag page, through `src/commands/export.rs`.
 
 use brocanth_scaffold::snippet::{configurable, settings_derive};
 use brocanth_scaffold::{
@@ -113,7 +116,13 @@ impl Module for Content {
         s.file("src/pages/posts/index.rsx", INDEX_RSX);
         s.file("src/pages/posts/[slug].rs", post_rs(project));
         s.file("src/pages/posts/[slug].rsx", POST_RSX);
+        s.file("src/pages/posts/tags/index.rs", tags_rs(project));
+        s.file("src/pages/posts/tags/index.rsx", TAGS_RSX);
+        s.file("src/pages/posts/tags/[tag].rs", tag_rs(project));
+        s.file("src/pages/posts/tags/[tag].rsx", TAG_RSX);
         s.at(Slot::PagesRoutes).line("/posts");
+        s.at(Slot::PagesRoutes).line("/posts/tags");
+        s.at(Slot::PagesRoutes).line("/posts/tags/{tag}");
         s.at(Slot::PagesRoutes).line("/posts/{slug}");
         s.at(Slot::PluginsMod).line("pub mod content;");
         s.at(Slot::BuildMain).block(BUILD_STEP.to_string());
@@ -335,8 +344,8 @@ pub fn collection() -> Result<&'static Collection<Post>, String> {
     POSTS.as_ref().map_err(Clone::clone)
 }
 
-/// The paths a static export writes: `/posts` and each published post,
-/// never a draft.
+/// The paths a static export writes: `/posts`, each published post,
+/// `/posts/tags` and each tag page, never a draft.
 #[allow(dead_code)]
 pub fn paths() -> Vec<String> {
     collection().map(Collection::paths).unwrap_or_default()
@@ -625,6 +634,7 @@ fn post_rs(project: &Project) -> String {
         .replace("@META@\n", meta)
         .replace("@PATH@", &test_path(project, "/posts/hello"))
         .replace("@MISSING@", &test_path(project, "/posts/no-such-post"))
+        .replace("@TAG_LINK@", &test_path(project, "/posts/tags/meta"))
         .replace("@TITLE_TEST@\n", title_test)
 }
 
@@ -646,12 +656,21 @@ pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
         .ok_or_else(|| Error::new(404, "Not Found"))?;
 @HREF@
     let index = href(crate::plugins::content::BASE);
+    // The tags of the file in the default language, each with its page: a
+    // tag belongs to the post, not to a translation.
+    let tags: Vec<(&str, String)> = posts
+        .get(&slug, None)
+        .map_or(&[][..], |default| &default.data.tags)
+        .iter()
+        .map(|tag| (tag.as_str(), href(&posts.collection().tag_path(tag))))
+        .collect();
 @META@
     html!(
         ctx,
         views::posts::_slug_::Article {
             post,
             index: &index,
+            tags: &tags,
         }
     )
 }
@@ -687,6 +706,8 @@ mod tests {
             "no <table>:\n{}",
             page.source()
         );
+        // Each tag links to its page.
+        page.assert_link_to("@TAG_LINK@");
 @TITLE_TEST@
     }
 
@@ -700,13 +721,14 @@ mod tests {
 
 const POST_RSX: &str = r#"// One post. `post.html` is the body, rendered from Markdown and cleaned by
 // the sanitizer's allow-list when the server started, so it is written
-// with `{! }`. Every other value is escaped.
+// with `{! }`. Every other value is escaped. Each tag is a link the
+// handler made, to the page of that tag.
 
 use brocanth_content::Entry;
 
 use crate::plugins::content::Post;
 
-pub fn Article(post: &Entry<Post>, index: &str) -> Element {
+pub fn Article(post: &Entry<Post>, index: &str, tags: &[(&str, String)]) -> Element {
     <article>
         <h1>{&post.data.title}</h1>
         <p>
@@ -715,16 +737,225 @@ pub fn Article(post: &Entry<Post>, index: &str) -> Element {
                 , updated <time datetime={updated.to_string()}>{updated.to_string()}</time>
             }
         </p>
-        if !post.data.tags.is_empty() {
+        if !tags.is_empty() {
             <ul>
-                for tag in &post.data.tags {
-                    <li>{tag}</li>
+                for (tag, href) in tags {
+                    <li><a href={href}>{tag}</a></li>
                 }
             </ul>
         }
         {! &post.html }
     </article>
     <p><a href={index}>All posts</a></p>
+}
+"#;
+
+fn tags_rs(project: &Project) -> String {
+    let meta = if project.has("meta") {
+        "    ctx.meta()\n        .title(\"Tags\")\n        .description(\"Every tag, with how many posts carry it.\");\n"
+    } else {
+        ""
+    };
+    TAGS_RS
+        .replace("@HREF@\n", href_fn(project))
+        .replace("@META@\n", meta)
+        .replace("@PATH@", &test_path(project, "/posts/tags"))
+        .replace("@LINK@", &test_path(project, "/posts/tags/meta"))
+}
+
+const TAGS_RS: &str = r##"//! `/posts/tags` -- every tag of the listed posts, most used first, with
+//! how many posts carry it. A draft's tags count only where `[content]
+//! drafts` shows drafts.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse};
+use crate::plugins::content::Posts;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let posts = *ctx
+        .provided::<Posts, _>()
+        .ok_or_else(|| Error::internal("the content plugin is not registered"))?;
+@HREF@
+    let tags: Vec<_> = posts
+        .tags()
+        .into_iter()
+        .map(|(tag, count)| (tag, count, href(&posts.collection().tag_path(tag))))
+        .collect();
+@META@
+    html!(ctx, views::posts::tags::index::Index { tags: &tags })
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+    use brocanth_test::Html;
+
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        let body = response.body.bytes().expect("a whole body");
+        (response.status, Html::new(String::from_utf8_lossy(body)))
+    }
+
+    #[tokio::test]
+    async fn each_tag_links_its_page_with_its_count() {
+        let (status, page) = get("@PATH@").await;
+        assert_eq!(status, 200);
+        page.assert_link_to("@LINK@");
+        let link = page.link_to("@LINK@").expect("asserted above");
+        assert_eq!(link.text(), "meta");
+        let counted = page
+            .tags("data")
+            .iter()
+            .any(|count| count.attr("value") == Some("1"));
+        assert!(counted, "no count for the tag:\n{}", page.source());
+    }
+}
+"##;
+
+const TAGS_RSX: &str = r#"// Every tag, with how many posts carry it. Each link is one the handler
+// made: it keeps the locale segment when the site has one.
+
+pub fn Index(tags: &[(&str, usize, String)]) -> Element {
+    <h1>Tags</h1>
+    if tags.is_empty() {
+        <p>No tag yet. Give a post <code>tags</code> in its front matter.</p>
+    } else {
+        <ul>
+            for (tag, count, href) in tags {
+                <li>
+                    <a href={href}>{tag}</a>
+                    <data value={count.to_string()}>{count.to_string()}</data>
+                </li>
+            }
+        </ul>
+    }
+}
+"#;
+
+fn tag_rs(project: &Project) -> String {
+    let meta = if project.has("meta") {
+        "    ctx.meta().title(format!(\"Posts tagged {tag}\"));\n"
+    } else {
+        ""
+    };
+    let french = if project.has("i18n") {
+        let path = if project.has("i18n-routing") {
+            "/fr/posts/tags/meta".to_string()
+        } else {
+            "/posts/tags/meta?locale=fr".to_string()
+        };
+        format!(
+            r#"
+    #[tokio::test]
+    async fn a_french_reader_gets_the_translation() {{
+        let (status, page) = get("{path}").await;
+        assert_eq!(status, 200);
+        page.assert_text("Bonjour, le monde");
+    }}
+"#
+        )
+    } else {
+        String::new()
+    };
+    TAG_RS
+        .replace("@LOCALE@", locale_expr(project))
+        .replace("@LOCALE_LET@\n", locale_let(project))
+        .replace("@HREF@\n", href_fn(project))
+        .replace("@META@\n", meta)
+        .replace("@PATH@", &test_path(project, "/posts/tags/meta"))
+        .replace("@LINK@", &test_path(project, "/posts/hello"))
+        .replace("@MISSING@", &test_path(project, "/posts/tags/no-such-tag"))
+        .replace("@FRENCH@", &french)
+}
+
+const TAG_RS: &str = r##"//! `/posts/tags/{tag}` -- the posts with one tag, newest first. A tag no
+//! listed post carries is not found.
+
+use crate::pages::{html, views, Ctx, Error, IntoResponse};
+use crate::plugins::content::Posts;
+
+pub fn handle(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
+    let posts = *ctx
+        .provided::<Posts, _>()
+        .ok_or_else(|| Error::internal("the content plugin is not registered"))?;
+    let tag = ctx.require("tag")?.to_string();
+@LOCALE_LET@
+    let tagged = posts.tagged(&tag, @LOCALE@);
+    // No post with this tag, or only drafts this server hides.
+    if tagged.is_empty() {
+        return Err(Error::new(404, "Not Found"));
+    }
+@HREF@
+    let list: Vec<_> = tagged
+        .into_iter()
+        .map(|post| (post, href(&post.path)))
+        .collect();
+    let index = href(&posts.collection().tags_path());
+@META@
+    html!(
+        ctx,
+        views::posts::tags::_tag_::Tagged {
+            tag: &tag,
+            posts: &list,
+            index: &index,
+        }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+    use brocanth_test::Html;
+
+    /// The status and the page of a GET, through the whole application.
+    async fn get(path: &str) -> (u16, Html) {
+        let app = crate::app::build().expect("the application builds");
+        let response = crate::app::handle(&app, Request::new(Verb::Get, path)).await;
+        let body = response.body.bytes().expect("a whole body");
+        (response.status, Html::new(String::from_utf8_lossy(body)))
+    }
+
+    #[tokio::test]
+    async fn a_tag_lists_its_posts() {
+        let (status, page) = get("@PATH@").await;
+        assert_eq!(status, 200);
+        page.assert_link_to("@LINK@");
+        let link = page.link_to("@LINK@").expect("asserted above");
+        assert_eq!(link.text(), "Hello, world");
+    }
+
+    #[tokio::test]
+    async fn a_tag_with_no_post_is_not_found() {
+        let (status, _) = get("@MISSING@").await;
+        assert_eq!(status, 404);
+    }
+@FRENCH@}
+"##;
+
+const TAG_RSX: &str = r#"// The posts with one tag. Each item is a post and the link to it, which
+// the handler made.
+
+use brocanth_content::Entry;
+
+use crate::plugins::content::Post;
+
+pub fn Tagged(tag: &str, posts: &[(&Entry<Post>, String)], index: &str) -> Element {
+    <h1>Posts tagged {tag}</h1>
+    <ul>
+        for (post, href) in posts {
+            <li>
+                <a href={href}>{&post.data.title}</a>
+                <time datetime={post.data.date.to_string()}>{post.data.date.to_string()}</time>
+                if post.data.draft {
+                    <em>draft</em>
+                }
+            </li>
+        }
+    </ul>
+    <p><a href={index}>All tags</a></p>
 }
 "#;
 
@@ -738,6 +969,10 @@ const AGENTS: &str = "\n\
     and a `help:` line: fix the file, not the check. Add a field to `Post`\n\
     to give posts a new value; a template reads it as `post.data.<field>`.\n\
     \n\
+    A tag is a slug (`tags = [\"rust-web\"]`): `build.rs` refuses any other,\n\
+    because it is the last segment of `/posts/tags/<tag>`. A post cannot be\n\
+    `tags.md`: `/posts/tags` lists the tags.\n\
+    \n\
     `draft = true` keeps a post out of the list and its URL where\n\
     `[content] drafts` is false (a release build), and always out of the\n\
     feed and the static export. A translation is `<slug>.<locale>.md`\n\
@@ -745,4 +980,4 @@ const AGENTS: &str = "\n\
     store posts in a database: the binary embeds them.\n\
     \n\
     A second collection copies the pattern under a new name: a directory, a\n\
-    type, a step in `build.rs`, a plugin and two pages.\n";
+    type, a step in `build.rs`, a plugin and four pages.\n";
