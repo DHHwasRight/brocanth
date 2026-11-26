@@ -6297,8 +6297,8 @@ brocanth_policy::policy! {
         db {
             subjects: [
                 Visitor::anonymous(),
-                Visitor { account_id: Some(1), admin: false },
-                Visitor { account_id: None, admin: true },
+                Visitor { account_id: Some(1), ..Visitor::anonymous() },
+                Visitor { admin: true, ..Visitor::anonymous() },
             ],
             url: crate::plugins::rls::agreement_url(),
         }
@@ -6382,7 +6382,7 @@ mod tests {
     fn author(id: i64) -> Visitor {
         Visitor {
             account_id: Some(id),
-            admin: false,
+            ..Visitor::anonymous()
         }
     }
 

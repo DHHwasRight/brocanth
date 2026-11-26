@@ -2834,7 +2834,7 @@ mod tests {
     fn author(id: i64) -> Visitor {
         Visitor {
             account_id: Some(id),
-            admin: false,
+            ..Visitor::anonymous()
         }
     }
 
