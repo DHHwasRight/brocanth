@@ -230,6 +230,35 @@ impl FlagsData for RemoteFlags {
     }
 }
 
+/// The copy in a cell, as the wire's data side reads it: empty until the
+/// first request that carries the [`Flags`].
+struct LateFlags(Late<Flags>);
+
+impl LateFlags {
+    fn flags(&self) -> Result<&Flags, String> {
+        self.0.get().ok_or_else(|| {
+            "the flags plugin is not registered in this application\nhelp: register it, \
+             which puts the flags on the request context"
+                .to_string()
+        })
+    }
+}
+
+#[async_trait]
+impl FlagsData for LateFlags {
+    async fn read(&self, who: &Principal<'_>) -> Result<FlagsView, String> {
+        FlagsData::read(self.flags()?, who).await
+    }
+
+    async fn set(&self, who: &Principal<'_>, key: &str, rule: Rule) -> Result<(), String> {
+        FlagsData::set(self.flags()?, who, key, rule).await
+    }
+
+    async fn remove(&self, who: &Principal<'_>, key: &str) -> Result<(), String> {
+        FlagsData::remove(self.flags()?, who, key).await
+    }
+}
+
 /// Where the tab reads its flags.
 enum Source {
     /// The copy, which arrives with the first request.
@@ -295,6 +324,20 @@ impl Panel for FlagsPanel {
 
     fn label(&self) -> String {
         "Feature flags".to_string()
+    }
+
+    fn serve(&self) -> Option<Arc<dyn PanelServe>> {
+        match &self.source {
+            Source::Copy(cell) => Some(FlagsServe::new(Arc::new(LateFlags(cell.clone()))).shared()),
+            Source::Data(_) => None,
+        }
+    }
+
+    fn remote(&self, wire: Arc<dyn PanelWire>) -> Option<Arc<dyn Panel>> {
+        Some(Arc::new(FlagsPanel::over(
+            Arc::new(RemoteFlags::new(wire)),
+            self.declared,
+        )))
     }
 
     async fn render(&self, r: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {

@@ -98,6 +98,15 @@ impl Claim {
             .any(|held| self.grants.iter().any(|grant| *grant == held.on(tab)))
     }
 
+    /// What this claim holds, as a panel's data side checks it
+    /// (`PanelServe::allows`).
+    pub fn grants(&self) -> brocanth_admin::panel::remote::Grants {
+        brocanth_admin::panel::remote::Grants {
+            superuser: self.superuser,
+            permissions: self.grants.clone(),
+        }
+    }
+
     /// The principal the data side hands its source: anonymous for
     /// nobody, this claim otherwise.
     pub fn principal(&self) -> Principal<'_> {

@@ -838,6 +838,7 @@ pub struct AdminConfig {
     pub(crate) journal: Option<std::sync::Arc<dyn crate::journal::Journal>>,
     pub(crate) record_links: Vec<(String, crate::journal::RecordLinkFn)>,
     data_through: Option<DataThrough>,
+    panel_wire: Option<std::sync::Arc<dyn crate::panel::remote::PanelWire>>,
 }
 
 /// What [`AdminConfig::data_through`] keeps: a map from the data source the
@@ -858,6 +859,7 @@ impl std::fmt::Debug for AdminConfig {
             )
             .field("unscoped_rows", &self.unscoped_rows)
             .field("data_through", &self.data_through.is_some())
+            .field("panels_through", &self.panel_wire.is_some())
             .field(
                 "panels",
                 &self.panels.iter().map(|p| p.key()).collect::<Vec<_>>(),
@@ -895,6 +897,7 @@ impl AdminConfig {
             journal: None,
             record_links: Vec::new(),
             data_through: None,
+            panel_wire: None,
         }
     }
 
@@ -913,6 +916,42 @@ impl AdminConfig {
     ) -> Self {
         self.data_through = Some(std::sync::Arc::new(through));
         self
+    }
+
+    /// Every tab reads its data through `wire`, when it can cross it
+    /// ([`Panel::remote`](crate::panel::Panel::remote)); a tab that cannot
+    /// keeps reading in this process.
+    ///
+    /// [`Admin::try_new`](crate::Admin::try_new) applies it to every tab,
+    /// the ones added after this call too. The `backoffice` module calls it
+    /// in the backoffice binary when `[backoffice] data_url` is set
+    /// (docs/backoffice.md §7.6, P4). A second call replaces the first.
+    pub fn panels_through(
+        mut self,
+        wire: std::sync::Arc<dyn crate::panel::remote::PanelWire>,
+    ) -> Self {
+        self.panel_wire = Some(wire);
+        self
+    }
+
+    /// The data side of every tab that can cross the backoffice wire, by
+    /// key: what the application's wire server serves
+    /// ([`Panel::serve`](crate::panel::Panel::serve)). A tab with no data
+    /// contract is not listed.
+    pub fn panel_serves(
+        &self,
+    ) -> Vec<(String, std::sync::Arc<dyn crate::panel::remote::PanelServe>)> {
+        self.panels
+            .iter()
+            .filter_map(|panel| panel.serve().map(|serve| (panel.key().to_string(), serve)))
+            .collect()
+    }
+
+    /// Takes the wire [`AdminConfig::panels_through`] set out.
+    pub(crate) fn take_panel_wire(
+        &mut self,
+    ) -> Option<std::sync::Arc<dyn crate::panel::remote::PanelWire>> {
+        self.panel_wire.take()
     }
 
     /// Takes the map [`AdminConfig::data_through`] set out.

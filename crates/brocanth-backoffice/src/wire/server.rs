@@ -379,7 +379,12 @@ impl Inner {
             level,
             claim: claim.clone(),
         };
-        if !claim.holds(tab, level) {
+        // The panel says what the call needs: one level on the tab by
+        // default, or its own rule (the roles tab's owners) (§7.6, P3).
+        if !serve
+            .allows(tab, call, &claim.grants())
+            .map_err(TabError::protocol)?
+        {
             return Err(TabError::refused(&caller));
         }
         match serve.serve(&claim.principal(), call).await {

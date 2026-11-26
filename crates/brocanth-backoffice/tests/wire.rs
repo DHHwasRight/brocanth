@@ -637,3 +637,89 @@ async fn a_panel_call_crosses_the_wire_with_its_grant_checked() {
         .expect("an editor removes it");
     assert_eq!(flags.rule("beta"), None);
 }
+
+/// Each tab serves itself: the application's wire serves every tab of its
+/// admin that has a data contract (`AdminConfig::panel_serves`), and one
+/// call turns the backoffice's tabs remote (`AdminConfig::panels_through`).
+/// The backoffice's own flags cell stays empty: what the tab shows came
+/// over the socket.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tab_serves_itself_over_the_wire() {
+    use brocanth_admin::late::Late;
+    use brocanth_admin::{Admin, Submission};
+
+    let flags = Flags::with_store(Arc::new(MemoryStore::new()));
+    flags.set("beta", Rule::everyone()).await.expect("stored");
+    let application = AdminConfig::new().panel(FlagsPanel::new(flags.clone(), &[]));
+    let served = application.panel_serves();
+    assert_eq!(
+        served
+            .iter()
+            .map(|(tab, _)| tab.as_str())
+            .collect::<Vec<_>>(),
+        ["flags"]
+    );
+    let server = served.into_iter().fold(
+        WireServer::new(Arc::new(Fixture::blog()), secret()),
+        |server, (tab, serve)| server.panel(tab, serve),
+    );
+    let serving = serve(server);
+    let client = WireClient::connect(&serving.base, secret())
+        .await
+        .expect("it connects");
+    let config = AdminConfig::new()
+        .panel(FlagsPanel::late(Late::new(), &[]))
+        .panels_through(client.panels(claim))
+        .unscoped_rows_unsafe_for_development()
+        .with_policy(policy_fn(|_: &Principal<'_>, _| true));
+    let admin = Admin::try_new(Arc::new(Fixture::blog()), config).expect("the admin builds");
+    let reader = Staff {
+        claim: Claim::staff("1", false, ["flags.read"]),
+    };
+    let editor = Staff {
+        claim: Claim::staff("2", false, ["flags.edit"]),
+    };
+
+    let page = admin
+        .dispatch(
+            Principal::new(&reader),
+            "GET",
+            "/admin/flags",
+            "",
+            &Submission::default(),
+        )
+        .await
+        .expect("the tab");
+    assert!(
+        page.html().is_some_and(|html| html.contains("beta")),
+        "{page:?}"
+    );
+    let form = Submission::from_pairs([("percent", "25")]);
+    admin
+        .dispatch(
+            Principal::new(&reader),
+            "POST",
+            "/admin/flags/beta",
+            "",
+            &form,
+        )
+        .await
+        .expect("a page");
+    assert_eq!(
+        flags.rule("beta"),
+        Some(Rule::everyone()),
+        "the data side refuses a reader's write"
+    );
+    let saved = admin
+        .dispatch(
+            Principal::new(&editor),
+            "POST",
+            "/admin/flags/beta",
+            "",
+            &form,
+        )
+        .await
+        .expect("a page");
+    assert_eq!(saved.status(), 303);
+    assert_eq!(flags.rule("beta"), Some(Rule::percent(25)));
+}

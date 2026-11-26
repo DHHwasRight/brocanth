@@ -1686,6 +1686,11 @@ pub fn admin_panels(
     // contract, in this binary and in `src/bin/backoffice.rs`. Each call
     // carries the staff member's claim (docs/backoffice.md §7.1).
     config = config.data_through(crate::plugins::backoffice::contract);
+    // In `src/bin/backoffice.rs` with `data_url` set, each tab that has a
+    // data contract reads it over the wire too (docs/backoffice.md §7.6).
+    if let Some(wire) = crate::plugins::backoffice::panel_wire() {
+        config = config.panels_through(wire);
+    }
     config
 }
 
@@ -2558,7 +2563,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 142155aba70627d3
+// brocanth-digest: 37b7843e03221c21
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -4272,8 +4277,9 @@ use std::time::Duration;
 
 use brocanth::plugin_api::{Lifecycle, Plugin, PluginError, Services};
 use brocanth::plugin_context::NoContext;
+use brocanth_admin::panel::remote::PanelWire;
 use brocanth_admin::policy::Principal;
-use brocanth_admin::SharedData;
+use brocanth_admin::{AdminConfig, LateCells, SharedData};
 use brocanth_backoffice::wire::{ServiceSecret, WireClient, WireServer};
 use brocanth_backoffice::{Claim, Contracted, Gate, InProcess, Role, SharedTabs};
 
@@ -4413,6 +4419,15 @@ pub fn contract(data: SharedData) -> SharedData {
     Contracted::over(tabs).claim(claim).shared()
 }
 
+/// The admin's tabs' end of the application's wire, in the backoffice
+/// binary when `[backoffice] data_url` is set: each tab with a data
+/// contract reads it over the wire, with the staff member's [`Claim`] on
+/// each call (docs/backoffice.md §7.6). `plugins::admin_panels` passes it to
+/// `AdminConfig::panels_through`. `None` in the application binary.
+pub fn panel_wire() -> Option<Arc<dyn PanelWire>> {
+    wire_client().map(|client| client.panels(claim))
+}
+
 /// The client of the application's wire, in the backoffice binary when
 /// `[backoffice] data_url` is set. Nothing is sent until the admin is
 /// built, and a failure is the admin's start-time error.
@@ -4439,6 +4454,30 @@ fn wire_client() -> Option<WireClient> {
 /// §7.5, W9). Keep it the same as the one `plugins::admin` builds.
 fn wire_source(_ctx: &Ctx) -> SharedData {
     Arc::new(brocanth_admin::Fixture::new())
+}
+
+/// The context the wire's data side reads the plugins from: the plugins
+/// `app` started.
+fn wire_ctx(app: &crate::app::App) -> Ctx {
+    Ctx::new(
+        brocanth::routing::Verb::Post,
+        brocanth_backoffice::wire::PATH,
+        brocanth::routing::Params::empty(),
+    )
+    .with_plugins(app.core.context())
+}
+
+/// `server`, serving the data of every tab of the admin that has a data
+/// contract (docs/backoffice.md §7.6). The tabs are built a second time
+/// from `plugins::admin_panels`, the list the admin builds them from, and
+/// read their handles from `ctx`.
+fn serve_panels(server: WireServer, ctx: &Ctx) -> WireServer {
+    let mut late = LateCells::new();
+    let tabs = crate::plugins::admin_panels(AdminConfig::new(), &mut late);
+    late.fill(ctx);
+    tabs.panel_serves()
+        .into_iter()
+        .fold(server, |server, (tab, serve)| server.panel(tab, serve))
 }
 
 /// Who a call is for, as the contract carries it. Anonymous, or somebody
@@ -4491,14 +4530,10 @@ impl ServerWrap for Door {
                 if request.path == brocanth_backoffice::wire::PATH {
                     let server = server
                         .get_or_init(|| {
-                            let ctx = Ctx::new(
-                                brocanth::routing::Verb::Post,
-                                brocanth_backoffice::wire::PATH,
-                                brocanth::routing::Params::empty(),
-                            )
-                            .with_plugins(app.core.context());
-                            WireServer::new(wire_source(&ctx), secret.clone())
-                                .holding(*timeout, *max)
+                            let ctx = wire_ctx(&app);
+                            let rows = WireServer::new(wire_source(&ctx), secret.clone())
+                                .holding(*timeout, *max);
+                            serve_panels(rows, &ctx)
                         })
                         .clone();
                     return Box::pin(async move { server.handle(request).await });
@@ -4621,6 +4656,90 @@ mod tests {
         };
         let error = error.to_string();
         assert!(error.contains("service_secret_file"), "{error}");
+    }
+
+    /// Both binaries' halves in one test, with the wire on: the
+    /// application serves its wire on a socket, and the backoffice's admin
+    /// reads a model screen and every tab that has a data contract through
+    /// it (docs/backoffice.md §7.6). The rows are the blog fixture's, so a
+    /// model screen has rows to show; the tabs are this application's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_admin_reads_its_rows_and_its_tabs_over_the_wire() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use brocanth_admin::Submission;
+        use brocanth_backoffice::wire::{ServiceSecret, WireClient, WireServer};
+        use brocanth_backoffice::{Claim, Contracted};
+
+        const SECRET: &str = "a-test-secret-of-thirty-two-bytes-or-more";
+        let secret = || ServiceSecret::parse(SECRET).expect("long enough");
+        let superuser = |_: &Principal<'_>| Claim::staff("1", true, Vec::<String>::new());
+
+        // The application's half: its wire, on a socket, counting calls.
+        let app = crate::app::build().expect("the application builds");
+        let rows = WireServer::new(Arc::new(Fixture::blog()), secret());
+        let server = super::serve_panels(rows, &super::wire_ctx(&app));
+        let listening = brocanth_server::Server::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let base = format!("http://{}", listening.local_addr().expect("an address"));
+        let stopper = listening.stopper();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        tokio::spawn(listening.run(move |request| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let server = server.clone();
+            async move { server.handle(request).await }
+        }));
+
+        // The backoffice's half: the admin over the client.
+        let client = WireClient::connect(&base, secret())
+            .await
+            .expect("it connects");
+        let tabs = client.clone();
+        let mut late = LateCells::new();
+        let config = crate::plugins::admin_panels(AdminConfig::new(), &mut late)
+            .data_through(move |_| {
+                Contracted::over(tabs.clone().shared())
+                    .claim(superuser)
+                    .shared()
+            })
+            .panels_through(client.panels(superuser))
+            .unscoped_rows_unsafe_for_development()
+            .with_policy(AllowAllUnsafeForDevelopment);
+        let admin = Admin::try_new(Arc::new(Fixture::new()), config).expect("the admin builds");
+
+        // A model screen: its rows cross the socket.
+        let page = admin
+            .list(Principal::anonymous(), "post", ListQuery::new())
+            .await
+            .expect("a page");
+        assert_eq!(page.status(), 200);
+        assert!(page.html().is_some_and(|html| html.contains("Compilers")));
+
+        // Each tab with a data contract: its page reads over the socket.
+        // The plugins of a test application have not started, so a tab may
+        // answer that its handle is not there yet: that answer crossed too.
+        let served =
+            crate::plugins::admin_panels(AdminConfig::new(), &mut LateCells::new()).panel_serves();
+        for (tab, _) in served {
+            let before = calls.load(Ordering::SeqCst);
+            let path = format!("/admin/{tab}");
+            let _ = admin
+                .dispatch(
+                    Principal::anonymous(),
+                    "GET",
+                    &path,
+                    "",
+                    &Submission::default(),
+                )
+                .await;
+            assert!(
+                calls.load(Ordering::SeqCst) > before,
+                "{path} did not cross the wire"
+            );
+        }
+        stopper.stop();
     }
 
     /// The wire is off by default: its path is not served, and nothing

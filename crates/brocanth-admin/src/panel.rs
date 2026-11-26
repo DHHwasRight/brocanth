@@ -86,6 +86,32 @@ pub trait Panel: Send + Sync {
     /// The admin turns it into the same not-found page a bad model key
     /// gets, so a panel does not have to render one.
     async fn render(&self, request: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError>;
+
+    /// The data side of this tab on the backoffice wire, over the data this
+    /// tab reads in this process (docs/backoffice.md §7.6). `None` by
+    /// default: the tab has no data contract, or it reads another process
+    /// already.
+    ///
+    /// The application's wire server asks each tab of the admin for it
+    /// ([`AdminConfig::panel_serves`](crate::AdminConfig::panel_serves)),
+    /// so a tab that can move serves itself with no line per tab.
+    fn serve(&self) -> Option<std::sync::Arc<dyn remote::PanelServe>> {
+        None
+    }
+
+    /// This tab, reading its data through `wire` instead of in this
+    /// process. `None` by default: the tab cannot cross the wire, and it
+    /// keeps reading in the process that renders it.
+    ///
+    /// [`AdminConfig::panels_through`](crate::AdminConfig::panels_through)
+    /// asks every tab once, when the admin is built.
+    fn remote(
+        &self,
+        wire: std::sync::Arc<dyn remote::PanelWire>,
+    ) -> Option<std::sync::Arc<dyn Panel>> {
+        let _ = wire;
+        None
+    }
 }
 
 /// Whether the person on a request may read one of the admin's records.
@@ -347,9 +373,68 @@ impl Panel for Page {
 /// backoffice's end). `brocanth-backoffice` carries the text between the
 /// two. The text is JSON, so this crate needs no serde.
 pub mod remote {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use async_trait::async_trait;
 
     use crate::policy::{Level, Principal};
+
+    /// What a caller holds, as the data side checks it: the superuser flag
+    /// and the permission strings (`jobs.read`). The backoffice wire builds
+    /// it from the call's claim.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Grants {
+        /// Holds every level on every tab.
+        pub superuser: bool,
+        /// Permission strings, `<resource>.<level>`.
+        pub permissions: Vec<String>,
+    }
+
+    impl Grants {
+        /// Whether this holds `level` on `tab`: a superuser holds every
+        /// level, and a higher level holds the lower ones.
+        pub fn holds(&self, tab: &str, level: Level) -> bool {
+            self.superuser
+                || Level::ALL
+                    .into_iter()
+                    .filter(|held| *held >= level)
+                    .any(|held| self.permissions.iter().any(|p| *p == held.on(tab)))
+        }
+
+        /// The resources this owns (`jobs` for `jobs.owner`).
+        pub fn owned(&self) -> impl Iterator<Item = &str> {
+            self.permissions
+                .iter()
+                .filter_map(|p| p.strip_suffix(".owner"))
+        }
+    }
+
+    /// Checks that `grants` may run `call` on `tab`'s data, before the data
+    /// side runs it. The wire server and [`Loopback`] both call it, so a
+    /// test over the loopback checks what the wire checks.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, or a call that does not decode, as text with a `help:`
+    /// line.
+    pub fn authorize(
+        serve: &dyn PanelServe,
+        tab: &str,
+        call: &str,
+        grants: &Grants,
+    ) -> Result<Level, String> {
+        let level = serve.level(call)?;
+        if serve.allows(tab, call, grants)? {
+            Ok(level)
+        } else {
+            Err(format!(
+                "the data side refused a call on `{tab}` that needs `{}`\nhelp: give the \
+                 member of staff a role that holds it",
+                level.on(tab)
+            ))
+        }
+    }
 
     /// The backoffice's end: sends one call of a panel's data contract to
     /// the process that holds the data.
@@ -383,11 +468,83 @@ pub mod remote {
         /// When `call` does not decode.
         fn level(&self, call: &str) -> Result<Level, String>;
 
+        /// Whether `grants` may run `call` on `tab`. By default, whether
+        /// they hold [`PanelServe::level`] on `tab`. A tab whose RBAC is
+        /// not one level on itself says else: the roles tab lets the owner
+        /// of `jobs` give `jobs.read`.
+        ///
+        /// # Errors
+        ///
+        /// When `call` does not decode.
+        fn allows(&self, tab: &str, call: &str, grants: &Grants) -> Result<bool, String> {
+            Ok(grants.holds(tab, self.level(call)?))
+        }
+
         /// Runs `call` for `who`, and answers the JSON text of the answer.
         ///
         /// # Errors
         ///
         /// When `call` does not decode, or the data side fails.
         async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String>;
+    }
+
+    /// Who a principal is, as the data side checks it.
+    pub type GrantsFn = Arc<dyn for<'p> Fn(&Principal<'p>) -> Grants + Send + Sync>;
+
+    /// A [`PanelWire`] in one process: each call is JSON text, checked with
+    /// [`authorize`] and run by the [`PanelServe`] of its tab, as the
+    /// backoffice wire runs it. For a panel crate's tests, which must not
+    /// depend on `brocanth-backoffice`.
+    #[derive(Clone)]
+    pub struct Loopback {
+        panels: HashMap<String, Arc<dyn PanelServe>>,
+        grants: GrantsFn,
+    }
+
+    impl std::fmt::Debug for Loopback {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Loopback")
+                .field("panels", &self.panels.keys().collect::<Vec<_>>())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Loopback {
+        /// No tab yet. `grants` says what each principal holds.
+        pub fn new(
+            grants: impl for<'p> Fn(&Principal<'p>) -> Grants + Send + Sync + 'static,
+        ) -> Loopback {
+            Loopback {
+                panels: HashMap::new(),
+                grants: Arc::new(grants),
+            }
+        }
+
+        /// Serves `tab` with `serve`.
+        pub fn panel(mut self, tab: impl Into<String>, serve: Arc<dyn PanelServe>) -> Loopback {
+            self.panels.insert(tab.into(), serve);
+            self
+        }
+
+        /// As a panel takes it.
+        pub fn shared(self) -> Arc<dyn PanelWire> {
+            Arc::new(self)
+        }
+    }
+
+    #[async_trait]
+    impl PanelWire for Loopback {
+        async fn send(
+            &self,
+            who: &Principal<'_>,
+            tab: &str,
+            call: String,
+        ) -> Result<String, String> {
+            let serve = self.panels.get(tab).ok_or_else(|| {
+                format!("no panel data for the tab `{tab}`\nhelp: serve it on the loopback")
+            })?;
+            authorize(serve.as_ref(), tab, &call, &(self.grants)(who))?;
+            serve.serve(who, &call).await
+        }
     }
 }

@@ -74,6 +74,17 @@ fn the_second_binary_with_staff_and_row_level_security() {
     );
 }
 
+/// Tabs with a data contract: the application's wire serves each one,
+/// and the backoffice binary reads it over the wire when `data_url` is
+/// set. The generated test runs both halves in one process.
+#[test]
+fn the_tabs_cross_the_wire() {
+    shape(
+        "backoffice-panels",
+        &["config", "commands", "db", "admin", "flags", "backoffice"],
+    );
+}
+
 /// The second binary compiles the application's own modules, each from
 /// its own directory, and the manifest runs its tests once.
 #[test]

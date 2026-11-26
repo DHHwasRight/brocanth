@@ -467,7 +467,15 @@ impl Admin {
         let actions = std::mem::take(&mut config.actions);
         let journal = config.journal.take();
         let record_links = std::mem::take(&mut config.record_links);
-        let panels = config.panels;
+        let wire = config.take_panel_wire();
+        let panels: Vec<std::sync::Arc<dyn Panel>> = match wire {
+            None => config.panels,
+            Some(wire) => config
+                .panels
+                .into_iter()
+                .map(|panel| panel.remote(std::sync::Arc::clone(&wire)).unwrap_or(panel))
+                .collect(),
+        };
         // Named now rather than discovered by a request that went to the
         // wrong screen. Two modules claiming one path is an error that
         // names both, and a panel shadowing a model is the same mistake.
