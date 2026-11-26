@@ -28,10 +28,10 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
 | Provides | none |
 | Requires | `PgPool` (a Postgres pool): the notifications are rows in the database the `db` module opens; providers: [`db`](db.md) |
 | Uses | none |
-| Adapts to | [`mail`](mail.md): `notify` with an address sends the notification by mail too, through the outbox; [`realtime`](realtime.md): `notify` publishes the new row as a change on `brocanth_notifications`, with its account; [`policy`](policy.md): the inbox page ANDs a policy rule over `NotificationColumn` into its `WHERE` |
+| Adapts to | [`mail`](mail.md): `notify` with an address sends the notification by mail too, through the outbox; [`realtime`](realtime.md): `notify` publishes the new row as a change on `brocanth_notifications`, with its account; [`policy`](policy.md): the inbox page ANDs a policy rule over `NotificationColumn` into its `WHERE`; [`rls`](rls.md): with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader and `notify` as the anonymous request |
 | Contributes | `ConfigCheck` `notifications`: `deploy/migrate` for `[notifications]`; `AgentsSection` `notifications`: how to notify an account, and who reads it |
 | Collects | none |
-| Exports | none |
+| Exports | `db_policies` (`crate::plugins::notifications::db_policies`): with `policy` and `rls`, the path of a `fn(&Role) -> RulePolicies`: the database policies of `brocanth_notifications`, for `schema()` |
 | Hooks | none |
 | Options (build time) | none |
 | Settings (run time) | `[notifications]`: `migrate`, `per_page` |
@@ -68,10 +68,46 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
   `NotificationColumn` and passes the condition to `list`, which ANDs it
   into the same `WHERE` as the account (`docs/module-capabilities.md`: no
   filter after a paginated load).
-- **RLS-friendly.** The rows carry their owner in a plain `account`
-  column, so a Postgres row-level policy (`USING (account =
-  current_setting('app.account'))`) can enforce the same rule one floor
-  down. The module writes no RLS policy itself.
+- **The database holds the rule too, with [`policy`](policy.md) and
+  [`rls`](rls.md).** The module writes `NotificationPolicy`, a `#[db]`
+  `policy!` over `brocanth_notifications`, and `db_policies(&role)`,
+  which `schema()` calls on its own `.policies(…)` line (exported as
+  `db_policies`, so the line has one home). `rls make` then writes
+  `SELECT` and `UPDATE` policies that admit a row only when its `account`
+  is `brocanth.account`, and forces the table. The policy has a `db { … }`
+  clause: `cargo test` runs the agreement test on `[db] url`.
+  - **A reader reads and marks only their own rows.** The page runs the
+    inbox as `reader(&account)`: the role `app_user` with `account` set
+    from the session. A bug that asks for another account's inbox gets no
+    row from the database, and an `UPDATE` of another account's row
+    touches nothing. `WITH CHECK` refuses to move a row to another
+    account.
+  - **Any request writes (`create: always`).** A notification tells
+    somebody else about an event, so the writer is not the reader. A
+    `create` rule on the account would refuse the common case. `notify`
+    writes as the anonymous request (`app_user`, no attribute). The
+    alternative, a system role with a policy of its own, needs a second
+    role, a grant and a policy outside `from_rules`; an `INSERT` cannot
+    read a row, so `always` opens nothing a reader can see.
+  - **No `RETURNING`.** Postgres checks a returned row against the
+    `SELECT` policy, and the writer may not read another account's row.
+    `notify` reads the id with `lastval()` in the same transaction, so
+    `app_user` needs `USAGE` on `brocanth_notifications_id_seq`
+    (`.sequence(…)`).
+  - **No admin arm, no `delete`, no write mask.** An inbox is personal.
+    A notification is marked read, not removed. A mask needs `read_at` in
+    the entity, a `timestamptz`, which needs `brocanth-policy`'s `chrono`
+    feature; the reader's `UPDATE` reaches only their own rows anyway.
+  - **`account` is a text attribute.** `Visitor` gets `account:
+    Option<String>`, the account as `brocanth-auth` stores it. The
+    example's `account_id` is an `i64`, and a policy that compares the
+    text column with it fails in Postgres.
+  - **A store takes an identity.** `NotificationStore::as_identity` runs
+    each call in one transaction that assumes it first. Without one, a
+    call runs as the login role, which on the forced table sees no row.
+
+  Without `rls`, the module writes no database policy: the account in
+  each `WHERE` is the only check.
 - **Keyset pages.** A new notification while a reader pages does not
   shift the next page, as an offset would.
 - **A link is a path or http(s).** `notify` refuses anything else: the
@@ -85,7 +121,9 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
 Files:
 
 - `src/plugins/notifications/mod.rs`: the plugin, `account(ctx)`,
-  `store(ctx)` and `notify`. Its tests check that a visitor with no session
+  `store(ctx)` and `notify`. With `policy` and `rls`, also
+  `NotificationPolicy` (`#[db]`), `db_policies(&role)` and
+  `reader(&account)`. Its tests check that a visitor with no session
   has no inbox and that a mark-read post without the CSRF token is refused.
 - `src/pages/notifications.rs`: the inbox and the mark-read post.
 
@@ -93,6 +131,9 @@ Slots:
 
 - src/plugins/mod.rs: `pub mod notifications;`
 - src/plugins/mod.rs (the builder chain), the provider list
+- src/plugins/rls/mod.rs (with `policy` and `rls`): `schema()` calls
+  `crate::plugins::notifications::db_policies(&app_user())`, through the
+  `db_policies` export
 - src/pages/mod.rs (the route table test): `/notifications`
 - config/<env>.toml: `[notifications]`
 - `check --deploy`: `deploy/migrate` for `[notifications]`
@@ -108,5 +149,5 @@ Slots:
 
 ## Read more
 
-- [`auth`](auth.md), [`mail`](mail.md), [`realtime`](realtime.md), [`policy`](policy.md)
+- [`auth`](auth.md), [`mail`](mail.md), [`realtime`](realtime.md), [`policy`](policy.md), [`rls`](rls.md)
 - Source: [`crates/brocanth-notifications/src/store.rs`](../../crates/brocanth-notifications/src/store.rs), [`crates/brocanth-notifications/src/scaffold.rs`](../../crates/brocanth-notifications/src/scaffold.rs)

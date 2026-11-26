@@ -81,6 +81,10 @@ impl Module for Authorisation {
             "rls",
             "the example policy gets a `db { … }` clause: `cargo test` compares it with its database policies on `[db] url`",
         )
+        .adapts_to(
+            "notifications",
+            "with `rls`, `Visitor` gets `account`, the signed-in account as text, which the notifications' `#[db]` policy reads",
+        )
         .asked_in(
             "doors",
             "Authorisation rules that compile into the WHERE clause",
@@ -124,6 +128,14 @@ fn plugin_rs(project: &Project) -> String {
     // `rls` turns on `brocanth-rls`'s `agreement` feature, which the test
     // calls, in `[dev-dependencies]`, and writes `agreement_url`.
     let agreement = if project.has("rls") { DB_CLAUSE } else { "" };
+    // With `notifications` and `rls`, its `#[db]` policy compares the text
+    // `account` column with the request's account: an attribute of the
+    // same type, so the database compares text with text.
+    let account = if project.has("rls") && project.has("notifications") {
+        ACCOUNT_ATTR
+    } else {
+        ""
+    };
     // One extra paragraph when the broker is here, because this is the pair
     // §10 is about and a reader with both should be told where the join is.
     let realtime = if project.has("realtime") {
@@ -238,7 +250,7 @@ pub struct Visitor {{
     pub account_id: Option<i64>,
     /// Whether this one may see everything.
     #[attr]
-    pub admin: bool,
+    pub admin: bool,{account}
 }}
 
 impl Visitor {{
@@ -390,7 +402,7 @@ mod tests {{
     fn author(id: i64) -> Visitor {{
         Visitor {{
             account_id: Some(id),
-            admin: false,
+            ..Visitor::anonymous()
         }}
     }}
 
@@ -474,6 +486,15 @@ mod tests {{
     )
 }
 
+/// With `notifications` and `rls`: the attribute its `#[db]` policy reads.
+/// `account_id` is the example's `i64`; the notifications store the account
+/// as text, whatever id `auth` uses.
+const ACCOUNT_ATTR: &str = r#"
+    /// The signed-in account as text, as `brocanth-auth` and the
+    /// notifications store it. The notifications' `#[db]` policy reads it.
+    #[attr]
+    pub account: Option<String>,"#;
+
 /// The `db { … }` clause of the example policy, with `rls`: the agreement
 /// test. Inside `policy!`, where rustfmt does not reach, so it is written
 /// in the shape a person would keep.
@@ -487,8 +508,8 @@ const DB_CLAUSE: &str = r#"
         db {
             subjects: [
                 Visitor::anonymous(),
-                Visitor { account_id: Some(1), admin: false },
-                Visitor { account_id: None, admin: true },
+                Visitor { account_id: Some(1), ..Visitor::anonymous() },
+                Visitor { admin: true, ..Visitor::anonymous() },
             ],
             url: crate::plugins::rls::agreement_url(),
         }"#;

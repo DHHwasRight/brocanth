@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/rls.rs`. A setting is read at run
 | Provides | none |
 | Requires | `PgPool` (a Postgres pool): the policies live in the database the `db` module opens, and `Db::transact_as` sets the principal; providers: [`db`](db.md) |
 | Uses | none |
-| Adapts to | [`model`](model.md): `rls make` writes a SeaORM migration file, not a SQL file; [`admin-model`](admin-model.md): with `policy`, `staff` is the identity the admin runs each request as; without it, AGENTS.md says the admin queries as the login role; [`policy`](policy.md): `schema()` writes the rules of the `#[db]` `PostPolicy` as database policies, and the `RowSecurity` plugin puts the request's `DbIdentity`, built from the policy's `Visitor`, on the context; [`resource`](resource.md): AGENTS.md says how a resource runs each operation as the request's identity |
+| Adapts to | [`model`](model.md): `rls make` writes a SeaORM migration file, not a SQL file; [`admin-model`](admin-model.md): with `policy`, `staff` is the identity the admin runs each request as; without it, AGENTS.md says the admin queries as the login role; [`policy`](policy.md): `schema()` writes the rules of the `#[db]` `PostPolicy` as database policies, and the `RowSecurity` plugin puts the request's `DbIdentity`, built from the policy's `Visitor`, on the context; [`resource`](resource.md): AGENTS.md says how a resource runs each operation as the request's identity; [`notifications`](notifications.md): with `policy`, `schema()` takes the policies of the function `notifications` exports as `db_policies`, and the identity test expects its `account` key |
 | Contributes | `AgentsSection` `rls`: how row-level security is declared in Rust and migrated |
 | Collects | none |
 | Exports | none |
@@ -55,7 +55,11 @@ Files:
   example's `db { … }` agreement test (`[db] url`; its user must be a
   superuser; `None` when nothing answers there). With `policy`,
   `brocanth-rls` takes its `agreement` feature. With
-  [`admin-model`](admin-model.md) too, `staff`.
+  [`admin-model`](admin-model.md) too, `staff`. With
+  [`notifications`](notifications.md) too, one more line,
+  `.policies(crate::plugins::notifications::db_policies(&app_user()))`:
+  that module writes its `#[db]` policy and exports the function's path
+  as `db_policies`.
 - `src/commands/rls.rs`: the `rls` command.
 
 Slots:

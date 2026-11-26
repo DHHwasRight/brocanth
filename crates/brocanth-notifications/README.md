@@ -19,6 +19,12 @@ page cannot show one person another person's notifications by mistake.
 `list` also takes a policy `Condition` over `NotificationColumn`, ANDed
 into the same `WHERE`.
 
+Under row-level security, `store.as_identity(identity)` runs each call in
+one transaction that assumes the identity first, so the database checks
+the account too. With `policy` and `rls`, the generated project holds a
+`#[db]` policy for the table (`tests/rls.rs` runs the same one on a forced
+table).
+
 A generated project gets it with `brocanth add notifications`
 (`docs/modules/notifications.md`): a page at `/notifications`, mail with the
 `mail` module, a live push with `realtime`.

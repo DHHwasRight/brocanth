@@ -6215,7 +6215,7 @@ mod tests {
     fn author(id: i64) -> Visitor {
         Visitor {
             account_id: Some(id),
-            admin: false,
+            ..Visitor::anonymous()
         }
     }
 
@@ -6826,7 +6826,7 @@ kind = ["middleware"]
 files = ["src/modules/policy.rs", "src/plugins/policy/"]
 config = []
 crates = ["brocanth-policy"]
-adapted_to = ["realtime"]
+adapted_to = ["realtime", "notifications"]
 
 [modules.notifications]
 version = "0.1.0"
@@ -6836,4 +6836,4 @@ config = ["notifications"]
 crates = ["brocanth-notifications"]
 adapted_to = ["mail", "realtime", "policy"]
 
-# brocanth-digest: 0384244addf590a8
+# brocanth-digest: 512c7dff342b47fe

@@ -97,3 +97,52 @@ fn with_mail_realtime_and_policy_notify_mails_and_publishes() {
         .expect("the dependency");
     assert!(line.contains("\"realtime\""), "{line}");
 }
+
+/// With policy and rls: the table's `#[db]` policy, the line `schema()`
+/// takes, the reader's identity on the page, and `account` on `Visitor`.
+#[test]
+fn with_policy_and_rls_the_database_holds_the_inbox_rule() {
+    let files = shape(
+        "notifications-rls",
+        &[
+            "config",
+            "commands",
+            "db",
+            "auth",
+            "middleware",
+            "middleware-csrf",
+            "policy",
+            "rls",
+            "notifications",
+        ],
+    );
+    let plugin = file(&files, "src/plugins/notifications/mod.rs");
+    assert!(plugin.contains("#[db]"), "{plugin}");
+    assert!(
+        plugin.contains("list: account == who.account else deny,"),
+        "{plugin}"
+    );
+    assert!(plugin.contains("create: always,"), "{plugin}");
+    assert!(
+        plugin.contains("url: crate::plugins::rls::agreement_url(),"),
+        "{plugin}"
+    );
+    assert!(plugin.contains(".as_identity(writer)"), "{plugin}");
+    let schema = file(&files, "src/plugins/rls/mod.rs");
+    assert!(
+        schema.contains(".policies(crate::plugins::notifications::db_policies(&app_user()))"),
+        "{schema}"
+    );
+    assert!(
+        schema.contains(r#"["account_id", "admin", "account"]"#),
+        "{schema}"
+    );
+    let rules = file(&files, "src/plugins/policy/mod.rs");
+    assert!(rules.contains("pub account: Option<String>,"), "{rules}");
+    let page = file(&files, "src/pages/notifications.rs");
+    assert_eq!(
+        page.matches(".as_identity(reader(&account))").count(),
+        2,
+        "the list and the mark-read post: {page}"
+    );
+}

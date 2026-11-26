@@ -3,11 +3,16 @@
 //!
 //! Plain SQL through the pool the `db` module opened. Every value is a bound
 //! parameter, and every statement of an [`Inbox`] names its account.
+//!
+//! Each call runs in one transaction. A store made with
+//! [`NotificationStore::as_identity`] assumes that identity first
+//! (`SET LOCAL ROLE`, the `brocanth.*` settings), so a row-level security
+//! policy on the table checks the same account one floor down.
 
 use brocanth_db::sqlx::postgres::{PgArguments, PgRow};
 use brocanth_db::sqlx::query::QueryAs;
 use brocanth_db::sqlx::{self, AssertSqlSafe, FromRow, Postgres, Row as _};
-use brocanth_db::Db;
+use brocanth_db::{Db, DbError, DbIdentity, Tx};
 use brocanth_policy::{Condition, Value};
 
 use crate::{safe_url, Notice};
@@ -48,6 +53,9 @@ pub enum NotifyError {
     /// The database refused the statement.
     #[error("[notifications] {0}")]
     Database(#[from] sqlx::Error),
+    /// The transaction did not begin, take the identity or commit.
+    #[error("[notifications] {0}")]
+    Transaction(#[from] DbError),
 }
 
 /// One stored notification, as an inbox reads it.
@@ -89,6 +97,8 @@ impl<'r> FromRow<'r, PgRow> for Item {
 pub struct NotificationStore {
     db: Db,
     config: std::sync::Arc<crate::NotificationsConfig>,
+    /// Who each statement runs as: `None` is the login role.
+    identity: Option<std::sync::Arc<DbIdentity>>,
 }
 
 impl NotificationStore {
@@ -103,7 +113,31 @@ impl NotificationStore {
         Self {
             db,
             config: std::sync::Arc::new(config),
+            identity: None,
         }
+    }
+
+    /// This store, with every statement run as `identity`: the role and the
+    /// settings a row-level security policy reads. Cheap: it shares the
+    /// pool and the settings.
+    ///
+    /// The `rls` module's generated inbox runs as the reader, and `notify`
+    /// as the anonymous request: `docs/modules/notifications.md`.
+    #[must_use]
+    pub fn as_identity(&self, identity: DbIdentity) -> Self {
+        Self {
+            identity: Some(std::sync::Arc::new(identity)),
+            ..self.clone()
+        }
+    }
+
+    /// A transaction, as this store's identity when it has one.
+    async fn begin(&self) -> Result<Tx<'static>, NotifyError> {
+        let mut tx = self.db.begin().await?;
+        if let Some(identity) = &self.identity {
+            tx.assume(identity).await?;
+        }
+        Ok(tx)
     }
 
     /// The settings the page reads: `per_page`, `mail`.
@@ -143,17 +177,26 @@ impl NotificationStore {
         if let Some(url) = notice.url.as_deref().filter(|url| !safe_url(url)) {
             return Err(NotifyError::UnsafeUrl(url.to_string()));
         }
-        let id = sqlx::query_scalar(
+        let mut tx = self.begin().await?;
+        // No `RETURNING`: under row-level security, Postgres checks a
+        // returned row against the `SELECT` policy, and the writer may not
+        // read another account's row. `lastval()` reads the id the insert
+        // drew, on this connection, with `USAGE` on the sequence.
+        sqlx::query(
             "INSERT INTO brocanth_notifications (account, kind, title, body, url) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(account)
         .bind(&notice.kind)
         .bind(&notice.title)
         .bind(&notice.body)
         .bind(&notice.url)
-        .fetch_one(self.db.pool())
+        .execute(tx.connection())
         .await?;
+        let id = sqlx::query_scalar("SELECT lastval()")
+            .fetch_one(tx.connection())
+            .await?;
+        tx.commit().await?;
         Ok(id)
     }
 
@@ -161,7 +204,7 @@ impl NotificationStore {
     /// account.
     pub fn inbox<'s>(&'s self, account: &str) -> Inbox<'s> {
         Inbox {
-            db: &self.db,
+            store: self,
             account: account.to_string(),
         }
     }
@@ -170,7 +213,7 @@ impl NotificationStore {
 /// One account's notifications. Made by [`NotificationStore::inbox`].
 #[derive(Debug)]
 pub struct Inbox<'s> {
-    db: &'s Db,
+    store: &'s NotificationStore,
     account: String,
 }
 
@@ -185,12 +228,15 @@ impl Inbox<'_> {
     /// # Errors
     /// What the database raised.
     pub async fn unread(&self) -> Result<i64, NotifyError> {
-        Ok(sqlx::query_scalar(
+        let mut tx = self.store.begin().await?;
+        let count = sqlx::query_scalar(
             "SELECT count(*) FROM brocanth_notifications WHERE account = $1 AND read_at IS NULL",
         )
         .bind(&self.account)
-        .fetch_one(self.db.pool())
-        .await?)
+        .fetch_one(tx.connection())
+        .await?;
+        tx.commit().await?;
+        Ok(count)
     }
 
     /// Up to `limit` notifications, newest first, with an id below `before`
@@ -228,7 +274,10 @@ impl Inbox<'_> {
         for value in &binds {
             query = bind(query, value);
         }
-        Ok(query.fetch_all(self.db.pool()).await?)
+        let mut tx = self.store.begin().await?;
+        let items = query.fetch_all(tx.connection()).await?;
+        tx.commit().await?;
+        Ok(items)
     }
 
     /// Marks one notification read. `false` when the account has no
@@ -238,25 +287,25 @@ impl Inbox<'_> {
     /// # Errors
     /// What the database raised.
     pub async fn mark_read(&self, id: i64) -> Result<bool, NotifyError> {
+        let mut tx = self.store.begin().await?;
         let done = sqlx::query(
             "UPDATE brocanth_notifications SET read_at = now() \
              WHERE id = $1 AND account = $2 AND read_at IS NULL",
         )
         .bind(id)
         .bind(&self.account)
-        .execute(self.db.pool())
+        .execute(tx.connection())
         .await?;
-        if done.rows_affected() == 1 {
-            return Ok(true);
-        }
         // Already read is still "the account has it".
-        let held: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM brocanth_notifications WHERE id = $1 AND account = $2)",
-        )
-        .bind(id)
-        .bind(&self.account)
-        .fetch_one(self.db.pool())
-        .await?;
+        let held = done.rows_affected() == 1
+            || sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM brocanth_notifications WHERE id = $1 AND account = $2)",
+            )
+            .bind(id)
+            .bind(&self.account)
+            .fetch_one(tx.connection())
+            .await?;
+        tx.commit().await?;
         Ok(held)
     }
 
@@ -266,13 +315,15 @@ impl Inbox<'_> {
     /// # Errors
     /// What the database raised.
     pub async fn mark_all_read(&self) -> Result<u64, NotifyError> {
+        let mut tx = self.store.begin().await?;
         let done = sqlx::query(
             "UPDATE brocanth_notifications SET read_at = now() \
              WHERE account = $1 AND read_at IS NULL",
         )
         .bind(&self.account)
-        .execute(self.db.pool())
+        .execute(tx.connection())
         .await?;
+        tx.commit().await?;
         Ok(done.rows_affected())
     }
 }

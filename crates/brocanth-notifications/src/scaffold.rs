@@ -50,6 +50,15 @@ impl Module for Notifications {
             "policy",
             "the inbox page ANDs a policy rule over `NotificationColumn` into its `WHERE`",
         )
+        .adapts_to(
+            "rls",
+            "with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader and `notify` as the anonymous request",
+        )
+        .exports(
+            "db_policies",
+            &["crate::plugins::notifications::db_policies"],
+            "with `policy` and `rls`, the path of a `fn(&Role) -> RulePolicies`: the database policies of `brocanth_notifications`, for `schema()`",
+        )
         .after("auth")
         .after("mail")
         .after("realtime")
@@ -81,9 +90,11 @@ impl Module for Notifications {
         let mail = project.has("mail");
         let realtime = project.has("realtime");
         let policy = project.has("policy");
+        // With both, the database enforces the inbox's rule too.
+        let db = policy && project.has("rls");
         s.file(
             "src/plugins/notifications/mod.rs",
-            plugin_rs(mail, realtime),
+            plugin_rs(mail, realtime, db),
         );
         s.at(Slot::PluginsMod).line("pub mod notifications;");
         configurable(s, project, "notifications", "Notifications", settings(mail));
@@ -91,11 +102,15 @@ impl Module for Notifications {
             "notifications",
             "brocanth_notifications::NotificationsConfig",
         );
-        s.file("src/pages/notifications.rs", page_rs(policy));
+        s.file("src/pages/notifications.rs", page_rs(policy, db));
         s.at(Slot::PagesRoutes).line("/notifications");
         s.at(Slot::ConfigChecks)
             .line(r#"Entry::migrates("notifications", "`brocanth_notifications::SCHEMA`"),"#);
-        s.at(Slot::AgentsSections).block(AGENTS.to_string());
+        let mut agents = AGENTS.to_string();
+        if db {
+            agents.push_str(AGENTS_DB);
+        }
+        s.at(Slot::AgentsSections).block(agents);
     }
 }
 
@@ -119,13 +134,21 @@ fn settings(mail: bool) -> Vec<Setting> {
     out
 }
 
-fn plugin_rs(mail: bool, realtime: bool) -> String {
+fn plugin_rs(mail: bool, realtime: bool, db: bool) -> String {
     let (uses, signature, send) = match mail {
         true => (MAIL_USES, MAIL_SIGNATURE, MAIL_SEND),
         false => ("", PLAIN_SIGNATURE, ""),
     };
+    let (store, db_uses, db_crate_uses, db_policy) = match db {
+        true => (STORE_DB, DB_USES, DB_CRATE_USES, DB_POLICY),
+        false => (STORE_PLAIN, "", "", ""),
+    };
     PLUGIN_RS
         .replace("@USES@", uses)
+        .replace("@DB_USES@", db_uses)
+        .replace("@DB_CRATE_USES@", db_crate_uses)
+        .replace("@STORE@", store)
+        .replace("@DB_POLICY@", db_policy)
         .replace("@SIGNATURE@", signature)
         .replace("@SEND@", send)
         .replace("@PUSH@", if realtime { PUSH } else { "" })
@@ -182,6 +205,94 @@ const MAIL_SEND: &str = r#"    // By mail too, when the caller knows the address
     }
 "#;
 
+const STORE_PLAIN: &str = "    let id = store(ctx)?\n";
+
+/// With `policy` and `rls`: `notify` writes as the anonymous request.
+const STORE_DB: &str =
+    "    // As the anonymous request: `create` is `always`, so the database takes
+    // a row for any account, and the writer reads none back.
+    let writer = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
+    let id = store(ctx)?
+        .as_identity(writer)
+";
+
+const DB_USES: &str = "use brocanth_rls::{DbIdentity, Policy, Role, RulePolicies};\n";
+
+const DB_CRATE_USES: &str = "use crate::plugins::policy::Visitor;
+use crate::plugins::rls::app_user;
+";
+
+/// With `policy` and `rls`: the table's `#[db]` policy, the reader's
+/// identity, and the policies `schema()` takes (exported as
+/// `db_policies`).
+const DB_POLICY: &str = r#"
+// ---------------------------------------------------------------------------
+// Row-level security
+// ---------------------------------------------------------------------------
+
+brocanth_policy::policy! {
+    /// `brocanth_notifications`, the columns the rules read. The table has
+    /// more (`body`, `url`, `created_at`, `read_at`); a rule names none.
+    pub entity Notification in "brocanth_notifications" {
+        #[key] id: i64,
+        /// The account it belongs to, as text.
+        account: String,
+        kind: String,
+        title: String,
+    }
+
+    /// Who reads and writes a notification, enforced by the database too.
+    ///
+    /// A reader lists and marks read the rows of their own account, and
+    /// no other. An admin has no arm: an inbox is personal. Any request
+    /// writes a row for any account (`create: always`): a notification
+    /// tells somebody else about an event, so the writer is not the
+    /// reader. No `delete`: a notification is marked read, not removed.
+    /// No write mask: the reader's `UPDATE` reaches only their own rows,
+    /// and `WITH CHECK` keeps them there.
+    #[db]
+    pub policy NotificationPolicy(who: &Visitor) for Notification {
+        list: account == who.account else deny,
+        create: always,
+        update: account == who.account else deny,
+        // The agreement test, run by `cargo test`: on a real Postgres, the
+        // database policies admit the rows `condition()` admits. It reads
+        // `[db] url`; with no database there, it prints `!! SKIPPED`.
+        db {
+            subjects: [
+                Visitor::anonymous(),
+                Visitor { account: Some("1".to_string()), ..Visitor::anonymous() },
+                Visitor { admin: true, ..Visitor::anonymous() },
+            ],
+            url: crate::plugins::rls::agreement_url(),
+        }
+    }
+}
+
+/// The database policies of `brocanth_notifications` for `role`:
+/// `schema()` in `src/plugins/rls/mod.rs` calls it. Run `brocanth rls make
+/// <name>` after a change to the rules.
+pub fn db_policies(role: &Role) -> RulePolicies {
+    Policy::from_rules::<NotificationPolicy>(role)
+        // `id` is a `bigserial`: `notify` draws it and reads it back with
+        // `lastval()`, so the role needs `USAGE` on the sequence.
+        .sequence("brocanth_notifications_id_seq")
+}
+
+/// Who `account` is in the database, for its inbox: the role
+/// [`app_user`], with `account` set and every other attribute absent.
+///
+/// The account comes from the session, as the inbox's `WHERE` does, so
+/// the inbox works with no request hook that builds a `Visitor`.
+pub fn reader(account: &str) -> DbIdentity {
+    let who = Visitor {
+        account: Some(account.to_string()),
+        ..Visitor::anonymous()
+    };
+    brocanth_rls::identity(&app_user(), &who)
+}
+"#;
+
 const PUSH: &str = r#"    // Live: the new row as a change, with its account, so a subscription
     // whose rule is `account = <the reader>` receives it.
     if let Some(realtime) = ctx.provided::<crate::plugins::realtime::Broadcast, _>() {
@@ -205,10 +316,10 @@ const PLUGIN_RS: &str = r#"//! In-app notifications: the plugin, who is reading,
 
 @USES@use brocanth_auth::session::Privilege;
 use brocanth_notifications::{Notice, NotificationStore};
-
+@DB_USES@
 use crate::pages::{Ctx, Error};
 use crate::plugins::auth::Services;
-
+@DB_CRATE_USES@
 /// The plugin, from the library. `[notifications]` configures it.
 pub use brocanth_notifications::NotificationsPlugin as Notifications;
 
@@ -242,13 +353,12 @@ pub fn store(ctx: &Ctx) -> Result<&NotificationStore, Error> {
 /// a write that rolled back is a lie the reader acts on.
 #[allow(dead_code)]
 @SIGNATURE@
-    let id = store(ctx)?
-        .notify(account, &notice)
+@STORE@        .notify(account, &notice)
         .await
         .map_err(|e| Error::internal(e.to_string()))?;
 @SEND@@PUSH@    Ok(id)
 }
-
+@DB_POLICY@
 #[cfg(test)]
 mod tests {
     use brocanth::routing::Verb;
@@ -279,9 +389,26 @@ mod tests {
 }
 "#;
 
-fn page_rs(policy: bool) -> String {
+fn page_rs(policy: bool, db: bool) -> String {
     PAGE_RS
         .replace("@RULE@", if policy { RULE_POLICY } else { RULE_NONE })
+        .replace(
+            "@AS_READER@",
+            if db {
+                "    // As the reader: the database checks the account too.\n\
+                 \x20   let store = store(ctx)?.as_identity(reader(&account));\n"
+            } else {
+                "    let store = store(ctx)?;\n"
+            },
+        )
+        .replace(
+            "@PAGE_USES@",
+            if db {
+                "use crate::plugins::notifications::{account, reader, store};"
+            } else {
+                "use crate::plugins::notifications::{account, store};"
+            },
+        )
         .replace(
             "@RULE_USES@",
             if policy {
@@ -314,7 +441,7 @@ const PAGE_RS: &str = r#"//! `/notifications` -- the signed-in account's notific
 
 @RULE_USES@
 use crate::pages::{Ctx, Error, Response};
-use crate::plugins::notifications::{account, store};
+@PAGE_USES@
 
 /// GET: the inbox.
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -322,8 +449,7 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
         return Err(Error::new(401, "sign in to read your notifications"));
     };
     let before = brocanth_notifications_query(&ctx.query, "before").and_then(|v| v.parse().ok());
-@RULE@    let store = store(ctx)?;
-    let inbox = store.inbox(&account);
+@RULE@@AS_READER@    let inbox = store.inbox(&account);
     // `per_page` under `[notifications]`.
     let limit = store.config().per_page;
     let unread = inbox
@@ -395,8 +521,7 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     let Some(asked) = MarkRead::from_form(&ctx.body) else {
         return Err(Error::new(400, "send id=<n> or all=1"));
     };
-    let store = store(ctx)?;
-    let inbox = store.inbox(&account);
+@AS_READER@    let inbox = store.inbox(&account);
     let done = match asked {
         MarkRead::One(id) => inbox.mark_read(id).await.map(|_| ()),
         MarkRead::All => inbox.mark_all_read().await.map(|_| ()),
@@ -431,3 +556,11 @@ const AGENTS: &str = "\n\
     \x20 other, because the page writes it into an `href`.\n\
     - Do not filter a page of notifications after it is read. Put the rule in\n\
     \x20 the `list` call, so the page and its next link agree.\n";
+
+/// With `policy` and `rls`.
+const AGENTS_DB: &str = "\
+    - The database enforces the inbox too: `NotificationPolicy` in\n\
+    \x20 `src/plugins/notifications/mod.rs` is `#[db]`. Read and mark as the\n\
+    \x20 reader, `store(ctx)?.as_identity(reader(&account))`; `notify` writes\n\
+    \x20 as the anonymous request. A statement on the pool with no identity\n\
+    \x20 runs as the login role, and on the forced table it sees no row.\n";

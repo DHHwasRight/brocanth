@@ -1344,6 +1344,7 @@ dependencies = [
  "brocanth-notifications",
  "brocanth-policy",
  "brocanth-realtime",
+ "brocanth-rls",
  "brocanth-scaffold",
  "serde",
  "thiserror 2.0.21",

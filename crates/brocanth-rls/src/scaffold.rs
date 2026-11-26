@@ -68,6 +68,10 @@ impl Module for Rls {
             "resource",
             "AGENTS.md says how a resource runs each operation as the request's identity",
         )
+        .adapts_to(
+            "notifications",
+            "with `policy`, `schema()` takes the policies of the function `notifications` exports as `db_policies`, and the identity test expects its `account` key",
+        )
         .krate(
             Dep::brocanth("brocanth-rls")
                 .note("roles, grants and policies in Rust, diffed into migrations"),
@@ -149,15 +153,37 @@ fn schema_rs(project: &Project) -> String {
     }
     // Bridge phase 7 (column grants for unguarded masks) changes what
     // `Policy::from_rules` writes, not this line: re-bless the goldens.
+    //
+    // A module with a `#[db]` policy of its own writes a function
+    // `fn(&Role) -> RulePolicies` beside it and exports its path: the
+    // policy, its table and its sequence have one home, in that module.
+    let theirs = project
+        .export("notifications", "db_policies")
+        .unwrap_or_default();
+    let schema = match theirs.is_empty() {
+        true => SCHEMA_FN_POLICY.replace("@SCHEMA_BODY@", SCHEMA_BODY_ONE),
+        false => {
+            let mut body = SCHEMA_BODY_MANY.to_string();
+            for policies in theirs {
+                body.push_str(&format!("        .policies({policies}(&app_user()))\n"));
+            }
+            SCHEMA_FN_POLICY.replace("@SCHEMA_BODY@", &body)
+        }
+    };
     let mut out = SCHEMA_RS
         .replace("@IDENTITY_DOC@", IDENTITY_DOC_POLICY)
-        .replace("@SCHEMA@", SCHEMA_FN_POLICY);
+        .replace("@SCHEMA@", &schema);
     out.push_str(REQUEST_RS);
     out.push_str(AGREEMENT_RS);
     if project.has("admin-model") {
         out.push_str(STAFF_RS);
     }
-    out.push_str(REQUEST_TESTS_RS);
+    // `Visitor` has `account` when `notifications` reads it.
+    let keys = match theirs.is_empty() {
+        true => r#"["account_id", "admin"]"#,
+        false => r#"["account_id", "admin", "account"]"#,
+    };
+    out.push_str(&REQUEST_TESTS_RS.replace("@KEYS@", keys));
     out
 }
 
@@ -241,14 +267,32 @@ use brocanth_rls::{Policy, Schema};
 /// A new `#[db]` policy needs one more `.policies(…)` line. The table must
 /// exist before `migrate up` applies the migration `rls make` writes.
 pub fn schema() -> Schema {
-    Schema::new().role(app_user()).policies(
+@SCHEMA_BODY@}
+"#;
+
+/// The body of `schema()` with the example policy alone.
+const SCHEMA_BODY_ONE: &str = r#"    Schema::new().role(app_user()).policies(
         Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
             // `posts.id` is a `bigserial`: an insert calls `nextval`, so
             // `app_user` needs `USAGE` on the sequence. Remove the line when
             // the key has no sequence.
             .sequence("posts_id_seq"),
     )
-}
+"#;
+
+/// The body of `schema()` when a module adds a policy: the chain, one call
+/// per line, as rustfmt writes it. One `.policies(<module>::db_policies(…))`
+/// line per module follows: the module's own `#[db]` policy, its table and
+/// its sequence.
+const SCHEMA_BODY_MANY: &str = r#"    Schema::new()
+        .role(app_user())
+        .policies(
+            Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
+                // `posts.id` is a `bigserial`: an insert calls `nextval`, so
+                // `app_user` needs `USAGE` on the sequence. Remove the line
+                // when the key has no sequence.
+                .sequence("posts_id_seq"),
+        )
 "#;
 
 /// The end of the module doc without `policy`: the request builds its
@@ -420,7 +464,7 @@ mod tests {
         let me = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
         assert_eq!(me.role_name(), Some("app_user"));
         let keys: Vec<&str> = me.settings().iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["account_id", "admin"]);
+        assert_eq!(keys, @KEYS@);
         assert_eq!(me.settings()[0].1, "");
         me.statements().expect("the identity is one Postgres takes");
     }

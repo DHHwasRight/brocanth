@@ -16179,7 +16179,7 @@ use brocanth_notifications::policy::{Dialect, Pred};
 use brocanth_notifications::{escape, safe_url, MarkRead, Notification, NotificationColumn};
 
 use crate::pages::{Ctx, Error, Response};
-use crate::plugins::notifications::{account, store};
+use crate::plugins::notifications::{account, reader, store};
 
 /// GET: the inbox.
 pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
@@ -16191,7 +16191,8 @@ pub async fn handle(ctx: &mut Ctx) -> Result<Response, Error> {
     // one account already; narrow it here, by kind or anything else.
     let rule = Pred::<NotificationColumn>::Always.condition::<Notification>(Dialect::Postgres)?;
     let rule = Some(&rule);
-    let store = store(ctx)?;
+    // As the reader: the database checks the account too.
+    let store = store(ctx)?.as_identity(reader(&account));
     let inbox = store.inbox(&account);
     // `per_page` under `[notifications]`.
     let limit = store.config().per_page;
@@ -16264,7 +16265,8 @@ pub async fn handle_post(ctx: &mut Ctx) -> Result<Response, Error> {
     let Some(asked) = MarkRead::from_form(&ctx.body) else {
         return Err(Error::new(400, "send id=<n> or all=1"));
     };
-    let store = store(ctx)?;
+    // As the reader: the database checks the account too.
+    let store = store(ctx)?.as_identity(reader(&account));
     let inbox = store.inbox(&account);
     let done = match asked {
         MarkRead::One(id) => inbox.mark_read(id).await.map(|_| ()),
@@ -22432,9 +22434,12 @@ impl Plugin for Model {
 use crate::plugins::mail::Outbox;
 use brocanth_auth::session::Privilege;
 use brocanth_notifications::{Notice, NotificationStore};
+use brocanth_rls::{DbIdentity, Policy, Role, RulePolicies};
 
 use crate::pages::{Ctx, Error};
 use crate::plugins::auth::Services;
+use crate::plugins::policy::Visitor;
+use crate::plugins::rls::app_user;
 
 /// The plugin, from the library. `[notifications]` configures it.
 pub use brocanth_notifications::NotificationsPlugin as Notifications;
@@ -22474,7 +22479,11 @@ pub async fn notify(
     notice: Notice,
     email: Option<&str>,
 ) -> Result<i64, Error> {
+    // As the anonymous request: `create` is `always`, so the database takes
+    // a row for any account, and the writer reads none back.
+    let writer = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
     let id = store(ctx)?
+        .as_identity(writer)
         .notify(account, &notice)
         .await
         .map_err(|e| Error::internal(e.to_string()))?;
@@ -22508,6 +22517,72 @@ pub async fn notify(
         brocanth_notifications::publish(&realtime.broker, account, id, &notice);
     }
     Ok(id)
+}
+
+// ---------------------------------------------------------------------------
+// Row-level security
+// ---------------------------------------------------------------------------
+
+brocanth_policy::policy! {
+    /// `brocanth_notifications`, the columns the rules read. The table has
+    /// more (`body`, `url`, `created_at`, `read_at`); a rule names none.
+    pub entity Notification in "brocanth_notifications" {
+        #[key] id: i64,
+        /// The account it belongs to, as text.
+        account: String,
+        kind: String,
+        title: String,
+    }
+
+    /// Who reads and writes a notification, enforced by the database too.
+    ///
+    /// A reader lists and marks read the rows of their own account, and
+    /// no other. An admin has no arm: an inbox is personal. Any request
+    /// writes a row for any account (`create: always`): a notification
+    /// tells somebody else about an event, so the writer is not the
+    /// reader. No `delete`: a notification is marked read, not removed.
+    /// No write mask: the reader's `UPDATE` reaches only their own rows,
+    /// and `WITH CHECK` keeps them there.
+    #[db]
+    pub policy NotificationPolicy(who: &Visitor) for Notification {
+        list: account == who.account else deny,
+        create: always,
+        update: account == who.account else deny,
+        // The agreement test, run by `cargo test`: on a real Postgres, the
+        // database policies admit the rows `condition()` admits. It reads
+        // `[db] url`; with no database there, it prints `!! SKIPPED`.
+        db {
+            subjects: [
+                Visitor::anonymous(),
+                Visitor { account: Some("1".to_string()), ..Visitor::anonymous() },
+                Visitor { admin: true, ..Visitor::anonymous() },
+            ],
+            url: crate::plugins::rls::agreement_url(),
+        }
+    }
+}
+
+/// The database policies of `brocanth_notifications` for `role`:
+/// `schema()` in `src/plugins/rls/mod.rs` calls it. Run `brocanth rls make
+/// <name>` after a change to the rules.
+pub fn db_policies(role: &Role) -> RulePolicies {
+    Policy::from_rules::<NotificationPolicy>(role)
+        // `id` is a `bigserial`: `notify` draws it and reads it back with
+        // `lastval()`, so the role needs `USAGE` on the sequence.
+        .sequence("brocanth_notifications_id_seq")
+}
+
+/// Who `account` is in the database, for its inbox: the role
+/// [`app_user`], with `account` set and every other attribute absent.
+///
+/// The account comes from the session, as the inbox's `WHERE` does, so
+/// the inbox works with no request hook that builds a `Visitor`.
+pub fn reader(account: &str) -> DbIdentity {
+    let who = Visitor {
+        account: Some(account.to_string()),
+        ..Visitor::anonymous()
+    };
+    brocanth_rls::identity(&app_user(), &who)
 }
 
 #[cfg(test)]
@@ -23529,6 +23604,10 @@ pub struct Visitor {
     /// Whether this one may see everything.
     #[attr]
     pub admin: bool,
+    /// The signed-in account as text, as `brocanth-auth` and the
+    /// notifications store it. The notifications' `#[db]` policy reads it.
+    #[attr]
+    pub account: Option<String>,
 }
 
 impl Visitor {
@@ -23609,8 +23688,8 @@ brocanth_policy::policy! {
         db {
             subjects: [
                 Visitor::anonymous(),
-                Visitor { account_id: Some(1), admin: false },
-                Visitor { account_id: None, admin: true },
+                Visitor { account_id: Some(1), ..Visitor::anonymous() },
+                Visitor { admin: true, ..Visitor::anonymous() },
             ],
             url: crate::plugins::rls::agreement_url(),
         }
@@ -23694,7 +23773,7 @@ mod tests {
     fn author(id: i64) -> Visitor {
         Visitor {
             account_id: Some(id),
-            admin: false,
+            ..Visitor::anonymous()
         }
     }
 
@@ -24812,13 +24891,16 @@ use brocanth_rls::{Policy, Schema};
 /// A new `#[db]` policy needs one more `.policies(…)` line. The table must
 /// exist before `migrate up` applies the migration `rls make` writes.
 pub fn schema() -> Schema {
-    Schema::new().role(app_user()).policies(
-        Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
-            // `posts.id` is a `bigserial`: an insert calls `nextval`, so
-            // `app_user` needs `USAGE` on the sequence. Remove the line when
-            // the key has no sequence.
-            .sequence("posts_id_seq"),
-    )
+    Schema::new()
+        .role(app_user())
+        .policies(
+            Policy::from_rules::<crate::plugins::policy::PostPolicy>(&app_user())
+                // `posts.id` is a `bigserial`: an insert calls `nextval`, so
+                // `app_user` needs `USAGE` on the sequence. Remove the line
+                // when the key has no sequence.
+                .sequence("posts_id_seq"),
+        )
+        .policies(crate::plugins::notifications::db_policies(&app_user()))
 }
 
 // ---------------------------------------------------------------------------
@@ -24972,7 +25054,7 @@ mod tests {
         let me = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
         assert_eq!(me.role_name(), Some("app_user"));
         let keys: Vec<&str> = me.settings().iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["account_id", "admin"]);
+        assert_eq!(keys, ["account_id", "admin", "account"]);
         assert_eq!(me.settings()[0].1, "");
         me.statements().expect("the identity is one Postgres takes");
     }
@@ -27827,6 +27909,11 @@ after the change it reports is committed. The account reads it at
   other, because the page writes it into an `href`.
 - Do not filter a page of notifications after it is read. Put the rule in
   the `list` call, so the page and its next link agree.
+- The database enforces the inbox too: `NotificationPolicy` in
+  `src/plugins/notifications/mod.rs` is `#[db]`. Read and mark as the
+  reader, `store(ctx)?.as_identity(reader(&account))`; `notify` writes
+  as the anonymous request. A statement on the pool with no identity
+  runs as the login role, and on the forced table it sees no row.
 
 ## Feed
 
@@ -27977,7 +28064,7 @@ recommendation, and wait for the answer.
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 0ff763f398d5516d -->
+<!-- brocanth-digest: 2a29b6b348c70a4c -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -28213,7 +28300,7 @@ kind = ["middleware"]
 files = ["src/modules/policy.rs", "src/plugins/policy/"]
 config = []
 crates = ["brocanth-policy"]
-adapted_to = ["realtime", "rls"]
+adapted_to = ["realtime", "rls", "notifications"]
 
 [modules.rls]
 version = "0.1.0"
@@ -28221,7 +28308,7 @@ kind = ["enhancer"]
 files = ["src/modules/rls.rs", "src/commands/rls.rs", "src/plugins/rls/"]
 config = []
 crates = ["brocanth-rls"]
-adapted_to = ["model", "admin-model", "policy", "resource"]
+adapted_to = ["model", "admin-model", "policy", "resource", "notifications"]
 
 [modules.storage]
 version = "0.1.0"
@@ -28477,7 +28564,7 @@ kind = ["routes", "enhancer"]
 files = ["src/modules/notifications.rs", "src/pages/notifications.rs", "src/plugins/notifications/"]
 config = ["notifications"]
 crates = ["brocanth-notifications"]
-adapted_to = ["mail", "realtime", "policy"]
+adapted_to = ["mail", "realtime", "policy", "rls"]
 
 [modules.commands]
 version = "0.1.0"
@@ -28687,4 +28774,4 @@ config = []
 crates = []
 adapted_to = []
 
-# brocanth-digest: b468b6eea45be307
+# brocanth-digest: 015fd3e2662cd08e

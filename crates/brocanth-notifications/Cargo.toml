@@ -32,6 +32,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 brocanth-notifications = { path = ".", features = ["config", "realtime", "scaffold"] }
 brocanth-scaffold = { workspace = true, features = ["testing"] }
 brocanth-cli = { path = "../brocanth-cli" }
+# tests/rls.rs: the policy the module writes with `policy` and `rls`, as
+# `policy!` `#[db]`, its database policies, and its agreement test.
+brocanth-policy = { workspace = true, features = ["macro"] }
+brocanth-rls = { workspace = true, features = ["agreement"] }
 
 [features]
 default = ["runtime"]

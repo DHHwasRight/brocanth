@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/policy.rs`. A setting is read at 
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`realtime`](realtime.md): the docs say where a rule joins a broadcast key; [`rls`](rls.md): the example policy gets a `db { … }` clause: `cargo test` compares it with its database policies on `[db] url` |
+| Adapts to | [`realtime`](realtime.md): the docs say where a rule joins a broadcast key; [`rls`](rls.md): the example policy gets a `db { … }` clause: `cargo test` compares it with its database policies on `[db] url`; [`notifications`](notifications.md): with `rls`, `Visitor` gets `account`, the signed-in account as text, which the notifications' `#[db]` policy reads |
 | Contributes | none |
 | Collects | none |
 | Exports | none |
