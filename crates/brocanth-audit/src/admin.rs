@@ -17,14 +17,27 @@
 //! `ViewDetail` policy and the model's view rule). Any other entry shows
 //! when, who, the table, the key and the column names, with its values
 //! hidden.
+//!
+//! The tab reads through [`HistoryData`] (docs/backoffice.md §7.6): in this
+//! process over the trail, or over the backoffice wire ([`RemoteHistory`],
+//! answered by [`HistoryServe`] with `history.read`). The values cross the
+//! wire, and the backoffice hides the ones the person may not read: the
+//! admin's record rules live in the backoffice's configuration, as a model
+//! screen's row scope does (D4). The journal stays in the process that
+//! makes the write: it is a hook, not a read.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::journal::{AdminWrite, Journal, Written};
 use brocanth_admin::late::Late;
+use brocanth_admin::panel::remote::{PanelServe, PanelWire};
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
 use brocanth_admin::parts::{self, encode, escape};
+use brocanth_admin::policy::{Level, Principal};
 use brocanth_admin::AdminConfig;
+use serde::{Deserialize, Serialize};
 
 use crate::entry::{format_time, Entry, Field, Kind};
 use crate::store::Query;
@@ -51,9 +64,7 @@ const PAGE: usize = 50;
 /// ```
 pub fn install(config: AdminConfig, trail: Late<Trail>) -> AdminConfig {
     config
-        .panel(AuditPanel {
-            trail: trail.clone(),
-        })
+        .panel(AuditPanel::late(trail.clone()))
         .journal(AuditJournal { trail })
         .record_link("History", |r| {
             Some(format!(
@@ -122,23 +133,173 @@ impl Journal for AuditJournal {
     }
 }
 
+/// What the history tab reads (docs/backoffice.md §7.6, P1).
+///
+/// In this process it reads the trail; [`RemoteHistory`] sends it over the
+/// backoffice wire, and [`HistoryServe`] answers it there.
+#[async_trait]
+pub trait HistoryData: Send + Sync + 'static {
+    /// The entries `query` names, and the trail's state.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text, with a `help:` line.
+    async fn history(&self, who: &Principal<'_>, query: Query) -> Result<HistoryView, String>;
+}
+
+/// What the tab shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryView {
+    /// The entries, newest first; or why they could not be read.
+    pub entries: Result<Vec<Entry>, String>,
+    /// What the last write of the trail failed with.
+    pub last_error: Option<String>,
+    /// How many changes were not recorded.
+    pub dropped: u64,
+    /// Whether the trail survives a restart.
+    pub durable: bool,
+}
+
+impl Default for HistoryView {
+    fn default() -> Self {
+        HistoryView {
+            entries: Ok(Vec::new()),
+            last_error: None,
+            dropped: 0,
+            durable: true,
+        }
+    }
+}
+
+/// The trail in this process: empty until the first request that carries
+/// it.
+struct Trailed(Late<Trail>);
+
+#[async_trait]
+impl HistoryData for Trailed {
+    async fn history(&self, _who: &Principal<'_>, query: Query) -> Result<HistoryView, String> {
+        let trail = self.0.get().ok_or_else(|| {
+            "the audit plugin is not registered in this application\nhelp: register it, which \
+             puts the trail on the request context"
+                .to_string()
+        })?;
+        Ok(HistoryView {
+            entries: trail.find(&query).await.map_err(|e| e.to_string()),
+            last_error: trail.last_error(),
+            dropped: trail.dropped(),
+            durable: trail.is_durable(),
+        })
+    }
+}
+
+/// The data side of the history tab on the backoffice wire: decodes a
+/// [`Query`] and reads it from a [`HistoryData`]. Needs `history.read`.
+pub struct HistoryServe(Arc<dyn HistoryData>);
+
+impl HistoryServe {
+    /// Serves `data`.
+    pub fn new(data: Arc<dyn HistoryData>) -> HistoryServe {
+        HistoryServe(data)
+    }
+
+    /// As the wire server takes it.
+    pub fn shared(self) -> Arc<dyn PanelServe> {
+        Arc::new(self)
+    }
+}
+
+impl std::fmt::Debug for HistoryServe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryServe")
+    }
+}
+
+fn decode(call: &str) -> Result<Query, String> {
+    serde_json::from_str(call).map_err(|e| format!("a history call did not decode: {e}"))
+}
+
+#[async_trait]
+impl PanelServe for HistoryServe {
+    fn level(&self, call: &str) -> Result<Level, String> {
+        decode(call).map(|_| Level::Read)
+    }
+
+    async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String> {
+        let view = self.0.history(who, decode(call)?).await?;
+        serde_json::to_string(&view).map_err(|e| format!("a history answer did not encode: {e}"))
+    }
+}
+
+/// The history tab's data in another process, through the backoffice wire.
+pub struct RemoteHistory(Arc<dyn PanelWire>);
+
+impl RemoteHistory {
+    /// The trail behind `wire`.
+    pub fn new(wire: Arc<dyn PanelWire>) -> RemoteHistory {
+        RemoteHistory(wire)
+    }
+}
+
+impl std::fmt::Debug for RemoteHistory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteHistory")
+    }
+}
+
+#[async_trait]
+impl HistoryData for RemoteHistory {
+    async fn history(&self, who: &Principal<'_>, query: Query) -> Result<HistoryView, String> {
+        let call = serde_json::to_string(&query)
+            .map_err(|e| format!("a history call did not encode: {e}"))?;
+        let answer = self.0.send(who, KEY, call).await?;
+        serde_json::from_str(&answer).map_err(|e| format!("a history answer did not decode: {e}"))
+    }
+}
+
+/// Where the tab reads.
+enum Source {
+    /// The trail, which arrives with the first request.
+    Local(Late<Trail>),
+    /// Any data side: another process, through the wire.
+    Data(Arc<dyn HistoryData>),
+}
+
 /// The history tab.
 pub struct AuditPanel {
-    trail: Late<Trail>,
+    source: Source,
 }
 
 impl AuditPanel {
     /// A tab over this trail.
     pub fn new(trail: Trail) -> AuditPanel {
-        AuditPanel {
-            trail: Late::ready(trail),
-        }
+        AuditPanel::late(Late::ready(trail))
     }
 
     /// A tab over a trail that arrives later, in `cell`: for a generated
     /// admin, which mounts before the plugin is built.
     pub fn late(cell: Late<Trail>) -> AuditPanel {
-        AuditPanel { trail: cell }
+        AuditPanel {
+            source: Source::Local(cell),
+        }
+    }
+
+    /// A tab over any [`HistoryData`]: [`RemoteHistory`] in the backoffice
+    /// binary, which reads the trail through the wire (§7.6).
+    pub fn over(data: Arc<dyn HistoryData>) -> AuditPanel {
+        AuditPanel {
+            source: Source::Data(data),
+        }
+    }
+
+    /// What the tab reads through, or `None` before the trail arrived.
+    fn data(&self) -> Option<Arc<dyn HistoryData>> {
+        match &self.source {
+            Source::Local(cell) => cell
+                .get()
+                .is_some()
+                .then(|| Arc::new(Trailed(cell.clone())) as Arc<dyn HistoryData>),
+            Source::Data(data) => Some(Arc::clone(data)),
+        }
     }
 }
 
@@ -152,11 +313,26 @@ impl Panel for AuditPanel {
         "History".to_string()
     }
 
+    fn serve(&self) -> Option<Arc<dyn PanelServe>> {
+        match &self.source {
+            Source::Local(cell) => {
+                Some(HistoryServe::new(Arc::new(Trailed(cell.clone()))).shared())
+            }
+            Source::Data(_) => None,
+        }
+    }
+
+    fn remote(&self, wire: Arc<dyn PanelWire>) -> Option<Arc<dyn Panel>> {
+        Some(Arc::new(AuditPanel::over(Arc::new(RemoteHistory::new(
+            wire,
+        )))))
+    }
+
     async fn render(&self, r: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {
         if !r.path.is_empty() || r.post {
             return Ok(None);
         }
-        let Some(trail) = self.trail.get() else {
+        let Some(data) = self.data() else {
             return Ok(Some(PanelPage::body(
                 "History",
                 format!(
@@ -175,13 +351,20 @@ impl Panel for AuditPanel {
             limit: PAGE,
         };
         let mut html = String::new();
-        let entries = match trail.find(&query).await {
+        let view = match data.history(&r.principal, query).await {
+            Ok(view) => view,
+            Err(e) => HistoryView {
+                entries: Err(e),
+                ..HistoryView::default()
+            },
+        };
+        let entries = match view.entries {
             Ok(entries) => entries,
             Err(e) => {
                 html.push_str(&format!(
                     "<p role=\"alert\" class=\"{}\">The history could not be read: {}</p>",
                     parts::muted(),
-                    escape(&e.to_string())
+                    escape(&e)
                 ));
                 Vec::new()
             }
@@ -199,7 +382,7 @@ impl Panel for AuditPanel {
                 all = escape(&r.url("")),
             ));
         }
-        if let Some(e) = trail.last_error() {
+        if let Some(e) = view.last_error {
             html.push_str(&format!(
                 "<p class=\"{}\">The last write of the history failed: {}. Changes wait in \
                  memory and are written at the next try.</p>",
@@ -207,7 +390,7 @@ impl Panel for AuditPanel {
                 escape(&e)
             ));
         }
-        let dropped = trail.dropped();
+        let dropped = view.dropped;
         if dropped > 0 {
             html.push_str(&format!(
                 "<p role=\"alert\" class=\"{}\">{dropped} changes were not recorded: the \
@@ -215,7 +398,7 @@ impl Panel for AuditPanel {
                 parts::muted(),
             ));
         }
-        if !trail.is_durable() {
+        if !view.durable {
             html.push_str(&format!(
                 "<p class=\"{}\">The history is kept in memory and is lost at restart: the \
                  application has no database.</p>",

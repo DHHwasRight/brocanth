@@ -4,6 +4,7 @@ use brocanth_events::{ChangeKind, RowChange};
 
 /// What happened to the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub enum Kind {
     /// It was created.
     Created,
@@ -51,6 +52,7 @@ impl From<&ChangeKind<'_>> for Kind {
 /// its columns only: a `RowChange` carries no values, so both are `None`.
 /// A change the admin made carries both.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Field {
     /// The column name.
     pub name: String,
@@ -73,6 +75,7 @@ impl Field {
 
 /// One change to one row.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
     /// The stored id. 0 before the entry is stored.
     pub id: i64,

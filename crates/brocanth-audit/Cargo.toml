@@ -42,6 +42,9 @@ serde = { version = "1", features = ["derive"], optional = true }
 # `admin`: the History tab, the per-record link and the journal that hears
 # every admin write. Off, so a worker links no admin.
 brocanth-admin = { workspace = true, optional = true }
+# The tab's data contract crosses the backoffice wire as JSON
+# (docs/backoffice.md §7.6).
+serde_json = { version = "1", optional = true }
 
 # `scaffold`: the module `brocanth create` offers as `audit`.
 brocanth-scaffold = { workspace = true, optional = true }
@@ -70,7 +73,7 @@ runtime = [
 ]
 postgres = ["runtime", "dep:brocanth-db"]
 config = ["runtime", "dep:serde"]
-admin = ["runtime", "dep:brocanth-admin"]
+admin = ["runtime", "dep:brocanth-admin", "dep:serde", "dep:serde_json"]
 scaffold = ["dep:brocanth-scaffold"]
 
 [lints.rust]

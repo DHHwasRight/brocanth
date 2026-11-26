@@ -809,6 +809,7 @@ dependencies = [
  "brocanth-scaffold",
  "brocanth-test",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

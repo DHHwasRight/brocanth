@@ -34,6 +34,7 @@ impl std::error::Error for StoreError {}
 /// Which entries to read: newest first, optionally of one table or one
 /// row, older than an id.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Query {
     /// Only this table.
     pub table: Option<String>,
