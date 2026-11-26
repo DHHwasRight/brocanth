@@ -110,7 +110,7 @@ runtime = [
 # `PgTokenStore`: the tokens in Postgres.
 postgres = ["runtime", "dep:brocanth-db"]
 # The connections tab.
-admin = ["runtime", "dep:brocanth-admin"]
+admin = ["runtime", "dep:brocanth-admin", "dep:serde", "dep:serde_json"]
 # The store contract as one async function, for a store author's tests.
 conformance = ["runtime"]
 scaffold = ["dep:brocanth-scaffold"]

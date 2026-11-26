@@ -59,6 +59,7 @@ impl std::fmt::Debug for StoredToken {
 /// A connection without its tokens: what a list, a page or the admin
 /// shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "admin", derive(serde::Serialize, serde::Deserialize))]
 pub struct Connection {
     /// The account that connected.
     pub account: String,

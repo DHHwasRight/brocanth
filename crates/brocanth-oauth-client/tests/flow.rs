@@ -593,3 +593,143 @@ async fn the_admin_tab_lists_connections_without_tokens_and_hides_the_button_fro
     };
     assert!(store.get("<b>alice</b>", "fake").await.unwrap().is_none());
 }
+
+/// The connections tab over the backoffice wire (docs/backoffice.md §7.6):
+/// each call and answer survives JSON, the tab is the same in this process
+/// and over the wire, and the data side checks the grant of each call. The
+/// wire is `remote::Loopback`, which checks a call with the same
+/// `remote::authorize` as the wire server.
+#[tokio::test]
+async fn the_admin_tab_runs_over_the_wire_with_each_grant_checked() {
+    use brocanth_admin::form::Submission;
+    use brocanth_admin::panel::remote::{Grants, Loopback};
+    use brocanth_admin::policy::{policy_fn, Principal, Request};
+    use brocanth_admin::{Admin, AdminConfig, Fixture};
+    use brocanth_oauth_client::admin::{
+        ConnectionsAnswer, ConnectionsCall, ConnectionsPage, ConnectionsPanel,
+    };
+    use brocanth_oauth_client::Connection;
+
+    struct Who(Grants);
+
+    fn who(permissions: &[&str]) -> Who {
+        Who(Grants {
+            superuser: false,
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        })
+    }
+
+    async fn send(
+        admin: &Admin,
+        who: &Who,
+        method: &str,
+        path: &str,
+        form: &Submission,
+    ) -> Result<(u16, String), String> {
+        admin
+            .dispatch(Principal::new(who), method, path, "", form)
+            .await
+            .map(|page| (page.status(), page.html().unwrap_or_default().to_string()))
+            .map_err(|e| e.to_string())
+    }
+
+    for call in [
+        ConnectionsCall::Page {
+            limit: 50,
+            offset: 0,
+        },
+        ConnectionsCall::Revoke {
+            account: "alice".into(),
+            provider: "fake".into(),
+        },
+    ] {
+        let text = serde_json::to_string(&call).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConnectionsCall>(&text).unwrap(),
+            call
+        );
+    }
+    let answer = ConnectionsAnswer::Page(ConnectionsPage {
+        total: 1,
+        rows: vec![Connection {
+            account: "alice".into(),
+            provider: "fake".into(),
+            scopes: vec!["read".into()],
+            expires_at: Some(1_700_000_000),
+            has_refresh: true,
+            connected_at: 1_600_000_000,
+            refreshed_at: 1_650_000_000,
+        }],
+    });
+    let text = serde_json::to_string(&answer).unwrap();
+    assert_eq!(
+        serde_json::from_str::<ConnectionsAnswer>(&text).unwrap(),
+        answer
+    );
+
+    let (fake, _, store, client, routes) = setup().await;
+    connect(&fake, &routes, "alice").await;
+    let allow = || policy_fn(|_: &Principal<'_>, _: Request<'_>| true);
+    let application = AdminConfig::new().panel(ConnectionsPanel::new(client));
+    let wire = application
+        .panel_serves()
+        .into_iter()
+        .fold(
+            Loopback::new(|p: &Principal<'_>| {
+                p.downcast::<Who>()
+                    .map(|who| who.0.clone())
+                    .unwrap_or_default()
+            }),
+            |wire, (tab, serve)| wire.panel(tab, serve),
+        )
+        .shared();
+    let local = Admin::new(Arc::new(Fixture::blog()), application.with_policy(allow()));
+    let remote = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .panel(ConnectionsPanel::late(Default::default()))
+            .panels_through(wire)
+            .with_policy(allow()),
+    );
+    let none = Submission::default();
+    let reader = who(&["connections.read"]);
+    let there = send(&remote, &reader, "GET", "/admin/connections", &none).await;
+    assert_eq!(
+        send(&local, &reader, "GET", "/admin/connections", &none).await,
+        there
+    );
+    assert!(there.is_ok_and(|(status, html)| status == 200 && html.contains("alice")));
+
+    let revoke = Submission::from_pairs([("account", "alice"), ("provider", "fake")]);
+    let refused = send(
+        &remote,
+        &reader,
+        "POST",
+        "/admin/connections/revoke",
+        &revoke,
+    )
+    .await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("connections.edit")),
+        "{refused:?}"
+    );
+    assert!(store.get("alice", "fake").await.unwrap().is_some());
+    let nobody = send(&remote, &who(&[]), "GET", "/admin/connections", &none).await;
+    assert!(nobody.is_err(), "{nobody:?}");
+    let editor = who(&["connections.edit"]);
+    assert_eq!(
+        send(
+            &remote,
+            &editor,
+            "POST",
+            "/admin/connections/revoke",
+            &revoke
+        )
+        .await
+        .map(|(status, _)| status),
+        Ok(303)
+    );
+    assert!(store.get("alice", "fake").await.unwrap().is_none());
+}
