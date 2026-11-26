@@ -190,6 +190,7 @@ const PLUGINS: &[Row] = &[
                     "middleware",
                     "middleware-csrf",
                     "storage",
+                    "storage-fs",
                     "storage-routes",
                 ],
                 "src/plugins/storage_routes/mod.rs",

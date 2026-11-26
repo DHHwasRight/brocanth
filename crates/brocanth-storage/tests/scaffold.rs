@@ -36,6 +36,7 @@ fn the_routes_sit_around_the_csrf_check() {
             "middleware",
             "middleware-csrf",
             "storage",
+            "storage-fs",
             "storage-routes",
         ],
     );
@@ -52,6 +53,7 @@ fn image_lists_the_formats_and_caps_the_pixels() {
             "middleware",
             "middleware-csrf",
             "storage",
+            "storage-fs",
             "storage-routes",
             "storage-thumbnails",
             "image",
@@ -70,6 +72,7 @@ fn thumbnails_link_the_decoders_and_list_the_sizes() {
             "middleware",
             "middleware-csrf",
             "storage",
+            "storage-fs",
             "storage-routes",
             "storage-thumbnails",
         ],
@@ -87,27 +90,6 @@ fn with_gcs_the_objects_live_in_a_bucket() {
     shape("storage-gcs", &["config", "storage", "storage-gcs"]);
 }
 
-/// No backend chosen: the resolver adds the default, `storage-fs`.
-#[test]
-fn with_no_backend_the_objects_live_on_the_disk() {
-    let modules: [&dyn brocanth_scaffold::Module; 1] = [&FileStorage];
-    let files = brocanth_cli::testing::generate("my-photos", &["storage"], &modules)
-        .unwrap_or_else(|e| panic!("{e}"));
-    let toml = &files.iter().find(|(p, _)| p == "brocanth.toml").unwrap().1;
-    assert!(
-        toml.contains(
-            r#"ObjectStore = { provider = "storage-fs", why = "storage requires ObjectStore" }"#
-        ),
-        "{toml}"
-    );
-    let plugin = &files
-        .iter()
-        .find(|(p, _)| p == "src/plugins/storage/mod.rs")
-        .unwrap()
-        .1;
-    assert!(plugin.contains("LocalDisk::open"), "{plugin}");
-}
-
 #[test]
 fn with_db_the_objects_live_in_postgres() {
     shape("storage-db", &["config", "db", "storage", "storage-db"]);
@@ -118,7 +100,13 @@ fn with_db_the_objects_live_in_postgres() {
 fn the_routes_work_without_a_config_file() {
     shape(
         "storage-routes-no-config",
-        &["middleware", "middleware-csrf", "storage", "storage-routes"],
+        &[
+            "middleware",
+            "middleware-csrf",
+            "storage",
+            "storage-fs",
+            "storage-routes",
+        ],
     );
 }
 
@@ -137,6 +125,7 @@ fn a_moved_path_keeps_no_locale_segment_with_no_other_edit() {
         "middleware",
         "middleware-csrf",
         "storage",
+        "storage-fs",
         "storage-routes",
     ];
     let modules: [&dyn brocanth_scaffold::Module; 4] =

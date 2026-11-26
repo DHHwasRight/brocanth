@@ -3530,7 +3530,7 @@ request.
 - `model`  SeaORM, validations, migrations, over the `db` pool
 - `commands`  this project's own command line, `serve` plus whatever you add
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db-embedded`, `db-embedded-prod`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `image`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db-embedded`, `db-embedded-prod`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage`, `storage-fs`, `storage-db`, `storage-s3`, `storage-gcs`, `storage-routes`, `storage-thumbnails`, `image`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3653,7 +3653,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 4d3d45a13cd2d265 -->
+<!-- brocanth-digest: 5c5fd0ca9b2607d3 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.

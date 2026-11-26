@@ -2520,6 +2520,17 @@ pub mod storage {
     }
 }
 
+/// The shape of src/modules/storage_fs.rs.
+pub mod storage_fs {
+    /// What src/modules/storage_fs.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
 /// The shape of src/modules/storage_routes.rs.
 pub mod storage_routes {
     pub use super::{Flag, Flags};
@@ -2608,7 +2619,7 @@ pub mod storage_thumbnails {
     }
 }
 
-// brocanth-digest: aad74ac7dc66cdda
+// brocanth-digest: 87f54860ed8d4101
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2630,6 +2641,7 @@ pub mod config;
 pub mod middleware;
 pub mod middleware_csrf;
 pub mod storage;
+pub mod storage_fs;
 pub mod storage_routes;
 pub mod storage_thumbnails;
 
@@ -2640,11 +2652,12 @@ pub const ALL: &[&str] = &[
     "middleware",
     "middleware-csrf",
     "storage",
+    "storage-fs",
     "storage-routes",
     "storage-thumbnails",
 ];
 
-// brocanth-digest: d2416f5d800ae82c
+// brocanth-digest: 6654eab4522f7b58
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -2740,8 +2753,8 @@ pub const MODULE: Module = Module {
     ..Module::DEFAULT
 };
 ===== src/modules/storage.rs =====
-//! `storage`: uploads on a local disk, or in Postgres with `db`, addressed by
-//! content hash; no S3.
+//! `storage`: uploads addressed by content hash, in the project's object store:
+//! a disk, S3, GCS or Postgres.
 //!
 //! Written once by `brocanth`. This file is yours: no command rewrites it.
 //! A change here takes effect on the next `cargo build`.
@@ -2774,6 +2787,20 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/storage_fs.rs =====
+//! `storage-fs`: the object store is a directory on this machine's disk; the
+//! default.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::storage_fs::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/storage_routes.rs =====
 //! `storage-routes`: POST /files and GET /files/{address}?token=: uploads your
 //! guard allows, downloads behind a file token.
@@ -2884,7 +2911,7 @@ secure = true
 # Where uploads are stored.
 # Created with a `.gitignore` that holds `*`, so an upload is never source.
 # It is one machine's disk: a second instance does not see these files. Add
-# the `db` module and the files live in Postgres instead.
+# `storage-s3`, `storage-gcs` or `storage-db` and the files live there instead.
 root = "var/uploads"
 # Signs file tokens and keys object addresses.
 # Development only, and the one line to change first. While it is this
@@ -2922,8 +2949,8 @@ thumb_sizes = ["150x150t", "300x200", "600x600f"]
 //! touches the filesystem.
 //!
 //! The objects live under `root`, on this machine's disk. A second instance
-//! does not see them, and `brocanth check --deploy` says so: add the `db`
-//! module and they live in Postgres instead.
+//! does not see them, and `brocanth check --deploy` says so: add the
+//! `storage-s3`, `storage-gcs` or `storage-db` module and they live there.
 //!
 //! `brocanth-storage` is in `Cargo.toml` because this file is here, and
 //! through no other route. Delete the registration in `src/plugins/mod.rs`
@@ -3411,11 +3438,12 @@ request.
 - `config`  config/<env>.toml, merged; without it nothing links a TOML parser
 - `middleware`  proxy headers, method override, canonical host, content types, CORS
 - `middleware-csrf`  a double-submit cookie, checked on every verb that is not a read
-- `storage`  uploads on a local disk, or in Postgres with `db`, addressed by content hash; no S3
+- `storage`  uploads addressed by content hash, in the project's object store: a disk, S3, GCS or Postgres
+- `storage-fs`  the object store is a directory on this machine's disk; the default
 - `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token
 - `storage-thumbnails`  ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `image`, `input`, `client`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage-db`, `storage-s3`, `storage-gcs`, `image`, `input`, `client`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -3479,6 +3507,19 @@ A 403 from this hook is a form that lost its token, or a caller that
 is not a browser. Add that path to `exempt`; do not remove the
 registration.
 
+## Files
+
+Uploads live in a directory on this machine
+(`storage-fs`, `[storage] root`).
+`brocanth add storage-s3` (or `storage-gcs`,
+`storage-db`) moves new uploads.
+Code reaches them through `FileStore::store`, an `Arc<dyn Storage>`:
+never name `LocalDisk`, `PgStorage` or `CloudBucket` outside
+`src/plugins/storage/mod.rs`. Keep the address (`key.to_hex()`) on your
+record. A signed URL or a file token is a bearer credential: mint one
+only after your policy allowed the read. Secrets come from
+`--storage.<key>_file`, never a flag.
+
 ## File routes
 
 Who may upload is `may_upload` in `src/plugins/storage_routes/mod.rs`. It
@@ -3515,7 +3556,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: 6a4761f914d2f651 -->
+<!-- brocanth-digest: e9a577c7d4aa8909 -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -3527,10 +3568,11 @@ name = "my-photos"
 title = "My Photos"
 
 [modules]
-enabled = ["config", "middleware", "middleware-csrf", "storage", "storage-routes", "storage-thumbnails"]
+enabled = ["config", "middleware", "middleware-csrf", "storage", "storage-fs", "storage-routes", "storage-thumbnails"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
+ObjectStore = { provider = "storage-fs", why = "storage requires ObjectStore" }
 
 [modules.config]
 version = "0.1.0"
@@ -3564,6 +3606,14 @@ config = ["storage"]
 crates = ["brocanth-storage"]
 adapted_to = []
 
+[modules.storage-fs]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/storage_fs.rs"]
+config = []
+crates = ["brocanth-storage"]
+adapted_to = []
+
 [modules.storage-routes]
 version = "0.1.0"
 kind = ["middleware"]
@@ -3580,4 +3630,4 @@ config = []
 crates = ["brocanth-storage"]
 adapted_to = []
 
-# brocanth-digest: 1aaba3d093dcbafa
+# brocanth-digest: f92436319783b7b6

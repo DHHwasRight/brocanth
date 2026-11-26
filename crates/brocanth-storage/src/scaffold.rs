@@ -1060,8 +1060,8 @@ impl Module for Image {
             "it converts the thumbnails `storage-thumbnails` renders; without them there is no image to convert",
         )
         .after("storage-routes")
-        .uses::<PgPool>(
-            "the test that stores a PNG is left out: the files are rows in Postgres, and the tests have no database",
+        .uses::<ObjectStore>(
+            "the test that stores a PNG runs on `storage-fs` only: Postgres, S3 and GCS are services the tests do not have",
         )
         .asked_in("data", "Images: thumbnails in WebP or JPEG, a srcset helper")
         .absent(
@@ -1071,10 +1071,11 @@ impl Module for Image {
     }
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
-        let convert = if project.provider::<PgPool>().is_some() {
-            ""
-        } else {
-            IMAGE_CONVERT_TEST
+        // The disk is the one store a test has without a service. An
+        // unresolved selection, which only a test builds, is the disk too.
+        let convert = match project.provider::<ObjectStore>() {
+            None | Some("storage-fs") => IMAGE_CONVERT_TEST,
+            Some(_) => "",
         };
         s.file(
             "src/plugins/image/mod.rs",
@@ -1088,7 +1089,7 @@ impl Module for Image {
 }
 
 /// The test that stores a PNG and asks for it in WebP. Left out when the
-/// files are rows in Postgres: a generated project's tests have no database.
+/// store is not the disk: a generated project's tests have no service.
 const IMAGE_CONVERT_TEST: &str = r#"    /// A PNG of one red pixel.
     const PNG: [u8; 69] = [
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,

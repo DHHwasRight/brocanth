@@ -38,6 +38,7 @@ fn locale_paths_keep_other_modules_routes_unprefixed() {
             "middleware",
             "middleware-csrf",
             "storage",
+            "storage-fs",
             "storage-routes",
             "i18n",
             "i18n-routing",
