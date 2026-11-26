@@ -81,7 +81,17 @@ fn the_second_binary_with_staff_and_row_level_security() {
 fn the_tabs_cross_the_wire() {
     shape(
         "backoffice-panels",
-        &["config", "commands", "db", "admin", "flags", "backoffice"],
+        &[
+            "config",
+            "commands",
+            "db",
+            "admin",
+            "flags",
+            "jobs",
+            "cache",
+            "analytics",
+            "backoffice",
+        ],
     );
 }
 

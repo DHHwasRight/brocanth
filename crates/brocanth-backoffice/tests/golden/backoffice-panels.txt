@@ -14,10 +14,7 @@ default-run = "my-blog"
 #
 # Not here, because nothing asked for it:
 #   brocanth-observe        no request log, no /up or /readyz, no /metrics; a deploy cannot tell ready from alive
-#   brocanth-analytics      no page-view counts; nothing is measured, so nothing needs consent
 #   brocanth-model          no ORM, no sea-orm anywhere in the lock file
-#   brocanth-cache          no cache; every read does the work a hit would have skipped
-#   brocanth-jobs           no queue; slow work happens inside the request that asked for it
 #   brocanth-audit          no change history; who changed a row is not recorded
 #   brocanth-mail           no mail; a password reset or a verification link cannot leave the server
 #   brocanth-auth           no accounts; nothing hashes a password and nothing signs a session cookie
@@ -80,6 +77,9 @@ brocanth-command = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-db = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["plugin"] }  # the pool, read as `ctx.db()`
 brocanth-admin = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime"], default-features = false }
 brocanth-flags = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the flag rules, their in-process copy and their Postgres store
+brocanth-jobs = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["admin"] }
+brocanth-cache = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["runtime", "admin", "postgres"], default-features = false }
+brocanth-analytics = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config", "admin"] }  # the page-view hook and its Postgres store
 brocanth-backoffice = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
@@ -1498,11 +1498,14 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 
 pub mod admin;
 pub mod backoffice;
+pub mod cache;
 pub mod db;
 pub mod flags;
+pub mod jobs;
 pub mod shape;
 
 use brocanth::plugin_context::{After, Base};
+use brocanth::plugin_hooks::{Both, HookSource, NoHooks};
 use brocanth::plugin_routes::BoxFuture;
 use brocanth::routing::AsyncNext;
 
@@ -1551,6 +1554,40 @@ macro_rules! register {
                 crate::plugins::flags_settings(&layers)?,
             ),
         );
+        // JobQueue <- jobs (chosen). `brocanth.toml` [bindings] records it.
+        let builder = builder.plugin(
+            <crate::plugins::jobs::Jobs as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::jobs_settings(&layers)?,
+            ),
+        );
+        // CacheStore <- cache (chosen). `brocanth.toml` [bindings] records it.
+        let builder = builder.plugin(
+            <crate::plugins::cache::Cache as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::cache_settings(&layers)?,
+            ),
+        );
+
+        // -- brocanth-analytics: page views ---------------------------------
+        //
+        // A request hook, after dispatch: a GET answered with HTML is one
+        // page view. It stores no address, no user agent and no cookie; the
+        // visitor is a hash whose salt is deleted the day after. The
+        // views go in tables of the `[db]` database, written every
+        // `flush_interval` seconds, never during a request.
+        //
+        // The admin is never counted, wherever src/modules/admin.rs
+        // mounts it.
+        let builder = builder.plugin_hooking(
+            <brocanth_analytics::Analytics as brocanth::plugin_api::Plugin>::new(
+                crate::plugins::analytics_settings(&layers)?
+                    .exclude_path(crate::modules::admin::MODULE.mount_at),
+            ),
+        );
+        let builder = builder.hooks_off_from(
+            "analytics",
+            "src/modules/analytics.rs",
+            crate::modules::analytics::MODULE.hooks.off(),
+        );
         builder
     }};
 }
@@ -1570,7 +1607,12 @@ type WithAdmin = After<crate::plugins::admin::AdminSettings, Base>;
 type WithDb = After<crate::plugins::db::Database, WithAdmin>;
 type WithBackoffice = After<crate::plugins::backoffice::Backoffice, WithDb>;
 type WithFlags = After<crate::plugins::flags::Flags, WithBackoffice>;
-pub type Installed = WithFlags;
+type WithJobs = After<crate::plugins::jobs::Jobs, WithFlags>;
+type WithCache = After<crate::plugins::cache::Cache, WithJobs>;
+type WithAnalytics = After<brocanth_analytics::Analytics, WithCache>;
+pub type Installed = WithAnalytics;
+
+type HookedAnalytics = Both<<brocanth_analytics::Analytics as HookSource>::Families, NoHooks>;
 
 /// Which hook families this binary installed, as a type.
 ///
@@ -1578,7 +1620,7 @@ pub type Installed = WithFlags;
 /// which is exactly the record `register!` builds. A hook family nobody
 /// installed costs nothing, and this type is how the compiler knows: every
 /// hook entry point opens with a constant `if` on this record.
-pub type Hooks = brocanth::plugin_hooks::NoHooks;
+pub type Hooks = HookedAnalytics;
 /// What this binary puts on the context, said once at startup.
 ///
 /// The lines are a demonstration and they are load-bearing: the installed
@@ -1598,9 +1640,31 @@ macro_rules! announce {
         let db: &brocanth_db::Db = cx.extract();
         let connections = db.pool().size();
         crate::plugins::say!(info, "db: {connections} connection(s) open"; connections);
+        crate::plugins::warn_hookless($app.pipeline());
     }};
 }
 pub(crate) use announce;
+
+/// A plugin whose module file turns every hook off: registered, and
+/// doing nothing per request. Said once at startup; `brocanth remove`
+/// takes the module out.
+pub fn warn_hookless(pipeline: &brocanth::plugin_hooks::Pipeline) {
+    let all_off = |instance: &str, names: &[&str]| {
+        names.iter().all(|name| {
+            pipeline
+                .skipped()
+                .iter()
+                .any(|&(i, n)| i == instance && n == *name)
+        })
+    };
+    // Every hook of `analytics` is off in src/modules/analytics.rs.
+    if all_off("analytics", &["count", "collect"]) {
+        crate::plugins::say!(
+            warn,
+            "warning: analytics installs no hook; help: brocanth remove analytics"
+        );
+    }
+}
 
 /// A line about the application itself: startup, the listener, the stop.
 ///
@@ -1668,6 +1732,22 @@ pub fn admin_panels(
             flags,
             crate::plugins::flags::ALL,
         ));
+    }
+    // The queue the jobs plugin runs, as a tab.
+    if crate::modules::jobs::MODULE.integrate.admin {
+        let queue = late.cell(|ctx| ctx.provided::<brocanth_jobs::Queue, _>().cloned());
+        config = config.panel(brocanth_jobs::admin::JobsPanel::late(queue));
+    }
+    // The cache, as a tab: Purge expired, and Clear for each namespace you
+    // name with `.namespace(..)`.
+    if crate::modules::cache::MODULE.integrate.admin {
+        let cache = late.cell(|ctx| ctx.provided::<brocanth_cache::CacheHandle, _>().cloned());
+        config = config.panel(brocanth_cache::admin::CachePanel::late(cache));
+    }
+    // The page views the analytics plugin counts, as a tab.
+    if crate::modules::analytics::MODULE.integrate.admin {
+        let recorder = late.cell(|ctx| ctx.provided::<brocanth_analytics::Recorder, _>().cloned());
+        config = config.panel(brocanth_analytics::admin::AnalyticsPanel::late(recorder));
     }
     config
 }
@@ -1950,6 +2030,186 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
+        path: "jobs.migrate",
+        help: "Create the queue's tables at startup if they are absent.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "jobs.worker",
+        help: "Run a worker in this process.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "jobs.queues",
+        help: "Which queues the worker claims from.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
+        path: "jobs.concurrency",
+        help: "How many jobs the worker runs at once.",
+        flag: true,
+        file: "src/modules/jobs.rs",
+        flags: crate::modules::jobs::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "cache.migrate",
+        help: "Create the unlogged cache table at startup if it is absent.",
+        flag: true,
+        file: "src/modules/cache.rs",
+        flags: crate::modules::cache::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "cache.sweep_every",
+        help: "Seconds between two sweeps of expired entries; 0 turns the sweep off.",
+        flag: true,
+        file: "src/modules/cache.rs",
+        flags: crate::modules::cache::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.enabled",
+        help: "Count page views. Off installs no hook.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.site",
+        help: "The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "analytics.exclude",
+        help: "Paths never counted, each with everything under it: \"/drafts\".",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
+        path: "analytics.query_allow",
+        help: "Query parameters kept on the stored path. Every other one is dropped.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
+        path: "analytics.retention_days",
+        help: "Days a row is kept. 0 keeps rows forever.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.flush_interval",
+        help: "Seconds between two writes of the buffer.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.respect_gpc",
+        help: "Skip a request that sends Sec-GPC: 1 or DNT: 1.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.ip_header",
+        help: "A header the edge sets to the client address. Unset, the socket's. Empty means none.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "analytics.country_header",
+        help: "A header the edge sets to a two-letter country code. Unset, no country. Empty means none.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "analytics.migrate",
+        help: "Create the two tables on the first readiness check.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: false,
+    },
+    Setting {
+        path: "analytics.collector_path",
+        help: "The path that counts page views a static site sends with the `beacon` module.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: true,
+        list: false,
+    },
+    Setting {
+        path: "analytics.collector_origins",
+        help: "The static sites allowed to send them: \"https://docs.example.com\". Empty, no collector.",
+        flag: true,
+        file: "src/modules/analytics.rs",
+        flags: crate::modules::analytics::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
         path: "server.shutdown_grace_secs",
         help: "Seconds a stop waits for open requests, then for the plugins.",
         flag: true,
@@ -2094,6 +2354,15 @@ fn renames() -> Vec<(&'static str, Flag)> {
     for (key, flag) in crate::modules::flags::MODULE.rename {
         renames.push((key.path(), *flag));
     }
+    for (key, flag) in crate::modules::jobs::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::cache::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
+    for (key, flag) in crate::modules::analytics::MODULE.rename {
+        renames.push((key.path(), *flag));
+    }
     for (key, flag) in crate::modules::backoffice::MODULE.rename {
         renames.push((key.path(), *flag));
     }
@@ -2115,6 +2384,15 @@ fn code() -> Vec<(&'static str, &'static str, &'static str)> {
     }
     for (key, value) in crate::modules::flags::MODULE.set {
         code.push((key.path(), *value, "src/modules/flags.rs"));
+    }
+    for (key, value) in crate::modules::jobs::MODULE.set {
+        code.push((key.path(), *value, "src/modules/jobs.rs"));
+    }
+    for (key, value) in crate::modules::cache::MODULE.set {
+        code.push((key.path(), *value, "src/modules/cache.rs"));
+    }
+    for (key, value) in crate::modules::analytics::MODULE.set {
+        code.push((key.path(), *value, "src/modules/analytics.rs"));
     }
     for (key, value) in crate::modules::backoffice::MODULE.set {
         code.push((key.path(), *value, "src/modules/backoffice.rs"));
@@ -2351,6 +2629,9 @@ fn defaults() -> Vec<(&'static str, String)> {
     let db = crate::plugins::db::Settings::default();
     let backoffice = crate::plugins::backoffice::Settings::default();
     let flags = brocanth_flags::FlagsConfig::default();
+    let jobs = crate::plugins::jobs::Settings::default();
+    let cache = crate::plugins::cache::Settings::default();
+    let analytics = brocanth_analytics::AnalyticsConfig::default();
     let server = crate::plugins::ServerSettings::default();
     vec![
         ("admin.title", format!("{:?}", admin.title)),
@@ -2387,6 +2668,45 @@ fn defaults() -> Vec<(&'static str, String)> {
         ("backoffice.tx_max", format!("{:?}", backoffice.tx_max)),
         ("flags.refresh_secs", format!("{:?}", flags.refresh_secs)),
         ("flags.migrate", format!("{:?}", flags.migrate)),
+        ("jobs.migrate", format!("{:?}", jobs.migrate)),
+        ("jobs.worker", format!("{:?}", jobs.worker)),
+        ("jobs.queues", format!("{:?}", jobs.queues)),
+        ("jobs.concurrency", format!("{:?}", jobs.concurrency)),
+        ("cache.migrate", format!("{:?}", cache.migrate)),
+        ("cache.sweep_every", format!("{:?}", cache.sweep_every)),
+        ("analytics.enabled", format!("{:?}", analytics.enabled)),
+        ("analytics.site", format!("{:?}", analytics.site)),
+        ("analytics.exclude", format!("{:?}", analytics.exclude)),
+        (
+            "analytics.query_allow",
+            format!("{:?}", analytics.query_allow),
+        ),
+        (
+            "analytics.retention_days",
+            format!("{:?}", analytics.retention_days),
+        ),
+        (
+            "analytics.flush_interval",
+            format!("{:?}", analytics.flush_interval),
+        ),
+        (
+            "analytics.respect_gpc",
+            format!("{:?}", analytics.respect_gpc),
+        ),
+        ("analytics.ip_header", format!("{:?}", analytics.ip_header)),
+        (
+            "analytics.country_header",
+            format!("{:?}", analytics.country_header),
+        ),
+        ("analytics.migrate", format!("{:?}", analytics.migrate)),
+        (
+            "analytics.collector_path",
+            format!("{:?}", analytics.collector_path),
+        ),
+        (
+            "analytics.collector_origins",
+            format!("{:?}", analytics.collector_origins),
+        ),
         (
             "server.shutdown_grace_secs",
             format!("{:?}", server.shutdown_grace_secs),
@@ -2420,6 +2740,21 @@ pub fn flags_settings(layers: &Layers) -> Result<brocanth_flags::FlagsConfig, St
     layers.section("flags").map_err(|e| e.to_string())
 }
 
+/// `[jobs]`, from every settings layer.
+pub fn jobs_settings(layers: &Layers) -> Result<crate::plugins::jobs::Settings, String> {
+    layers.section("jobs").map_err(|e| e.to_string())
+}
+
+/// `[cache]`, from every settings layer.
+pub fn cache_settings(layers: &Layers) -> Result<crate::plugins::cache::Settings, String> {
+    layers.section("cache").map_err(|e| e.to_string())
+}
+
+/// `[analytics]`, from every settings layer.
+pub fn analytics_settings(layers: &Layers) -> Result<brocanth_analytics::AnalyticsConfig, String> {
+    layers.section("analytics").map_err(|e| e.to_string())
+}
+
 /// Every settings layer on its own, lowest first, then the merged values.
 /// A secret is masked in every layer; its pointer flag shows where it came
 /// from.
@@ -2429,7 +2764,23 @@ pub fn settings_report() -> Result<String, String> {
     for setting in SETTINGS.iter().filter(|setting| !setting.flag) {
         layers = layers.secret(setting.path);
     }
+    for (path, note) in hooks_off_notes() {
+        layers = layers.note(path, note);
+    }
     Ok(layers.to_string())
+}
+
+/// Each hook src/modules/ turns off, as the setting the settings report
+/// marks and the note beside it.
+fn hooks_off_notes() -> Vec<(&'static str, String)> {
+    let mut notes = Vec::new();
+    for name in crate::modules::analytics::MODULE.hooks.off() {
+        notes.push((
+            "analytics.enabled",
+            format!("hook analytics.{name} is off in src/modules/analytics.rs"),
+        ));
+    }
+    notes
 }
 
 /// `[server]`: the settings the framework reads itself. It declares them as
@@ -2575,7 +2926,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: 75e4b3f57de76532
+// brocanth-digest: 0614b4c7d31867bd
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2859,6 +3210,240 @@ pub mod flags {
     }
 }
 
+/// The shape of src/modules/jobs.rs.
+pub mod jobs {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[jobs]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Migrate,
+        Worker,
+        Queues,
+        Concurrency,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Migrate => "jobs.migrate",
+                Key::Worker => "jobs.worker",
+                Key::Queues => "jobs.queues",
+                Key::Concurrency => "jobs.concurrency",
+            }
+        }
+    }
+
+    /// The code `jobs` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a `jobs` tab in the admin: the queues, what runs, the
+        /// retries and the dead letter.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/jobs.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/cache.rs.
+pub mod cache {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[cache]` that has a flag. A secret has two pointer flags
+    /// and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Migrate,
+        SweepEvery,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Migrate => "cache.migrate",
+                Key::SweepEvery => "cache.sweep_every",
+            }
+        }
+    }
+
+    /// The code `cache` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: a `cache` tab in the admin: purge expired entries, clear a
+        /// namespace you name.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/cache.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
+/// The shape of src/modules/analytics.rs.
+pub mod analytics {
+    pub use super::{Flag, Flags};
+
+    /// A setting of `[analytics]` that has a flag. A secret has two pointer
+    /// flags and no variant here: it cannot be renamed or set in code.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Key {
+        Enabled,
+        Site,
+        Exclude,
+        QueryAllow,
+        RetentionDays,
+        FlushInterval,
+        RespectGpc,
+        IpHeader,
+        CountryHeader,
+        Migrate,
+        CollectorPath,
+        CollectorOrigins,
+    }
+
+    impl Key {
+        /// The setting, as `config/<env>.toml` and the flag spell it.
+        pub const fn path(self) -> &'static str {
+            match self {
+                Key::Enabled => "analytics.enabled",
+                Key::Site => "analytics.site",
+                Key::Exclude => "analytics.exclude",
+                Key::QueryAllow => "analytics.query_allow",
+                Key::RetentionDays => "analytics.retention_days",
+                Key::FlushInterval => "analytics.flush_interval",
+                Key::RespectGpc => "analytics.respect_gpc",
+                Key::IpHeader => "analytics.ip_header",
+                Key::CountryHeader => "analytics.country_header",
+                Key::Migrate => "analytics.migrate",
+                Key::CollectorPath => "analytics.collector_path",
+                Key::CollectorOrigins => "analytics.collector_origins",
+            }
+        }
+    }
+
+    /// The hooks of `analytics` that a file may turn off. A hook the module
+    /// cannot work without has no field.
+    pub struct Hooks {
+        /// `analytics.count`: count each page this server answers.
+        pub count: bool,
+        /// `analytics.collect`: accept beacons at `collector_path` from
+        /// `collector_origins`.
+        pub collect: bool,
+    }
+
+    impl Hooks {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            count: true,
+            collect: true,
+        };
+
+        /// The hook names this file turns off, for `AppBuilder::hooks_off`.
+        pub fn off(&self) -> Vec<&'static str> {
+            let mut off = Vec::new();
+            if !self.count {
+                off.push("count");
+            }
+            if !self.collect {
+                off.push("collect");
+            }
+            off
+        }
+    }
+
+    /// The code `analytics` writes into another module. A field exists whether
+    /// that module is in the project or not, and does nothing without it.
+    pub struct Integrate {
+        /// With `admin`: an `analytics` tab in the admin, with the page-view
+        /// numbers.
+        pub admin: bool,
+    }
+
+    impl Integrate {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self { admin: true };
+    }
+
+    /// What src/modules/analytics.rs holds.
+    pub struct Module {
+        /// Whether the settings of this module have flags.
+        pub flags: Flags,
+        /// Flags under another name, or no flag.
+        pub rename: &'static [(Key, Flag)],
+        /// Values in code, as a flag spells them: over the default, under the
+        /// config file, the environment and the flags.
+        pub set: &'static [(Key, &'static str)],
+        /// The hooks that run.
+        pub hooks: Hooks,
+        /// The code written into another module.
+        pub integrate: Integrate,
+    }
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {
+            flags: Flags::Project,
+            rename: &[],
+            set: &[],
+            hooks: Hooks::DEFAULT,
+            integrate: Integrate::DEFAULT,
+        };
+    }
+}
+
 /// The shape of src/modules/backoffice.rs.
 pub mod backoffice {
     pub use super::{Flag, Flags};
@@ -2910,7 +3495,7 @@ pub mod backoffice {
     }
 }
 
-// brocanth-digest: b7eb6944271117b2
+// brocanth-digest: 61e9f711ffaa130a
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2929,17 +3514,30 @@ pub mod backoffice {
 pub mod brocanth;
 
 pub mod admin;
+pub mod analytics;
 pub mod backoffice;
+pub mod cache;
 pub mod commands;
 pub mod config;
 pub mod db;
 pub mod flags;
+pub mod jobs;
 
 /// Every module in `brocanth.toml`, in registration order: the list of
 /// `[modules] enabled`, which `brocanth add` and `brocanth remove` keep.
-pub const ALL: &[&str] = &["config", "commands", "db", "admin", "flags", "backoffice"];
+pub const ALL: &[&str] = &[
+    "config",
+    "commands",
+    "db",
+    "admin",
+    "flags",
+    "jobs",
+    "cache",
+    "analytics",
+    "backoffice",
+];
 
-// brocanth-digest: 3e2f6ffe2fd8d9d0
+// brocanth-digest: 9edc9a2743b1bbdc
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -3110,6 +3708,141 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/jobs.rs =====
+//! `jobs`: a queue in Postgres with retries and a dead letter; a worker in this
+//! process.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [jobs] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::jobs::{Flag, Flags, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [jobs]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Migrate, Flag::As("migrate")),
+    //   (Key::Migrate, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Migrate, "value"),
+    set: &[],
+
+    integrate: Integrate {
+        // A `jobs` tab in the admin: the queues, what runs, the retries and the
+        // dead letter. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/cache.rs =====
+//! `cache`: a cache on an unlogged Postgres table, not Redis; without it no
+//! cache at all.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [cache] in
+//! the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::cache::{Flag, Flags, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [cache]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Migrate, Flag::As("migrate")),
+    //   (Key::Migrate, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Migrate, "value"),
+    set: &[],
+
+    integrate: Integrate {
+        // A `cache` tab in the admin: purge expired entries, clear a namespace
+        // you name. Without the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
+===== src/modules/analytics.rs =====
+//! `analytics`: page views counted on the server: no cookie, no script, no
+//! third party; rows in your Postgres.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! A value that differs per deployment is a setting, not a choice: [analytics]
+//! in the config file, an environment variable, or a flag.
+
+// `Flag` and `Key` are for `rename` and `set`: unused until they name a setting.
+#[allow(unused_imports)]
+use crate::plugins::shape::analytics::{Flag, Flags, Hooks, Integrate, Key, Module};
+
+// Every field is written out so you can read the choices. The last line
+// gives a default to a field that a later version of the module adds.
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module {
+    // The command-line flags of [analytics]: on, beside a config file too.
+    // `Flags::Off` turns them off; the variables still work.
+    flags: Flags::Project,
+
+    // Another name for a flag, or no flag. The variable and the config key
+    // keep the declared name. Examples:
+    //   (Key::Enabled, Flag::As("enabled")),
+    //   (Key::Enabled, Flag::Hidden),
+    rename: &[],
+
+    // A value in code, spelled as a flag spells it: over the default,
+    // under the config file, the environment and the flags. Example:
+    //   (Key::Enabled, "value"),
+    set: &[],
+
+    hooks: Hooks {
+        // `analytics.count`: count each page this server answers.
+        count: true,
+        // `analytics.collect`: accept beacons at `collector_path` from
+        // `collector_origins`.
+        collect: true,
+        ..Hooks::DEFAULT
+    },
+
+    integrate: Integrate {
+        // An `analytics` tab in the admin, with the page-view numbers. Without
+        // the `admin` module this does nothing.
+        admin: true,
+        ..Integrate::DEFAULT
+    },
+
+    ..Module::DEFAULT
+};
 ===== src/modules/backoffice.rs =====
 //! `backoffice`: the admin as a service of its own: a second binary that serves
 //! only the admin.
@@ -3237,6 +3970,67 @@ refresh_secs = 10
 # Create the brocanth_flags table on the first readiness check.
 # Off, for a project that keeps brocanth_flags::PgStore::SCHEMA in a migration.
 migrate = true
+
+[jobs]
+# Create the queue's tables at startup if they are absent.
+# Development only: see `Queue::schema_sql` for the statements to put in a
+# migration instead.
+migrate = true
+# Run a worker in this process.
+# A busy application moves this to a separate deployment, so that a job
+# pegging a core is not pegging the core answering requests.
+worker = true
+# Which queues the worker claims from.
+queues = ["default"]
+# How many jobs the worker runs at once.
+concurrency = 5
+
+[cache]
+# Create the unlogged cache table at startup if it is absent.
+# Development only: see `PgCache::schema_sql` for the statements to put in a
+# migration instead.
+migrate = true
+# Seconds between two sweeps of expired entries; 0 turns the sweep off.
+# Each wait moves by up to a quarter, so instances do not sweep together.
+# Expired entries are never served; the sweep only frees their space.
+sweep_every = 300
+
+[analytics]
+# Count page views. Off installs no hook.
+# False here because this file is the development one: your own visits
+# are not the audience. Production reads the plugin's default, true,
+# unless its own file says otherwise.
+enabled = false
+# The site name on the rows this server counts, and part of the visitor hash. A beacon row takes its origin's host.
+site = "my-blog"
+# Paths never counted, each with everything under it: "/drafts".
+# The admin is never counted: src/plugins/mod.rs reads its path from
+# src/modules/admin.rs.
+exclude = []
+# Query parameters kept on the stored path. Every other one is dropped.
+# A token or an email in a URL never reaches the database.
+query_allow = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
+# Days a row is kept. 0 keeps rows forever.
+# 760 days is 25 months, the longest retention the CNIL's audience-measurement exemption allows.
+retention_days = 760
+# Seconds between two writes of the buffer.
+flush_interval = 10
+# Skip a request that sends Sec-GPC: 1 or DNT: 1.
+# Nothing stored identifies a visitor, so the signal has nothing to opt out of.
+# On, to honour it anyway.
+respect_gpc = false
+# A header the edge sets to the client address. Unset, the socket's. Empty means none.
+# ip_header = "fly-client-ip"
+# A header the edge sets to a two-letter country code. Unset, no country. Empty means none.
+# country_header = "cf-ipcountry"
+# Create the two tables on the first readiness check.
+# Off, for a project that keeps brocanth_analytics::PgStore::SCHEMA in a migration.
+migrate = true
+# The path that counts page views a static site sends with the `beacon` module.
+collector_path = "/_a/v"
+# The static sites allowed to send them: "https://docs.example.com". Empty, no collector.
+# A beacon from any other origin is answered 204 and not counted.
+collector_origins = []
 ===== src/commands/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A command of your own: a file beside this one, and its `pub mod` line at the end.
@@ -3266,10 +4060,16 @@ pub fn config_checks() -> Vec<brocanth_config::check::Entry> {
     vec![
         // flags
         Entry::migrates("flags", "`brocanth_flags::PgStore::SCHEMA`"),
+        // jobs
+        Entry::migrates("jobs", "`Queue::schema_sql`"),
+        // cache
+        Entry::migrates("cache", "`brocanth_cache::PgCache::schema_sql`"),
+        // analytics
+        Entry::migrates("analytics", "`brocanth_analytics::PgStore::SCHEMA`"),
     ]
 }
 
-// brocanth-digest: cf7299d879de66ee
+// brocanth-digest: 7df59909c210ed66
 // Your commands: one `pub mod` line each, below this line. `brocanth add` keeps them.
 ===== src/commands/settings.rs =====
 //! `settings` -- every settings layer on its own, then the merged values.
@@ -4716,6 +5516,155 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
     }
 }
+===== src/plugins/cache/mod.rs =====
+//! The cache, as this application registers it.
+//!
+//! The cache is a table, and the table is `UNLOGGED`: Postgres writes no
+//! write-ahead log for it, ships it to no replica, and truncates it on crash
+//! recovery. For any other table that is a catastrophe. For a cache it is the
+//! only state you can reason about, and it is what makes a cache in a
+//! relational database defensible at all. A deployment that already runs
+//! Postgres therefore gets a cache without running Redis.
+//!
+//! It lives in the database the `db` plugin opens, on the same pool: one set
+//! of connections to size, and a cache read is visible as a connection a
+//! request is not using for its real query.
+//!
+//! `brocanth-cache` is in `Cargo.toml` because this file is here, and through
+//! no other route. Delete the registration in `src/plugins/mod.rs` and delete
+//! this file, and the application caches nothing and links nothing to do it
+//! with.
+//!
+//! The crate also ships `CachePlugin`, and this is not that. `CachePlugin` is
+//! handed a cache that is already open, because a pool is made asynchronously
+//! and `Plugin::new` is not async. An application whose cache is one setting
+//! wants the shorter road, so this plugin opens the cache at startup and
+//! publishes the same `CacheHandle`. Hand-built caches -- a second namespace
+//! policy, a backend of your own -- are what `CachePlugin` is for, and
+//! swapping to it is a change in this file alone.
+
+use std::sync::Arc;
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_cache::{CacheHandle, CacheReadiness, PgCache, Sweeper};
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[cache]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Create the unlogged cache table at startup if it is absent.
+    pub migrate: bool,
+    /// Seconds between two sweeps of expired entries; 0 turns the sweep off.
+    pub sweep_every: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            migrate: true,
+            sweep_every: 300,
+        }
+    }
+}
+
+pub struct Cache {
+    settings: Settings,
+    /// Open at `before_start` and not before, so the field is an `Option` for
+    /// exactly the length of the build.
+    handle: Option<CacheHandle>,
+    /// The sweep, from `start` to `shutdown`.
+    sweeper: Option<Sweeper>,
+}
+
+impl Plugin for Cache {
+    type Config = Settings;
+    type Provides = ProvidesContext<CacheHandle>;
+    const NAME: &'static str = "cache";
+
+    fn new(settings: Settings) -> Self {
+        Self {
+            settings,
+            handle: None,
+            sweeper: None,
+        }
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // The pool the `db` plugin opened in its own `before_start`, which
+        // runs first because that plugin is registered first.
+        let db = lc.services().get::<brocanth_db::Db>().ok_or_else(|| {
+            PluginError::new(
+                "[cache] found no database pool\n\
+                 help: register the `db` plugin before the cache in src/plugins/mod.rs",
+            )
+        })?;
+        let cache = PgCache::from_pool(db.pool().clone());
+        let cache: Arc<dyn brocanth_cache::Cache> = Arc::new(cache);
+        // Ready when one read of the table answers: `CacheReadiness` is the
+        // check `CachePlugin` registers. With `migrate`, the first check
+        // creates the table, so a new project starts; a project with
+        // reviewers turns it off and keeps `PgCache::schema_sql` in a
+        // migration. `serve` awaits this once before it listens, so an
+        // unreachable store stops the start there.
+        lc.ready_when(
+            CacheReadiness::new(Arc::clone(&cache))
+                .migrating(self.settings.migrate)
+                .help(
+                    "check `[db] url`; with `migrate = false`, the `brocanth_cache` table \
+                     must exist: `PgCache::schema_sql()` has the statements for a migration",
+                ),
+        );
+        self.handle = Some(CacheHandle::new(cache));
+        Ok(())
+    }
+
+    fn start(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Nothing else deletes expired entries. Every read checks expiry
+        // already, so this only frees their space. Each instance runs it,
+        // and the deletes do not mind.
+        let every = self.settings.sweep_every;
+        let Some(handle) = self.handle.as_ref().filter(|_| every > 0) else {
+            return Ok(());
+        };
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            PluginError::new(format!(
+                "[cache] needs a Tokio runtime to sweep ({e})\n\
+                 help: build the application inside the runtime that serves it"
+            ))
+        })?;
+        let on_error = |e: &brocanth_cache::CacheError| {
+            crate::plugins::say!(warn, "[cache] sweep: {e}"; error = %e);
+        };
+        self.sweeper = Some(Sweeper::spawn(
+            &runtime,
+            Arc::clone(handle.inner()),
+            std::time::Duration::from_secs(every),
+            Arc::new(on_error),
+        ));
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.stop();
+        }
+        Ok(())
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `before_start` runs before the server is handed the application, so
+        // the handle is here by the time any request builds a context.
+        if let Some(handle) = &self.handle {
+            cx.insert(handle.clone());
+        }
+    }
+}
 ===== src/plugins/db/mod.rs =====
 //! The database, as this application registers it.
 //!
@@ -5035,6 +5984,279 @@ pub fn enabled(ctx: &Ctx, flag: Flag) -> bool {
 fn actor(_ctx: &Ctx) -> Actor {
     Actor::anonymous()
 }
+===== src/plugins/jobs/mod.rs =====
+//! Background jobs, as this application registers them.
+//!
+//! A job is a struct that serialises, plus one `perform`. Enqueuing takes the
+//! struct itself, so a payload a job cannot accept is a struct-literal error
+//! rather than a decode failure on a worker at three in the morning.
+//!
+//! `brocanth-jobs` is in `Cargo.toml` because this file is here, and through
+//! no other route. Delete the registration in `src/plugins/mod.rs` and
+//! delete this file, and the application runs no jobs and links nothing to
+//! run them with.
+//!
+//! # Enqueuing, and what does not work yet
+//!
+//! This plugin publishes the `Queue` on the per-request context, and a
+//! handler reaches it through `Ctx`:
+//!
+//! ```ignore
+//! let queue = ctx.provided::<Queue, _>().expect("a dispatched request");
+//! queue.enqueue(Welcome { user_id: 7 }).await?;
+//! ```
+//!
+//! `provided` compiles only because this plugin is registered. Drop it and
+//! the line stops building and names `Queue`, which is the whole reason
+//! the provider list lives in the application's type.
+//!
+//! Anything else holding the `Queue` can enqueue too -- `src/app.rs`, a
+//! command under `src/commands/`:
+//!
+//! ```ignore
+//! queue.enqueue(Welcome { user_id: 7 }).await?;
+//! ```
+//!
+//! The note here used to say a handler could not reach it, because `Ctx`
+//! carried no context. It does now.
+//!
+//! # Where job types go
+//!
+//! `Welcome` is here so that this file compiles into something that runs.
+//! Move it, and whatever follows it, into `src/jobs/` once there is more
+//! than one -- the only thing that must stay here is the `register` call.
+//!
+//! **Register every job type before anything enqueues it.** A worker claims
+//! only the names it has registered, so a job whose name no worker knows
+//! waits on its queue until a worker that knows it starts. During a rolling
+//! deploy that means the old workers leave it alone, so ship the
+//! registration before you ship the first enqueue.
+//!
+//! # Where the jobs live
+//!
+//! In Postgres, on the database the `db` plugin opened, through a small
+//! pool of the queue's own (ten connections): job bodies use the `db`
+//! pool, and a running job never holds a connection its heartbeat needs.
+//! `[db] max_connections` sizes the pages and the jobs; add ten for the queue.
+//!
+//! The crate also ships `JobsPlugin`, and this is not that. `JobsPlugin` is
+//! handed a queue that is already open, which is what an application that
+//! builds its queue in `main` wants. This one builds it from the settings.
+
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
+use brocanth::plugin_context::{ContextBuilder, ProvidesContext};
+use brocanth::plugin_shutdown::ShutdownCx;
+use brocanth_jobs::{Finish, Job, JobContext, JobRegistry, Queue, Worker, WorkerHandle};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// A job
+// ---------------------------------------------------------------------------
+
+/// Says hello, slowly, somewhere that is not a request.
+#[derive(Serialize, Deserialize)]
+pub struct Welcome {
+    /// Who to welcome.
+    pub user_id: i64,
+}
+
+impl Job for Welcome {
+    const NAME: &'static str = "welcome";
+    /// Which queue it waits on. The worker below claims from the queues the
+    /// config names, so a job on a queue nobody claims waits for ever.
+    const QUEUE: &'static str = "default";
+    type Error = std::io::Error;
+
+    async fn perform(&self, _cx: &JobContext) -> Result<(), Self::Error> {
+        println!("welcome, user {}", self.user_id);
+        Ok(())
+    }
+}
+
+/// Every job type this application can run.
+///
+/// The one list that has to be kept: a worker claims a row by name and needs
+/// the type to decode it. Adding a job is a type above and a line here.
+fn registry() -> JobRegistry {
+    let mut registry = JobRegistry::new();
+    registry.register::<Welcome>();
+    registry
+}
+
+// ---------------------------------------------------------------------------
+// The plugin
+// ---------------------------------------------------------------------------
+
+/// What this plugin is built from.
+///
+/// It derives `Deserialize` because this application reads it from
+/// `[jobs]` in a TOML file. Drop the config plugin and the derive goes
+/// with it: `Plugin::Config` carries no bounds the core imposes.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    /// Create the queue's tables at startup if they are absent.
+    pub migrate: bool,
+    /// Run a worker in this process, as well as enqueuing from it.
+    pub worker: bool,
+    /// Which queues that worker claims from.
+    pub queues: Vec<String>,
+    /// How many jobs it runs at once.
+    pub concurrency: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            migrate: true,
+            worker: true,
+            queues: vec!["default".to_string()],
+            concurrency: 5,
+        }
+    }
+}
+
+pub struct Jobs {
+    settings: Settings,
+    /// Opened at `before_start` and not before, so this is an `Option` for
+    /// exactly the length of the build.
+    queue: Option<Queue>,
+    /// Kept so `shutdown` can wait for the worker to give back what it
+    /// holds.
+    worker: Option<WorkerHandle>,
+}
+
+/// What the worker keeps of the grace period to give back the jobs that did
+/// not finish, so they are on the queue before the process exits.
+const GIVE_BACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Plugin for Jobs {
+    type Config = Settings;
+    type Provides = ProvidesContext<Queue>;
+    const NAME: &'static str = "jobs";
+
+    fn new(config: Settings) -> Self {
+        Self {
+            settings: config,
+            queue: None,
+            worker: None,
+        }
+    }
+
+    fn configure(&mut self, _lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        if self.settings.worker && self.settings.queues.is_empty() {
+            return Err(PluginError::new(
+                "[jobs] worker is true and queues is empty, so the worker would claim nothing\n\
+                 help: name a queue in `queues` under [jobs], or set worker = false",
+            ));
+        }
+        Ok(())
+    }
+
+    fn before_start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // On the database the `db` plugin opened, which registers before
+        // this one, but on a small pool of the queue's own. Job bodies use
+        // the `db` pool; if the queue's claim, heartbeat and settle shared it,
+        // busy jobs could hold every connection, the heartbeats would stop and
+        // every lease would expire at once. Ten connections serve one worker
+        // and the enqueues of the pages; the worker refuses to start on fewer
+        // than it needs. The pool spawns its upkeep task, so it needs the
+        // runtime entered.
+        let db = lc.require_service::<brocanth_db::Db>()?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            PluginError::new(format!(
+                "[jobs] needs a Tokio runtime at startup to open its pool ({e})\n\
+                 help: build the application inside the runtime that serves it"
+            ))
+        })?;
+        let queue = {
+            let _entered = runtime.enter();
+            Queue::beside(db.pool(), 10)
+        };
+
+        // Ready when the queue answers: a catalogue lookup, the same cost
+        // however long the queue is. With `migrate`, the first check creates
+        // the tables, and the first check is the one `serve` awaits before it
+        // listens: an unreachable database stops the start there.
+        lc.ready_when(queue.readiness_check(self.settings.migrate));
+
+        // In the services too, for a plugin that runs a worker of its own on
+        // this queue: the mail plugin sends `deliver_later` mail that way.
+        // Every `before_start` runs before any `start`, so it finds it there.
+        lc.services_mut().insert(queue.clone());
+        self.queue = Some(queue);
+        Ok(())
+    }
+
+    fn start(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        // Here and not in `before_start`: `serve` runs this after its
+        // startup gate, so the tables exist, and inside the runtime, so the
+        // worker has somewhere to spawn. A build that never serves -- a test,
+        // a command -- starts no worker. On Postgres an enqueue wakes the
+        // worker (`LISTEN/NOTIFY`) rather than a poll.
+        let (Some(queue), true) = (&self.queue, self.settings.worker) else {
+            return Ok(());
+        };
+        let worker = Worker::builder(queue)
+            .registry(registry())
+            .queues(self.settings.queues.clone())
+            .concurrency(self.settings.concurrency)
+            .start()
+            .map_err(|e| PluginError::new(format!("[jobs] starting the worker: {e}")))?;
+        // At SIGTERM `serve` marks the application not ready at once, and
+        // the worker stops claiming then, not after the listener drained.
+        // The jobs already running have the grace period, less the time it
+        // takes to give back the ones that do not finish: those go back to
+        // the queue with their attempt, and another pod runs them.
+        let grace = crate::plugins::shutdown_grace().map_err(PluginError::new)?;
+        worker.stop_when(lc.readiness().draining(), grace.saturating_sub(GIVE_BACK));
+        self.worker = Some(worker);
+        Ok(())
+    }
+
+    fn begin_shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        // Nothing new from here, if the drain above has not stopped it yet.
+        if let Some(worker) = &self.worker {
+            let grace = sd.remaining().unwrap_or(crate::app::SHUTDOWN_GRACE);
+            worker.stop(grace.saturating_sub(GIVE_BACK));
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self, sd: &mut ShutdownCx<'_>) -> Result<(), PluginError> {
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        // Waits inside what is left of the grace. On a current-thread
+        // runtime it cannot wait, and the worker stops by its own deadline.
+        match worker.finish_blocking(sd.remaining()) {
+            Ok(Finish::Stopped(report)) => {
+                let (finished, returned) = (report.finished, report.returned);
+                crate::plugins::say!(
+                    info,
+                    "[jobs] worker stopped: {finished} finished, {returned} back on the queue";
+                    finished,
+                    returned
+                );
+                Ok(())
+            }
+            Ok(Finish::NotWaited) => Ok(()),
+            Err(e) => Err(PluginError::new(format!("[jobs] stopping the worker: {e}"))),
+            Ok(Finish::Deadline) => Err(PluginError::new(
+                "[jobs] the worker was still giving jobs back at the deadline\n\
+                 help: raise `shutdown_grace_secs` under [server], so the worker has time to give them back",
+            )),
+        }
+    }
+
+    fn provide(&self, cx: &mut ContextBuilder) {
+        // `before_start` runs before the server is handed the application,
+        // so the queue is here by the time any request builds a context.
+        if let Some(queue) = &self.queue {
+            cx.insert(queue.clone());
+        }
+    }
+}
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
 <!-- Notes of your own go in a file of your own, beside this one. -->
@@ -5066,9 +6288,12 @@ request.
 - `db`  one Postgres pool and sea-query statements, read as ctx.db(); without it no SQL driver
 - `admin`  a Django-shaped backoffice at /admin, locked until you say who may in
 - `flags`  feature flags: on for all, a percentage, users or groups; rows in your Postgres
+- `jobs`  a queue in Postgres with retries and a dead letter; a worker in this process
+- `cache`  a cache on an unlogged Postgres table, not Redis; without it no cache at all
+- `analytics`  page views counted on the server: no cookie, no script, no third party; rows in your Postgres
 - `backoffice`  the admin as a service of its own: a second binary that serves only the admin
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `image`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `beacon`, `sessions`, `db-embedded`, `db-embedded-prod`, `model`, `cache-memory`, `cache-redis`, `jobs-memory`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage`, `storage-routes`, `storage-thumbnails`, `image`, `input`, `client`, `middleware`, `middleware-csrf`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin-model`, `admin-actions`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -5227,6 +6452,22 @@ flag on. When a flag is on for everyone for good, delete the constant
 and the branch that reads it; the admin tab then lists the stored rule
 as not declared, so it can be removed.
 
+## Analytics
+
+`brocanth_analytics::Analytics` is registered in `src/plugins/mod.rs`.
+It counts every GET answered with `text/html`, except paths under
+`[analytics] exclude`, bots and prefetches. Nothing to add to a page:
+no script, no cookie, no banner.
+
+Do not put personal data in a URL. The path and the allowed query
+parameters are stored; an email-shaped segment is replaced, but a name
+or an account number is not. Do not add a column to
+`brocanth_analytics_views` that identifies a person.
+
+With the admin, the numbers are on its `analytics` tab, behind the
+admin's policy like every tab, and the admin's own pages are never
+counted.
+
 ## Decisions that belong to the person
 
 The modules in this project are the person's choice. Do not add or
@@ -5239,6 +6480,8 @@ Not chosen, and recommended by a module that is here. Ask about each:
 
 - `observability-logs`, for `config`: $<APP>_ENV picks the environment; only observability-logs writes JSON when it is production
 - `observability-health`, for `db`: its readiness check, `Db::ping`, is read only by /readyz; without it a deploy sends traffic to an instance whose database is down
+- `observability-health`, for `jobs`: its readiness check, one read of the queue, is read only by /readyz; without it a deploy cannot tell that the queue is unreachable
+- `observability-health`, for `cache`: its readiness check is read only by /readyz; without it a deploy cannot tell that the cache table is unreachable
 - `middleware-csrf`, for `admin`: the admin checks no CSRF token itself; without the hook only the session cookie's SameSite=Lax stands between another site and a POST that edits or deletes a row
 
 ## House style
@@ -5257,7 +6500,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: b81ffbb37e5aa24d -->
+<!-- brocanth-digest: 9cd426389534b83b -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -5269,11 +6512,13 @@ name = "my-blog"
 title = "My Blog"
 
 [modules]
-enabled = ["config", "commands", "db", "admin", "flags", "backoffice"]
+enabled = ["config", "commands", "db", "admin", "flags", "jobs", "cache", "analytics", "backoffice"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
 PgPool = { provider = "db", why = "flags requires PgPool" }
+JobQueue = { provider = "jobs", why = "chosen" }
+CacheStore = { provider = "cache", why = "chosen" }
 
 [modules.config]
 version = "0.1.0"
@@ -5315,6 +6560,30 @@ config = ["flags"]
 crates = ["brocanth-flags"]
 adapted_to = []
 
+[modules.jobs]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/jobs.rs", "src/plugins/jobs/"]
+config = ["jobs"]
+crates = ["brocanth-jobs", "serde"]
+adapted_to = []
+
+[modules.cache]
+version = "0.1.0"
+kind = ["enhancer"]
+files = ["src/modules/cache.rs", "src/plugins/cache/"]
+config = ["cache"]
+crates = ["brocanth-cache"]
+adapted_to = []
+
+[modules.analytics]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/analytics.rs"]
+config = ["analytics"]
+crates = ["brocanth-analytics"]
+adapted_to = []
+
 [modules.backoffice]
 version = "0.1.0"
 kind = ["middleware", "external"]
@@ -5323,4 +6592,4 @@ config = ["backoffice"]
 crates = ["brocanth-backoffice"]
 adapted_to = []
 
-# brocanth-digest: dab0058d72a4e704
+# brocanth-digest: 061f5d4904848f2c
