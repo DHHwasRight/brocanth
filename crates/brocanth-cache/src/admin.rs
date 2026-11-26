@@ -28,6 +28,16 @@
 //! namespace nobody admitted to owning, and would turn a typo into silence
 //! rather than into an error.
 //!
+//! # The data contract
+//!
+//! The tab reads and writes through [`CacheData`] (docs/backoffice.md
+//! §7.6): in this process over the cache, or over the backoffice wire
+//! ([`RemoteCache`], answered by [`CacheServe`]). Reading needs
+//! `<key>.read` on the data side, and both buttons `<key>.edit`. The data
+//! side checks the namespace against the declared list and caps a purge at
+//! the tab's limit, so a call that names another namespace is refused
+//! there too.
+//!
 //! # Both buttons are a POST, and both are behind the policy
 //!
 //! Emptying a cache is a change, so the buttons are forms rather than links:
@@ -42,8 +52,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use brocanth_admin::admin::AdminError;
 use brocanth_admin::late::Late;
+use brocanth_admin::panel::remote::{PanelServe, PanelWire};
 use brocanth_admin::panel::{Panel, PanelPage, PanelRequest};
+use brocanth_admin::policy::{Level, Principal};
 use brocanth_admin::view::render;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::Cache;
 use crate::error::CacheError;
@@ -63,6 +76,245 @@ pub(crate) const STYLE: &str = include_str!("admin.css");
 /// job rather than behind a button.
 pub const DEFAULT_PURGE_LIMIT: u64 = 1_000;
 
+/// What the cache tab reads and writes (docs/backoffice.md §7.6, P1).
+///
+/// In this process it runs on the cache; [`RemoteCache`] sends it over the
+/// backoffice wire, and [`CacheServe`] answers it there. `who` is the
+/// request's principal: the wire turns it into the claim the data side
+/// checks.
+#[async_trait]
+pub trait CacheData: Send + Sync + 'static {
+    /// What the screen shows of the cache.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text, with a `help:` line.
+    async fn read(&self, who: &Principal<'_>) -> Result<CacheView, String>;
+
+    /// Empties `namespace`, one the tab declared, and answers how many
+    /// entries went.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text: an undeclared namespace, or the cache's error.
+    async fn clear(&self, who: &Principal<'_>, namespace: &str) -> Result<u64, String>;
+
+    /// Removes at most `limit` expired entries, and answers how many went.
+    ///
+    /// # Errors
+    ///
+    /// The failure as text.
+    async fn purge(&self, who: &Principal<'_>, limit: u64) -> Result<u64, String>;
+}
+
+/// What the screen shows of the cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheView {
+    /// The largest value the cache stores, in bytes.
+    pub max_value_bytes: usize,
+}
+
+/// One call of [`CacheData`], as the wire carries it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheCall {
+    /// [`CacheData::read`]. Needs `read`.
+    Read,
+    /// [`CacheData::clear`]. Needs `edit`.
+    Clear {
+        /// The namespace.
+        namespace: String,
+    },
+    /// [`CacheData::purge`]. Needs `edit`.
+    Purge {
+        /// The most entries to remove.
+        limit: u64,
+    },
+}
+
+impl CacheCall {
+    /// The level the call needs on the tab.
+    pub fn level(&self) -> Level {
+        match self {
+            CacheCall::Read => Level::Read,
+            CacheCall::Clear { .. } | CacheCall::Purge { .. } => Level::Edit,
+        }
+    }
+}
+
+/// What a [`CacheCall`] answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheAnswer {
+    /// To `Read`.
+    View(CacheView),
+    /// To `Clear` and `Purge`: how many entries went.
+    Removed(u64),
+}
+
+/// The cache in this process, held to what the tab declared: its
+/// namespaces and its purge limit.
+struct Declared {
+    cache: Local,
+    namespaces: Vec<Namespace>,
+    purge_limit: u64,
+}
+
+/// Where a tab in this process finds its cache.
+#[derive(Clone)]
+enum Local {
+    /// Handed over at build time.
+    Given(Arc<dyn Cache>),
+    /// A cell the application fills at start.
+    Late(Late<CacheHandle>),
+}
+
+impl Declared {
+    fn cache(&self) -> Result<Arc<dyn Cache>, String> {
+        match &self.cache {
+            Local::Given(cache) => Ok(Arc::clone(cache)),
+            Local::Late(cell) => cell
+                .get()
+                .map(|handle| Arc::clone(handle.inner()))
+                .ok_or_else(|| {
+                    "this tab has no cache yet: no request with it on its context has come\n\
+                     help: register the cache plugin, which puts its handle on the request \
+                     context"
+                        .to_string()
+                }),
+        }
+    }
+}
+
+fn cache_failed(e: CacheError) -> String {
+    format!("the cache failed: {e}")
+}
+
+#[async_trait]
+impl CacheData for Declared {
+    async fn read(&self, _who: &Principal<'_>) -> Result<CacheView, String> {
+        Ok(CacheView {
+            max_value_bytes: self.cache()?.max_value_bytes(),
+        })
+    }
+
+    async fn clear(&self, _who: &Principal<'_>, namespace: &str) -> Result<u64, String> {
+        let Some(namespace) = self.namespaces.iter().find(|n| n.as_str() == namespace) else {
+            return Err(format!(
+                "the cache tab declares no namespace `{namespace}`\nhelp: declare it with \
+                 `CachePanel::namespace`"
+            ));
+        };
+        self.cache()?.clear(namespace).await.map_err(cache_failed)
+    }
+
+    async fn purge(&self, _who: &Principal<'_>, limit: u64) -> Result<u64, String> {
+        self.cache()?
+            .purge_expired(limit.min(self.purge_limit))
+            .await
+            .map_err(cache_failed)
+    }
+}
+
+/// The data side of the cache tab on the backoffice wire: decodes a
+/// [`CacheCall`] and runs it on a [`CacheData`].
+pub struct CacheServe(Arc<dyn CacheData>);
+
+impl CacheServe {
+    /// Serves `data`.
+    pub fn new(data: Arc<dyn CacheData>) -> CacheServe {
+        CacheServe(data)
+    }
+
+    /// As the wire server takes it.
+    pub fn shared(self) -> Arc<dyn PanelServe> {
+        Arc::new(self)
+    }
+}
+
+impl std::fmt::Debug for CacheServe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CacheServe")
+    }
+}
+
+fn decode(call: &str) -> Result<CacheCall, String> {
+    serde_json::from_str(call).map_err(|e| format!("a cache call did not decode: {e}"))
+}
+
+#[async_trait]
+impl PanelServe for CacheServe {
+    fn level(&self, call: &str) -> Result<Level, String> {
+        decode(call).map(|call| call.level())
+    }
+
+    async fn serve(&self, who: &Principal<'_>, call: &str) -> Result<String, String> {
+        let answer = match decode(call)? {
+            CacheCall::Read => CacheAnswer::View(self.0.read(who).await?),
+            CacheCall::Clear { namespace } => {
+                CacheAnswer::Removed(self.0.clear(who, &namespace).await?)
+            }
+            CacheCall::Purge { limit } => CacheAnswer::Removed(self.0.purge(who, limit).await?),
+        };
+        serde_json::to_string(&answer).map_err(|e| format!("a cache answer did not encode: {e}"))
+    }
+}
+
+/// The cache tab's data in another process, through the backoffice wire.
+pub struct RemoteCache {
+    wire: Arc<dyn PanelWire>,
+    tab: String,
+}
+
+impl RemoteCache {
+    /// The cache behind `wire`, for the tab at `tab`.
+    pub fn new(wire: Arc<dyn PanelWire>, tab: impl Into<String>) -> RemoteCache {
+        RemoteCache {
+            wire,
+            tab: tab.into(),
+        }
+    }
+
+    async fn ask(&self, who: &Principal<'_>, call: &CacheCall) -> Result<CacheAnswer, String> {
+        let text =
+            serde_json::to_string(call).map_err(|e| format!("a cache call did not encode: {e}"))?;
+        let answer = self.wire.send(who, &self.tab, text).await?;
+        serde_json::from_str(&answer).map_err(|e| format!("a cache answer did not decode: {e}"))
+    }
+
+    async fn removed(&self, who: &Principal<'_>, call: CacheCall) -> Result<u64, String> {
+        match self.ask(who, &call).await? {
+            CacheAnswer::Removed(n) => Ok(n),
+            CacheAnswer::View(_) => Err("the data side answered a write with a view".into()),
+        }
+    }
+}
+
+impl std::fmt::Debug for RemoteCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteCache")
+            .field("tab", &self.tab)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl CacheData for RemoteCache {
+    async fn read(&self, who: &Principal<'_>) -> Result<CacheView, String> {
+        match self.ask(who, &CacheCall::Read).await? {
+            CacheAnswer::View(view) => Ok(view),
+            CacheAnswer::Removed(_) => Err("the data side answered a read with a count".into()),
+        }
+    }
+
+    async fn clear(&self, who: &Principal<'_>, namespace: &str) -> Result<u64, String> {
+        let namespace = namespace.to_string();
+        self.removed(who, CacheCall::Clear { namespace }).await
+    }
+
+    async fn purge(&self, who: &Principal<'_>, limit: u64) -> Result<u64, String> {
+        self.removed(who, CacheCall::Purge { limit }).await
+    }
+}
+
 /// The cache as a tab.
 ///
 /// ```ignore
@@ -78,17 +330,16 @@ pub struct CachePanel {
 
 /// Where the panel finds its cache.
 enum Source {
-    /// Handed over at build time.
-    Given(Arc<dyn Cache>),
-    /// A cell the application fills at start, read when the panel
-    /// renders.
-    Late(Late<CacheHandle>),
+    /// In this process.
+    Local(Local),
+    /// Any data side: another process, through the wire.
+    Data(Arc<dyn CacheData>),
 }
 
 impl CachePanel {
     /// The panel, at `cache`, labelled "Cache", with nothing clearable yet.
     pub fn new(cache: Arc<dyn Cache>) -> Self {
-        Self::from_source(Source::Given(cache))
+        Self::from_source(Source::Local(Local::Given(cache)))
     }
 
     /// The panel over a cache that arrives later, in `cell`.
@@ -99,7 +350,13 @@ impl CachePanel {
     /// from the first request that carries the [`CacheHandle`]. Until then
     /// the tab says so.
     pub fn late(cell: Late<CacheHandle>) -> Self {
-        Self::from_source(Source::Late(cell))
+        Self::from_source(Source::Local(Local::Late(cell)))
+    }
+
+    /// The panel over any [`CacheData`]: [`RemoteCache`] in the backoffice
+    /// binary, which reads the cache through the wire (§7.6).
+    pub fn over(data: Arc<dyn CacheData>) -> Self {
+        Self::from_source(Source::Data(data))
     }
 
     fn from_source(source: Source) -> Self {
@@ -156,19 +413,22 @@ impl CachePanel {
         self
     }
 
-    /// The cache, or the reason there is none yet.
-    fn cache(&self) -> Result<Arc<dyn Cache>, AdminError> {
+    /// What the tab reads and writes through.
+    fn data(&self) -> Arc<dyn CacheData> {
         match &self.source {
-            Source::Given(cache) => Ok(Arc::clone(cache)),
-            Source::Late(cell) => cell
-                .require("cache")
-                .map(|handle| Arc::clone(handle.inner())),
+            Source::Local(cache) => Arc::new(Declared {
+                cache: cache.clone(),
+                namespaces: self.namespaces.clone(),
+                purge_limit: self.purge_limit,
+            }),
+            Source::Data(data) => Arc::clone(data),
         }
     }
 
     // ------------------------------------------------------------- screen
 
-    fn index(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
+    async fn index(&self, r: &PanelRequest<'_>) -> Result<PanelPage, AdminError> {
+        let view = self.data().read(&r.principal).await.map_err(failed)?;
         let ctx = IndexCtx {
             can_act: r.can_act,
             notice: self.notice(r),
@@ -182,7 +442,7 @@ impl CachePanel {
                 .collect(),
             purge_href: r.url("purge"),
             purge_limit: self.purge_limit,
-            max_value_bytes: bytes(self.cache()?.max_value_bytes()),
+            max_value_bytes: bytes(view.max_value_bytes),
         };
         let html = render(
             &|ctx: &IndexCtx, w: &mut rsx::Writer<'_>| {
@@ -228,8 +488,8 @@ impl CachePanel {
         match r.path.split_once('/') {
             None if r.path == "purge" => {
                 let removed = self
-                    .cache()?
-                    .purge_expired(self.purge_limit)
+                    .data()
+                    .purge(&r.principal, self.purge_limit)
                     .await
                     .map_err(failed)?;
                 Ok(Some(PanelPage::redirect(format!(
@@ -245,7 +505,11 @@ impl CachePanel {
                 let Some(namespace) = self.namespaces.iter().find(|n| n.as_str() == name) else {
                     return Ok(None);
                 };
-                let removed = self.cache()?.clear(namespace).await.map_err(failed)?;
+                let removed = self
+                    .data()
+                    .clear(&r.principal, namespace.as_str())
+                    .await
+                    .map_err(failed)?;
                 Ok(Some(PanelPage::redirect(format!(
                     "{}?cleared={name}&rows={removed}",
                     r.url("")
@@ -266,12 +530,30 @@ impl Panel for CachePanel {
         self.label.clone()
     }
 
+    fn serve(&self) -> Option<Arc<dyn PanelServe>> {
+        match &self.source {
+            Source::Local(_) => Some(CacheServe::new(self.data()).shared()),
+            Source::Data(_) => None,
+        }
+    }
+
+    fn remote(&self, wire: Arc<dyn PanelWire>) -> Option<Arc<dyn Panel>> {
+        let data = Arc::new(RemoteCache::new(wire, self.key.clone()));
+        Some(Arc::new(Self {
+            source: Source::Data(data),
+            namespaces: self.namespaces.clone(),
+            purge_limit: self.purge_limit,
+            key: self.key.clone(),
+            label: self.label.clone(),
+        }))
+    }
+
     async fn render(&self, r: PanelRequest<'_>) -> Result<Option<PanelPage>, AdminError> {
         if r.post {
             return self.act(&r).await;
         }
         match r.path.is_empty() {
-            true => self.index(&r).map(Some),
+            true => self.index(&r).await.map(Some),
             false => Ok(None),
         }
     }
@@ -284,8 +566,8 @@ impl Panel for CachePanel {
 /// The cache's errors are not the admin's, and the admin's error type has no
 /// arm for them. They arrive as a render failure carrying the text, which is
 /// what a screen can actually show somebody.
-fn failed(e: CacheError) -> AdminError {
-    AdminError::Render(rsx::Error::custom(format!("the cache failed: {e}")))
+fn failed(e: String) -> AdminError {
+    AdminError::Render(rsx::Error::custom(e))
 }
 
 /// "1 entry" or "12 entries". A sentence, not a column.

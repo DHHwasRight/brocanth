@@ -95,6 +95,11 @@ rsx = { git = "https://github.com/DHHwasRight/rsx.git", branch = "main", version
 # that publishes no changes has no use for it, so it is off.
 brocanth-events = { workspace = true, optional = true }
 
+# `admin`: the tab's data contract crosses the backoffice wire as JSON
+# (docs/backoffice.md §7.6).
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
@@ -148,7 +153,7 @@ runtime = ["dep:brocanth", "dep:async-trait", "dep:http", "dep:chrono", "dep:tok
 scaffold = ["dep:brocanth-scaffold"]
 
 # The backoffice tab. Off, like every other way out of this crate.
-admin = ["runtime", "dep:brocanth-admin", "dep:rsx"]
+admin = ["runtime", "dep:brocanth-admin", "dep:rsx", "dep:serde", "dep:serde_json"]
 
 # Tag invalidation from model changes. Off, like the admin.
 events = ["runtime", "dep:brocanth-events"]
