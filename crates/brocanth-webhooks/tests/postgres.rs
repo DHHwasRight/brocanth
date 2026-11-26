@@ -920,3 +920,149 @@ fn look<'a>(headers: &'a [(String, String)]) -> impl Fn(&str) -> Option<&'a str>
             .map(|(_, v)| v.as_str())
     }
 }
+
+/// The webhooks tab over the backoffice wire (docs/backoffice.md §7.6):
+/// each call and answer survives JSON, the tab is the same in this process
+/// and over the wire, no endpoint secret crosses it, and the data side
+/// checks the grant of each call. The wire is `remote::Loopback`, which
+/// checks a call with the same `remote::authorize` as the wire server.
+#[tokio::test]
+async fn the_admin_tab_runs_over_the_wire_with_each_grant_checked() {
+    use brocanth_admin::form::Submission;
+    use brocanth_admin::panel::remote::{Grants, Loopback};
+    use brocanth_admin::policy::{policy_fn, Principal, Request};
+    use brocanth_admin::{Admin, AdminConfig, Fixture};
+    use brocanth_webhooks::admin::{
+        DeliveriesAnswer, DeliveriesCall, DeliveriesPanel, DeliveriesView, DeliveryView,
+        EndpointView,
+    };
+
+    for call in [
+        DeliveriesCall::Read {
+            limit: 51,
+            offset: 50,
+        },
+        DeliveriesCall::Redeliver { id: 7 },
+    ] {
+        let text = serde_json::to_string(&call).unwrap();
+        assert_eq!(serde_json::from_str::<DeliveriesCall>(&text).unwrap(), call);
+    }
+    let answer = DeliveriesAnswer::View(DeliveriesView {
+        endpoints: vec![EndpointView {
+            url: "https://example.com/hook".into(),
+            events: vec!["*".into()],
+            active: true,
+        }],
+        deliveries: vec![DeliveryView {
+            id: 7,
+            event: "posts.created".into(),
+            url: "https://example.com/hook".into(),
+            state: "failed".into(),
+            attempts: 3,
+            last_status: Some(500),
+            last_error: None,
+        }],
+    });
+    let text = serde_json::to_string(&answer).unwrap();
+    assert_eq!(
+        serde_json::from_str::<DeliveriesAnswer>(&text).unwrap(),
+        answer
+    );
+
+    let Some(scope) = scoped("the_admin_tab_runs_over_the_wire_with_each_grant_checked").await
+    else {
+        return;
+    };
+    let outgoing = Outgoing::new(scope.db.clone(), &local()).unwrap();
+    outgoing.migrate().await.expect("migrate");
+    let (url, _) = receiver_with(500, "", "down").await;
+    let endpoint = outgoing
+        .add_endpoint(&url, &["posts.*"], "x")
+        .await
+        .unwrap();
+    let ids = outgoing
+        .emit("posts.created", &serde_json::json!({}))
+        .await
+        .unwrap();
+    let _ = outgoing.attempt(ids[0], false).await;
+
+    struct Who(Grants);
+    let who = |permissions: &[&str]| {
+        Who(Grants {
+            superuser: false,
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        })
+    };
+    let allow = || policy_fn(|_: &Principal<'_>, _: Request<'_>| true);
+    let application = AdminConfig::new().panel(DeliveriesPanel::new(outgoing.clone()));
+    let wire = application
+        .panel_serves()
+        .into_iter()
+        .fold(
+            Loopback::new(|p: &Principal<'_>| {
+                p.downcast::<Who>()
+                    .map(|who| who.0.clone())
+                    .unwrap_or_default()
+            }),
+            |wire, (tab, serve)| wire.panel(tab, serve),
+        )
+        .shared();
+    let local_admin = Admin::new(Arc::new(Fixture::blog()), application.with_policy(allow()));
+    let remote = Admin::new(
+        Arc::new(Fixture::blog()),
+        AdminConfig::new()
+            .panel(DeliveriesPanel::late(Default::default()))
+            .panels_through(wire)
+            .with_policy(allow()),
+    );
+    async fn send(
+        admin: &Admin,
+        who: &Who,
+        method: &str,
+        path: String,
+    ) -> Result<(u16, String), String> {
+        admin
+            .dispatch(
+                Principal::new(who),
+                method,
+                &path,
+                "",
+                &Submission::default(),
+            )
+            .await
+            .map(|page| (page.status(), page.html().unwrap_or_default().to_string()))
+            .map_err(|e| e.to_string())
+    }
+    let reader = who(&["webhooks.read"]);
+    let editor = who(&["webhooks.edit"]);
+    let here = send(&local_admin, &reader, "GET", "/admin/webhooks".into()).await;
+    let there = send(&remote, &reader, "GET", "/admin/webhooks".into()).await;
+    assert_eq!(here, there);
+    let (status, html) = there.expect("the tab");
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("posts.created") && html.contains(&url),
+        "{html}"
+    );
+    assert!(
+        !html.contains(&endpoint.secret),
+        "no secret crosses the wire"
+    );
+
+    let again = format!("/admin/webhooks/redeliver/{}", ids[0]);
+    let before = state_of(&outgoing, ids[0]).await;
+    let refused = send(&remote, &reader, "POST", again.clone()).await;
+    assert!(
+        refused.as_ref().is_err_and(|e| e.contains("webhooks.edit")),
+        "{refused:?}"
+    );
+    assert_eq!(state_of(&outgoing, ids[0]).await, before);
+    let refused = send(&remote, &who(&[]), "GET", "/admin/webhooks".into()).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        send(&remote, &editor, "POST", again).await.map(|(s, _)| s),
+        Ok(303)
+    );
+    assert_eq!(state_of(&outgoing, ids[0]).await.0, "pending");
+    scope.drop_schema().await;
+}
