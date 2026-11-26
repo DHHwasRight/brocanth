@@ -579,6 +579,75 @@ names the level each call needs (`read` for a read, `edit` for a write),
 and the wire server refuses a claim that does not hold `<tab>.<level>`,
 as D6 does for a model screen.
 
+**P4. A tab serves itself, and turns remote with one call.** `Panel`
+gained two default methods. `serve` gives the wire server the tab's data
+side over what it reads in this process; `remote` gives the same tab over
+a `PanelWire`. `AdminConfig::panel_serves` lists every tab's data side,
+and `AdminConfig::panels_through(wire)` makes every tab remote when the
+admin is built; a tab with no contract keeps reading in its process.
+Reason: no line per tab in a generated file. A module's admin line
+(`FlagsPanel::late(..)`) stays as it is, so a tab that gains a contract
+crosses the wire in every project with no edit.
+
+**P5. The application serves the tabs `plugins::admin_panels` builds.**
+The generated `Door` builds the admin's tabs a second time from
+`plugins::admin_panels`, fills their cells from the plugins the
+application started, and registers `panel_serves` on the `WireServer`.
+The backoffice binary's line in `admin_panels` calls
+`config.panels_through(plugins::backoffice::panel_wire())` when
+`data_url` is set (W8). Reason: one list, read twice, as W9 reads the
+models twice. A new slot for the wire would be a second list per module.
+
+**P6. A tab may state its own RBAC rule.** `PanelServe::allows` says
+whether the claim's grants (`remote::Grants`) may run a call; by default
+they hold `<tab>.<level>`. `remote::authorize` runs it, in the wire server
+and in `remote::Loopback`, a `PanelWire` in one process for a panel
+crate's tests. Reason: the roles tab is not one level on itself. Reading
+it needs `roles.read` or to own any resource; a grant needs the superuser
+flag, or `<resource>.owner` for `read` and `edit`; every other button the
+superuser flag. The data side checks that rule from the claim, as the tab
+does from `Staff` in its process.
+
+**P7. Each contract carries what the screen shows, and no secret.** The
+webhooks view leaves out each endpoint's secret and each delivery's body;
+a connection holds no token. Each data side also holds a call to what the
+tab allows: the cache to its declared namespaces and purge limit, the
+analytics to `MAX_RANGE` days, a page to its most rows. Reason: a call can
+be made by hand past the tab, so the data side must not trust the screen.
+
+What crosses, by tab (the level each call needs):
+
+| Tab | Contract | Read | Edit |
+| --- | --- | --- | --- |
+| `flags` | `FlagsData` | the rules | set, remove |
+| `jobs` | `JobsData` | history flag, overview, a page of jobs or dead, finished counts | run now, discard, requeue, forget |
+| `cache` | `CacheData` | the value cap | clear a declared namespace, purge |
+| `analytics` | `AnalyticsData` | overview, one report | none |
+| `history` | `HistoryData` | one query of the trail | none |
+| `webhooks` | `DeliveriesData` | endpoints and a page of deliveries | send again |
+| `connections` | `ConnectionsData` | a page of connections | revoke |
+| `impersonate` | `SubjectsData` | a page of accounts | none (the start is the application's route) |
+| `roles` | `RolesData` | the roles (P6) | each button (P6) |
+
+What stays in its process, and why:
+
+- **`api` (openapi).** The document is built from the route table at
+  start. The backoffice binary compiles the same application (B1), so its
+  copy is the application's by construction. Sending it would need serde
+  on every type of the document for no change on the screen.
+- **`settings` (config) and `realtime`.** No generated project builds
+  them, and they read no late cell. The settings tab shows the process's
+  own configuration, and both binaries take the same flags (B4). The
+  realtime broker's state belongs to the connections of one process; a
+  contract for it waits for a generated tab.
+- **`accounts`.** No generated project builds it.
+- **The history journal.** It is a hook on each admin write, not a read:
+  it records in the process that makes the write. In the backoffice
+  binary that process still opens the database (§7.7).
+- **The values the history hides.** They cross the wire, and the
+  backoffice hides the ones the person may not read: the record rules are
+  the admin's configuration, as a model screen's row scope is (D4).
+
 ### 7.7 A binary without the application: waits
 
 A backoffice binary that links only the admin and a contract client (no
@@ -594,12 +663,12 @@ application have no contract yet:
    scope is compiled from them on the admin's side (D4). A binary without
    that code has no scope to send, unless the scope moves to the data
    side, which reverses D4.
-3. **Most panels.** Only flags has a data contract (§7.6); the rest read
-   their crate's handle through a late cell.
+3. **Some panels.** The tabs of §7.6 that stay in their process.
 
 With the wire, the second binary already reads and writes every model row
-through the application. It still opens the database for the sessions
-and the staff of point 1, and for the panels of point 3.
+and every tab with a contract through the application. It still opens the
+database for the sessions and the staff of point 1, and for the history
+journal.
 
 ### 7.8 Built (v2, 2026-11-25)
 
@@ -640,21 +709,38 @@ cargo run --bin backoffice -- --backoffice.data_url=http://127.0.0.1:3000 \
 Start the application first: the backoffice reads the registry at start
 and stops with a `help:` line when it cannot.
 
+### 7.9 Built (v3, 2026-11-26)
+
+- `brocanth_admin`: `Panel::serve`, `Panel::remote`,
+  `AdminConfig::panel_serves`, `AdminConfig::panels_through`;
+  `panel::remote::{Grants, authorize, Loopback}`, `PanelServe::allows`.
+  The wire server checks a panel call with `allows` (P6).
+- A data contract for `jobs`, `cache`, `analytics`, `history`, `webhooks`,
+  `connections`, `impersonate` and `roles` (§7.6 table). Each crate's
+  `admin` feature gains `serde` and `serde_json`; `brocanth-queue`'s
+  inspect rows derive serde.
+- The `backoffice` module: `panel_wire`, the `panels_through` line in
+  `admin_panels`, and `serve_panels` in `Door` (P5).
+- Tests: per tab, each call and answer survives JSON, the screens are the
+  same in this process and over `Loopback`, and the data side refuses a
+  call the grant does not cover (on Postgres where the tab reads it:
+  jobs, analytics, roles, webhooks). `tests/wire.rs`: the tabs serve
+  themselves over a real socket. The generated project's test runs both
+  halves in one process, with the wire on: a model screen and every tab
+  with a contract cross a real socket (shape `backoffice-panels`, and the
+  CLI's `everything`).
+
 ### 7.4 Deferred
 
-- Data traits for the panels jobs, cache, roles and analytics (and
-  audit, config, openapi, realtime, webhooks, oauth-client). Each still
-  reads its crate's handle through a late cell. Flags has one (§7.6).
-- The flags panel over the wire in a generated project: the `flags`
-  module's admin line still builds `FlagsPanel::late`, and `Door` does
-  not register `FlagsServe`. The crate pieces exist and are tested.
+- A data contract for `api`, `settings`, `realtime` and `accounts`
+  (§7.6: why they stay).
+- The generated wire test reads the blog fixture's rows, not the
+  project's `wire_source`: a test application has no database, and the
+  admin's models need one. `Door` serves `wire_source`.
 - A backoffice binary that links only the admin and a contract client
   (§7.7).
 - A seam in the admin's plugin file for its data source, so the wire's
   `wire_source` stops repeating it (W9).
-- A test in the generated project with the wire on: its settings come
-  from the process's arguments, so a test cannot turn it on for one
-  application. The crate's tests cover the path.
 - Sign-in pages in the second binary. It serves only `mount_at`; staff
   sign in on the application, on the same host.
 - An image and a deployment for the second binary (`docker`,
