@@ -52,7 +52,7 @@ impl Module for Notifications {
         )
         .adapts_to(
             "rls",
-            "with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader and `notify` as the anonymous request",
+            "with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader, and only the `notifier` role, which `notify` runs as, inserts a row",
         )
         .exports(
             "db_policies",
@@ -207,11 +207,10 @@ const MAIL_SEND: &str = r#"    // By mail too, when the caller knows the address
 
 const STORE_PLAIN: &str = "    let id = store(ctx)?\n";
 
-/// With `policy` and `rls`: `notify` writes as the anonymous request.
-const STORE_DB: &str =
-    "    // As the anonymous request: `create` is `always`, so the database takes
-    // a row for any account, and the writer reads none back.
-    let writer = brocanth_rls::identity(&app_user(), &Visitor::anonymous());
+/// With `policy` and `rls`: `notify` writes as the `notifier` role.
+const STORE_DB: &str = "    // As the notifier: the one role the database lets insert a row. It
+    // reads none back.
+    let writer = DbIdentity::new().role(notifier().name());
     let id = store(ctx)?
         .as_identity(writer)
 ";
@@ -244,8 +243,9 @@ brocanth_policy::policy! {
     /// Who reads and writes a notification, enforced by the database too.
     ///
     /// A reader lists and marks read the rows of their own account, and
-    /// no other. An admin has no arm: an inbox is personal. Any request
-    /// writes a row for any account (`create: always`): a notification
+    /// no other. An admin has no arm: an inbox is personal. No request
+    /// writes a row (`create: never`): only [`notifier`], the role
+    /// `notify` runs as, inserts one, for any account. A notification
     /// tells somebody else about an event, so the writer is not the
     /// reader. No `delete`: a notification is marked read, not removed.
     /// No write mask: the reader's `UPDATE` reaches only their own rows,
@@ -253,7 +253,7 @@ brocanth_policy::policy! {
     #[db]
     pub policy NotificationPolicy(who: &Visitor) for Notification {
         list: account == who.account else deny,
-        create: always,
+        create: never,
         update: account == who.account else deny,
         // The agreement test, run by `cargo test`: on a real Postgres, the
         // database policies admit the rows `condition()` admits. It reads
@@ -269,14 +269,28 @@ brocanth_policy::policy! {
     }
 }
 
-/// The database policies of `brocanth_notifications` for `role`:
-/// `schema()` in `src/plugins/rls/mod.rs` calls it. Run `brocanth rls make
-/// <name>` after a change to the rules.
+/// The database policies of `brocanth_notifications` for `role`, and the
+/// [`notifier`]'s: `schema()` in `src/plugins/rls/mod.rs` calls it, and
+/// adds the notifier role with them. Run `brocanth rls make <name>` after
+/// a change to the rules.
 pub fn db_policies(role: &Role) -> RulePolicies {
     Policy::from_rules::<NotificationPolicy>(role)
+        // `INSERT` of any row, and nothing else: no `SELECT`, no `UPDATE`.
+        .inserter(notifier())
         // `id` is a `bigserial`: `notify` draws it and reads it back with
-        // `lastval()`, so the role needs `USAGE` on the sequence.
+        // `lastval()`, so the notifier needs `USAGE` on the sequence.
         .sequence("brocanth_notifications_id_seq")
+}
+
+/// The role `notify` runs as: the only one that inserts a notification.
+/// A request runs as [`app_user`], so a bug or an injected statement in a
+/// request cannot store a notification for another account.
+///
+/// The login the application connects with must be a member, or `SET
+/// ROLE` fails: add `.member("<your login role>")` here, as on
+/// [`app_user`], when the application does not connect as a superuser.
+pub fn notifier() -> Role {
+    Role::new("notifier")
 }
 
 /// Who `account` is in the database, for its inbox: the role
@@ -561,6 +575,8 @@ const AGENTS: &str = "\n\
 const AGENTS_DB: &str = "\
     - The database enforces the inbox too: `NotificationPolicy` in\n\
     \x20 `src/plugins/notifications/mod.rs` is `#[db]`. Read and mark as the\n\
-    \x20 reader, `store(ctx)?.as_identity(reader(&account))`; `notify` writes\n\
-    \x20 as the anonymous request. A statement on the pool with no identity\n\
-    \x20 runs as the login role, and on the forced table it sees no row.\n";
+    \x20 reader, `store(ctx)?.as_identity(reader(&account))`. Only the\n\
+    \x20 `notifier` role inserts a row, and `notify` runs as it: write a\n\
+    \x20 notification through `notify`, never with an `INSERT` of your own.\n\
+    \x20 A statement on the pool with no identity runs as the login role,\n\
+    \x20 and on the forced table it sees no row.\n";

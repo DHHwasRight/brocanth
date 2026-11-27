@@ -445,6 +445,11 @@ Schema::new()
   policy and no grant. The table is forced, and the role gets each command
   that has a policy. `.sequence(…)` grants `USAGE` on the table's serial
   sequence when the role may insert.
+- `.inserter(role)` (bridge decision 17): a second role that inserts any
+  row and does nothing else, a system writer. It gets `INSERT`, `USAGE`
+  on the sequence, and `<table>_<role>_insert`, `WITH CHECK (TRUE)`. No
+  `SELECT`, so `RETURNING` fails for it. `Schema::policies` adds the role
+  to the schema. With `create: never`, the main role cannot insert.
 - Link tables (bridge decision 15). The role gets `SELECT` on each link
   table an `exists` reads, because the subquery runs as the role. When
   `schema()` adds that table too, the grant joins its grants; else the

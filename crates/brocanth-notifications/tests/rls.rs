@@ -2,11 +2,13 @@
 //!
 //! The policy below is the one the `notifications` module writes into a
 //! project with `policy` and `rls` (`src/scaffold.rs`, `DB_POLICY`): a
-//! reader sees and marks read only the rows of their own account; any
-//! request may write one. `Policy::from_rules` turns it into the database
-//! policies, on a forced table, and the store runs as a login role that is
-//! not the owner and not a superuser. So the database alone decides which
-//! rows come back.
+//! reader sees and marks read only the rows of their own account; no
+//! request may write one (`create: never`). Only the `notifier` role,
+//! which `notify` runs as, inserts a row (`RulePolicies::inserter`).
+//! `Policy::from_rules` turns it into the database policies, on a forced
+//! table, and the store runs as a login role that is not the owner and not
+//! a superuser. So the database alone decides who writes and which rows
+//! come back.
 //!
 //! The `db { … }` clause also runs the agreement test of
 //! docs/policy-rls-bridge.md decision 10 on the same URL.
@@ -52,7 +54,7 @@ brocanth_policy::policy! {
     #[db]
     pub policy NotificationPolicy(who: &Visitor) for Notification {
         list: account == who.account else deny,
-        create: always,
+        create: never,
         update: account == who.account else deny,
         db {
             subjects: [
@@ -87,6 +89,7 @@ async fn exec(db: &Db, sql: &str) {
 struct Names {
     schema: String,
     member: String,
+    notifier: String,
     login: String,
 }
 
@@ -101,6 +104,7 @@ impl Names {
         Names {
             schema: prefix.clone(),
             member: format!("{prefix}_member"),
+            notifier: format!("{prefix}_notifier"),
             login: format!("{prefix}_login"),
         }
     }
@@ -109,9 +113,14 @@ impl Names {
         Role::new(&self.member).member(&self.login)
     }
 
+    /// The system writer: `INSERT` and the sequence, nothing else.
+    fn notifier(&self) -> Role {
+        Role::new(&self.notifier).member(&self.login)
+    }
+
     async fn teardown(&self, admin: &Db) {
         let mut sql = format!("DROP SCHEMA IF EXISTS {} CASCADE;", self.schema);
-        for role in [&self.member, &self.login] {
+        for role in [&self.member, &self.notifier, &self.login] {
             sql.push_str(&format!(
                 "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN
                      EXECUTE 'DROP OWNED BY {role} CASCADE'; EXECUTE 'DROP ROLE {role}';
@@ -130,6 +139,7 @@ fn rls_schema(n: &Names) -> Schema {
         .role(Role::existing(&n.login))
         .policies(
             Policy::from_rules::<NotificationPolicy>(&n.role())
+                .inserter(n.notifier())
                 .sequence("brocanth_notifications_id_seq"),
         )
 }
@@ -185,10 +195,11 @@ async fn a_reader_sees_and_marks_only_their_own_rows_on_a_forced_table() {
              SET search_path = {s};
              {SCHEMA};
              {sql}
-             GRANT USAGE ON SCHEMA {s} TO {member};
+             GRANT USAGE ON SCHEMA {s} TO {member}, {notifier};
              RESET search_path;",
             login = n.login,
             member = n.member,
+            notifier = n.notifier,
             s = n.schema,
         ),
     )
@@ -196,11 +207,40 @@ async fn a_reader_sees_and_marks_only_their_own_rows_on_a_forced_table() {
     let snapshot = schema.snapshot().expect("a snapshot");
     assert!(snapshot.tables["brocanth_notifications"].force);
 
+    let snapshot_writes = &snapshot.tables["brocanth_notifications"];
+    assert!(!snapshot_writes.grants[&n.member]
+        .iter()
+        .any(|p| p.to_string() == "INSERT"));
+
     let login = login_pool(&url, &n).await;
-    // The writer: an anonymous request. `create` is `always`, so it writes
-    // a row for any account without reading it back.
-    let writer =
-        NotificationStore::new(login.clone()).as_identity(identity(&n, &Visitor::default()));
+    // A request identity cannot insert: `create` is `never`, so the role
+    // has no `INSERT` grant. Neither the anonymous request nor a reader,
+    // for another account or for their own.
+    for who in [
+        Visitor::default(),
+        Visitor {
+            account: Some("ada".to_string()),
+            ..Visitor::default()
+        },
+    ] {
+        let request = NotificationStore::new(login.clone()).as_identity(identity(&n, &who));
+        for account in ["ada", "bob"] {
+            let e = request
+                .notify(account, &Notice::new("comment", "forged"))
+                .await
+                .expect_err("a request identity may not insert");
+            assert!(
+                e.to_string()
+                    .contains("permission denied for table brocanth_notifications"),
+                "{e}"
+            );
+        }
+    }
+
+    // The writer: the notifier role, as `notify` runs. It writes a row for
+    // any account, and reads the id back with `lastval()`.
+    let writer = NotificationStore::new(login.clone())
+        .as_identity(DbIdentity::new().role(n.notifier.as_str()));
     let ada_1 = writer
         .notify("ada", &Notice::new("comment", "ada 1"))
         .await
@@ -214,8 +254,16 @@ async fn a_reader_sees_and_marks_only_their_own_rows_on_a_forced_table() {
         .await
         .expect("stored");
     assert!(ada_1 < ada_2 && ada_2 < bob_1);
-    // The anonymous writer reads nothing back.
-    assert_eq!(writer.inbox("ada").unread().await.unwrap(), 0);
+    // The notifier reads nothing back: it has no `SELECT` at all.
+    let e = writer.inbox("ada").unread().await.expect_err("no SELECT");
+    assert!(e.to_string().contains("permission denied"), "{e}");
+    // Nor does it mark a row read.
+    let e = writer
+        .inbox("ada")
+        .mark_read(ada_1)
+        .await
+        .expect_err("no UPDATE");
+    assert!(e.to_string().contains("permission denied"), "{e}");
 
     let as_ada = NotificationStore::new(login.clone()).as_identity(reader(&n, "ada"));
     let inbox = as_ada.inbox("ada");

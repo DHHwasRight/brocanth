@@ -122,7 +122,7 @@ impl NotificationStore {
     /// pool and the settings.
     ///
     /// The `rls` module's generated inbox runs as the reader, and `notify`
-    /// as the anonymous request: `docs/modules/notifications.md`.
+    /// as the `notifier` role: `docs/modules/notifications.md`.
     #[must_use]
     pub fn as_identity(&self, identity: DbIdentity) -> Self {
         Self {

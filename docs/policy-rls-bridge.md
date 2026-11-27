@@ -401,6 +401,42 @@ the rows the rule needs: for membership, the reader's own rows.
 link grant. The agreement harness creates each link table with no grant of
 its own, so it proves that `from_rules` grants it.
 
+### Decision 17: a system writer is a second role, through `RulePolicies::inserter`.
+
+`Policy::from_rules::<P>(&role).inserter(writer)` gives `writer` `INSERT`
+on the table, `USAGE` on its sequence, and one policy,
+`<table>_<writer>_insert`, `FOR INSERT TO writer WITH CHECK (TRUE)`.
+Nothing else: no `SELECT`, no `UPDATE`, no `DELETE`. `Schema::policies`
+adds the role to the schema, so the module's one `.policies(…)` line in
+`schema()` carries it. With `create: never` in the rules, the request
+role has no `INSERT`, so only the writer inserts.
+
+The first user is `notifications`: a notification tells one account about
+another account's event, so the writer is not the reader, and a `create`
+rule over the subject cannot say who may write. Before, the rule was
+`create: always`, and any request identity could insert a row for any
+account; only the application decided. The owner chose a dedicated role
+(November 2026): `notify` runs as `notifier`, and the database refuses an
+`INSERT` from a request.
+
+Reasons:
+
+- Owner answer 2 (one role) is about kinds of *users*. A system writer
+  is not a user: no request runs as it, only the code path that writes.
+  Its grant is one table and one sequence.
+- `WITH CHECK (TRUE)`: the writer writes for any account by design. The
+  floor is who may write, not which row.
+- No `SELECT`: the writer does not read back. It takes the id with
+  `lastval()`, which needs `USAGE` on the sequence only. `RETURNING`
+  would need a `SELECT` policy that admits the new row.
+- On `RulePolicies`, not in `schema()` by hand: the module that owns the
+  table owns its writer, and the export slot stays one line.
+
+The agreement test (decision 10) checks the request role's rules only:
+the writer has no rule to agree with. `tests/rls.rs` of
+`brocanth-notifications` proves the split on Postgres: a request's
+`INSERT` is refused, the writer's succeeds, and the writer reads nothing.
+
 ### Decision 9: write masks stay in the app in the first version.
 
 RLS filters rows, not columns. The only database tool for columns is a
@@ -694,7 +730,8 @@ old rule. It needs no database.
 
 ### What stays manual
 
-- Roles beyond `app_user`, `BYPASSRLS` jobs, and the login's membership.
+- Roles beyond `app_user` (a system writer goes through `.inserter`,
+  decision 17), `BYPASSRLS` jobs, and the login's membership.
 - Functions (`Function::new`) a rule needs that the algebra does not have.
 - `#[app_only]` rules: their database floor is a hand-written `SqlExpr`.
 - Guarded write masks (decision 9), schema `USAGE`.

@@ -399,6 +399,45 @@ fn a_policy_that_denies_everything_writes_no_policy_and_no_grant() {
     assert!(posts.sequence.as_ref().unwrap().usage.is_empty());
 }
 
+#[test]
+fn an_inserter_writes_any_row_and_reads_none_while_the_main_role_cannot_insert() {
+    pub struct Inbox;
+    db_policy!(Inbox, {
+        let mut rules = Rules::deny_all();
+        rules.list = Rule::new(cmp(AuthorId, Op::Eq, attr("user_id", Missing::Deny)));
+        rules
+    });
+    let writer = Role::new("writer").member("app_login");
+    let snapshot = schema(
+        Policy::from_rules::<Inbox>(&app_user())
+            .inserter(writer)
+            .sequence("posts_id_seq"),
+    )
+    .snapshot()
+    .unwrap();
+    // `Schema::policies` adds the role.
+    assert!(snapshot.roles.contains_key("writer"));
+    let posts = &snapshot.tables["posts"];
+    let insert = &posts.policies["posts_writer_insert"];
+    assert_eq!(insert.with_check.as_deref(), Some("TRUE"));
+    assert!(insert.using.is_none());
+    assert!(!posts.policies.contains_key("posts_app_user_insert"));
+    let privileges =
+        |role: &str| -> Vec<String> { posts.grants[role].iter().map(|p| p.to_string()).collect() };
+    assert_eq!(privileges("writer"), ["INSERT"]);
+    assert_eq!(privileges("app_user"), ["SELECT"]);
+    // `USAGE` on the sequence for the writer alone: the reader cannot insert.
+    let usage: Vec<&str> = posts
+        .sequence
+        .as_ref()
+        .unwrap()
+        .usage
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(usage, ["writer"]);
+}
+
 pub struct AppOnly;
 db_policy!(AppOnly, {
     let mut rules = post_rules();

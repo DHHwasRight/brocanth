@@ -513,6 +513,9 @@ pub struct RulePolicies {
     /// and `writable` (decision 9).
     insert: Write,
     update: Write,
+    /// Roles that insert any row and do nothing else:
+    /// [`RulePolicies::inserter`].
+    inserters: Vec<Role>,
     problems: Vec<Refusal>,
 }
 
@@ -627,6 +630,7 @@ impl Policy {
             ],
             table: table.clone(),
             role: role.clone(),
+            inserters: Vec::new(),
             problems: Vec::new(),
         }
     }
@@ -732,6 +736,23 @@ impl RulePolicies {
         self
     }
 
+    /// A second role that inserts any row, and nothing else: a system
+    /// writer, such as the one that stores a notification for another
+    /// account (docs/policy-rls-bridge.md, decision 17).
+    ///
+    /// `role` gets `INSERT` on the table, `USAGE` on its sequence, and one
+    /// policy, `<table>_<role>_insert`, `FOR INSERT WITH CHECK (TRUE)`. No
+    /// `SELECT`: it cannot read a row back, so `RETURNING` fails for it.
+    /// [`Schema::policies`] adds `role` to the schema too: do not add it
+    /// again with [`Schema::role`].
+    ///
+    /// With `create: never` in the rules, the main role cannot insert, and
+    /// the database enforces that only `role` writes.
+    pub fn inserter(mut self, role: Role) -> RulePolicies {
+        self.inserters.push(role);
+        self
+    }
+
     /// The table's `serial` sequence ([`Table::sequence`]): the role gets
     /// `USAGE` on it when it may insert.
     pub fn sequence(mut self, name: impl Into<String>) -> RulePolicies {
@@ -778,9 +799,23 @@ impl RulePolicies {
             policy.with_check = check;
             policies.push(policy);
         }
+        for inserter in &self.inserters {
+            policies.push(
+                Policy::new(
+                    format!("{}_{}_insert", self.table.name, inserter.name),
+                    &self.table,
+                )
+                .command(Command::Insert)
+                .to(inserter)
+                .with_check(SqlExpr::always()),
+            );
+        }
         let mut table = self.table.force();
         if !privileges.is_empty() {
             table = table.grant(&self.role, privileges);
+        }
+        for inserter in &self.inserters {
+            table = table.grant(inserter, [Privilege::Insert]);
         }
         for (privilege, names) in columns {
             table = table.grant_columns(&self.role, privilege, names);
@@ -865,6 +900,9 @@ impl IntoPolicies for RulePolicies {
         };
         for link in self.link_tables() {
             schema = schema.link_grant(link, &self.role);
+        }
+        for inserter in &self.inserters {
+            schema = schema.role(inserter.clone());
         }
         match self.build() {
             Ok((table, policies)) => schema.table(table).extend_policies(policies),

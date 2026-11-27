@@ -28,7 +28,7 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
 | Provides | none |
 | Requires | `PgPool` (a Postgres pool): the notifications are rows in the database the `db` module opens; providers: [`db`](db.md) |
 | Uses | none |
-| Adapts to | [`mail`](mail.md): `notify` with an address sends the notification by mail too, through the outbox; [`realtime`](realtime.md): `notify` publishes the new row as a change on `brocanth_notifications`, with its account; [`policy`](policy.md): the inbox page ANDs a policy rule over `NotificationColumn` into its `WHERE`; [`rls`](rls.md): with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader and `notify` as the anonymous request |
+| Adapts to | [`mail`](mail.md): `notify` with an address sends the notification by mail too, through the outbox; [`realtime`](realtime.md): `notify` publishes the new row as a change on `brocanth_notifications`, with its account; [`policy`](policy.md): the inbox page ANDs a policy rule over `NotificationColumn` into its `WHERE`; [`rls`](rls.md): with `policy`, a `#[db]` policy: a reader sees and marks read only their own rows; the inbox runs as the reader, and only the `notifier` role, which `notify` runs as, inserts a row |
 | Contributes | `ConfigCheck` `notifications`: `deploy/migrate` for `[notifications]`; `AgentsSection` `notifications`: how to notify an account, and who reads it |
 | Collects | none |
 | Exports | `db_policies` (`crate::plugins::notifications::db_policies`): with `policy` and `rls`, the path of a `fn(&Role) -> RulePolicies`: the database policies of `brocanth_notifications`, for `schema()` |
@@ -74,7 +74,8 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
   which `schema()` calls on its own `.policies(…)` line (exported as
   `db_policies`, so the line has one home). `rls make` then writes
   `SELECT` and `UPDATE` policies that admit a row only when its `account`
-  is `brocanth.account`, and forces the table. The policy has a `db { … }`
+  is `brocanth.account`, an `INSERT` policy for the `notifier` role
+  alone, and forces the table. The policy has a `db { … }`
   clause: `cargo test` runs the agreement test on `[db] url`.
   - **A reader reads and marks only their own rows.** The page runs the
     inbox as `reader(&account)`: the role `app_user` with `account` set
@@ -82,18 +83,27 @@ An option is set at build time in `src/modules/notifications.rs`. A setting is r
     row from the database, and an `UPDATE` of another account's row
     touches nothing. `WITH CHECK` refuses to move a row to another
     account.
-  - **Any request writes (`create: always`).** A notification tells
-    somebody else about an event, so the writer is not the reader. A
-    `create` rule on the account would refuse the common case. `notify`
-    writes as the anonymous request (`app_user`, no attribute). The
-    alternative, a system role with a policy of its own, needs a second
-    role, a grant and a policy outside `from_rules`; an `INSERT` cannot
-    read a row, so `always` opens nothing a reader can see.
+  - **Only the `notifier` role writes (`create: never`).** A
+    notification tells somebody else about an event, so the writer is not
+    the reader, and a `create` rule on the account would refuse the
+    common case. So no request identity inserts: `app_user` has no
+    `INSERT` grant. `notify` runs as `notifier()`, a role with `INSERT`
+    on the table, `USAGE` on its sequence, and one policy, `WITH CHECK
+    (TRUE)`. Nothing else: it reads no row and marks none read.
+    `db_policies` adds it with `.inserter(notifier())`
+    (docs/policy-rls-bridge.md, decision 17), so `schema()` keeps one
+    line. Reason: before, with `create: always`, any request's identity
+    could insert a notification for any account, and only the
+    application decided. The owner chose that the database enforces who
+    creates (November 2026). A bug or an injected statement in a request
+    now gets `permission denied`.
+  - **The login must be a member of `notifier`**, as of `app_user`, or
+    `SET ROLE` fails. A superuser login is a member of every role. Else
+    add `.member("<login>")` to `notifier()`.
   - **No `RETURNING`.** Postgres checks a returned row against the
-    `SELECT` policy, and the writer may not read another account's row.
-    `notify` reads the id with `lastval()` in the same transaction, so
-    `app_user` needs `USAGE` on `brocanth_notifications_id_seq`
-    (`.sequence(…)`).
+    `SELECT` policy, and the notifier has none. `notify` reads the id
+    with `lastval()` in the same transaction, which needs `USAGE` on
+    `brocanth_notifications_id_seq` only (`.sequence(…)`).
   - **No admin arm, no `delete`, no write mask.** An inbox is personal.
     A notification is marked read, not removed. A mask needs `read_at` in
     the entity, a `timestamptz`, which needs `brocanth-policy`'s `chrono`
@@ -122,7 +132,7 @@ Files:
 
 - `src/plugins/notifications/mod.rs`: the plugin, `account(ctx)`,
   `store(ctx)` and `notify`. With `policy` and `rls`, also
-  `NotificationPolicy` (`#[db]`), `db_policies(&role)` and
+  `NotificationPolicy` (`#[db]`), `db_policies(&role)`, `notifier()` and
   `reader(&account)`. Its tests check that a visitor with no session
   has no inbox and that a mark-read post without the CSRF token is refused.
 - `src/pages/notifications.rs`: the inbox and the mark-read post.

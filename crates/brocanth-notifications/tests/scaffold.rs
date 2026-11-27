@@ -122,7 +122,12 @@ fn with_policy_and_rls_the_database_holds_the_inbox_rule() {
         plugin.contains("list: account == who.account else deny,"),
         "{plugin}"
     );
-    assert!(plugin.contains("create: always,"), "{plugin}");
+    assert!(plugin.contains("create: never,"), "{plugin}");
+    assert!(plugin.contains(".inserter(notifier())"), "{plugin}");
+    assert!(
+        plugin.contains("DbIdentity::new().role(notifier().name())"),
+        "{plugin}"
+    );
     assert!(
         plugin.contains("url: crate::plugins::rls::agreement_url(),"),
         "{plugin}"
