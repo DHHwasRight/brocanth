@@ -90,7 +90,7 @@ impl Module for Security {
         .outside_runtime()
         .asked_in(
             "operations",
-            "Check dependencies for advisories, bans and sources",
+            "Check dependencies for advisories, bans, licenses and sources",
         )
         // Off with its parent: a new advisory fails the daily run, and a
         // team chooses when it wants that mail.
@@ -182,8 +182,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$RUNNER_TEMP/bin/cargo-deny"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # Licenses are not checked: see `[licenses]` in deny.toml.
-      - run: cargo deny check advisories bans sources
+      - run: cargo deny check advisories bans licenses sources
 "#;
 
 /// `deny.toml`: the policy `cargo deny` reads.
@@ -227,22 +226,39 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-org = { github = ["DHHwasRight"] }
 
 [licenses]
-# Not run in CI yet: brocanth's crates are MIT, but this project and the
-# `zod` crate declare no `license` in Cargo.toml, and `cargo deny` fails a
-# crate with none. When every crate declares one, add `licenses` to the
-# `cargo deny check` step.
+# Every crate in the tree declares a license on this list, or the check
+# fails. brocanth's crates, `zod`, `rsx` and `jt` are MIT. A crate outside
+# the list: add its SPDX id only when the license is permissive, or add an
+# `exceptions` entry for that crate alone, with the reason.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # Boost: permissive. `xxhash-rust`, under the Redis client.
+    "BSL-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    # Permissive, like BSD. `postgresql_embedded` and its crates.
+    "PostgreSQL",
     "Unicode-3.0",
     "Zlib",
 ]
 confidence-threshold = 0.9
+# MPL-2.0 is a copyleft per file: a change to one of its files must be
+# published under the MPL. It does not reach this project's code. These
+# crates come unchanged from crates.io, under `ammonia`, the HTML
+# sanitizer. One crate each, so a new MPL crate still fails the check.
+exceptions = [
+    { crate = "cssparser", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short", allow = ["MPL-2.0"] },
+]
+
+[licenses.private]
+# This project has `publish = false` in Cargo.toml and declares no
+# license, so its own crates are not checked.
+ignore = true
 "#;
 
 /// What the generated `AGENTS.md` says about the dependency checks.
@@ -430,6 +446,13 @@ mod tests {
         assert!(SECURITY_WORKFLOW.contains("schedule:\n    - cron: "));
         assert!(SECURITY_WORKFLOW.contains("permissions:\n  contents: read\n"));
         assert!(DENY_TOML.contains("unknown-git = \"deny\""));
+    }
+
+    #[test]
+    fn licenses_are_checked_and_the_unpublished_project_is_skipped() {
+        assert!(SECURITY_WORKFLOW.contains("cargo deny check advisories bans licenses sources"));
+        assert!(DENY_TOML.contains("[licenses.private]\n"));
+        assert!(DENY_TOML.contains("\nignore = true\n"));
     }
 
     #[test]

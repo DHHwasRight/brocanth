@@ -2,7 +2,7 @@
 
 .github/workflows/security.yml: cargo audit and cargo deny on each push and each day; deny.toml.
 
-The wizard calls it: *Check dependencies for advisories, bans and sources*.
+The wizard calls it: *Check dependencies for advisories, bans, licenses and sources*.
 
 | | |
 |---|---|
@@ -45,11 +45,12 @@ Files:
   each pull request, each day at 06:17 UTC, and on demand.
   - `audit`: `cargo audit` against the RustSec database. It fails on an
     advisory against a crate in `Cargo.lock`.
-  - `deny`: `cargo deny check advisories bans sources`, with the policy
-    in `deny.toml`.
+  - `deny`: `cargo deny check advisories bans licenses sources`, with
+    the policy in `deny.toml`.
 - `deny.toml`: yanked crates fail, a `*` version fails, two versions of
   one crate warn, and a crate must come from crates.io or a GitHub
-  repository of `DHHwasRight` (brocanth, `rsx`, `jt`).
+  repository of `DHHwasRight` (brocanth, `rsx`, `jt`), and every crate
+  declares a license on the allow-list.
 
 Slots:
 
@@ -74,14 +75,43 @@ that installs a tool is code that runs with the repository's token.
   runs. To bump: change both variables, and take the hash from the
   release's `.sha256` file, not from your own download.
 
-**Licenses are not checked yet.** brocanth's crates are MIT, but the
-generated project declares no `license` in `Cargo.toml`, and neither does
-the `zod` crate it builds on. `cargo deny` fails a crate with none. `deny.toml` has a `[licenses]` allow-list ready. Add
-`licenses` to the `cargo deny check` step when every crate declares one.
+**Licenses are checked, except the project's own.** Every crate in the
+tree must declare a license on the allow-list in `deny.toml`: Apache-2.0,
+the BSD licenses, BSL-1.0, ISC, MIT, PostgreSQL, Unicode-3.0, Zlib and
+CDLA-Permissive-2.0.
+brocanth's crates, `zod`, `zod-derive`, `rsx` and `jt` declare MIT. The
+generated project declares no license: it is an application, not a
+library. Its `Cargo.toml` says `publish = false`, and
+`[licenses.private] ignore = true` tells `cargo deny` to skip an
+unpublished crate. A project made before this change has no
+`publish = false`: add it under `[package]`, or the check fails on the
+project's own crate.
+
+A new dependency with a license outside the list fails the check. Add its
+SPDX id only when the license is permissive. Otherwise add an
+`exceptions` entry for that one crate, with the reason, or drop the
+crate.
+
+The decisions, from a run of `cargo deny check licenses` (0.20.2) on the
+`everything` shape and on the brocanth workspace with every feature:
+
+- `BSL-1.0` (Boost) is on the list: it is permissive. `xxhash-rust`,
+  under the Redis client, uses it.
+- `PostgreSQL` is on the list: it is permissive, like BSD.
+  `postgresql_embedded` and its crates use it.
+- `cssparser` and `dtoa-short` are `MPL-2.0`, under `ammonia`, the HTML
+  sanitizer. The MPL is a copyleft per file: only a change to one of
+  their files must be published. They come unchanged from crates.io, so
+  each has an `exceptions` entry. The license is not on the list, so a
+  new MPL crate still fails the check and gets its own decision.
+- `brocanth-bundle` builds on `lightningcss`, which is `MPL-2.0` with
+  four more crates of its tree. No module puts it in a generated project
+  today, so `deny.toml` has no entry for them. The module that adds it
+  adds their exceptions.
 
 **Why two tools.** `cargo audit` is the RustSec reference and reads
 `Cargo.lock` alone. `cargo deny` adds what `cargo audit` does not check:
-where a crate comes from, wildcard versions and duplicates. Both read the
+where a crate comes from, its license, wildcard versions and duplicates. Both read the
 same advisory database, so an advisory you accept goes in `ignore` in
 `deny.toml` and in `cargo audit --ignore`.
 

@@ -3,6 +3,9 @@
 name = "my-app"
 version = "0.1.0"
 edition = "2021"
+# An application, not a library: `cargo publish` refuses it, and
+# `cargo deny` checks no license for it.
+publish = false
 
 # Exactly what was chosen when this application was scaffolded.
 #

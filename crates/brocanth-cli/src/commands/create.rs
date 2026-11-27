@@ -2159,6 +2159,9 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
          version = \"0.1.0\"\n\
          edition = \"2021\"\n\
          {default_run}\
+         # An application, not a library: `cargo publish` refuses it, and\n\
+         # `cargo deny` checks no license for it.\n\
+         publish = false\n\
          \n\
          # Exactly what was chosen when this application was scaffolded.\n\
          #\n\
