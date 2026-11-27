@@ -107,16 +107,31 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     }
     let project = add::read_record(&recorded)?;
 
-    let wanted = add::named(&args.modules)?;
+    let (wanted, wanted_named) = crate::resolve::split_words(&args.modules)?;
     let removing: Vec<&'static str> = wanted
         .iter()
         .copied()
         .filter(|key| project.enabled.contains(key))
         .collect();
-    if removing.is_empty() {
-        ui.done(format!("{} is not in this project", wanted.join(", ")));
+    let removing_named: Vec<crate::resolve::NamedBinding> = wanted_named
+        .iter()
+        .filter(|n| project.named.contains(n))
+        .cloned()
+        .collect();
+    if removing.is_empty() && removing_named.is_empty() {
+        let mut said: Vec<String> = wanted.iter().map(|key| key.to_string()).collect();
+        said.extend(wanted_named.iter().map(|n| n.word()));
+        ui.done(format!("{} is not in this project", said.join(", ")));
         return Ok(ExitCode::SUCCESS);
     }
+    let after_named: Vec<crate::resolve::NamedBinding> = project
+        .named
+        .iter()
+        .filter(|n| !removing_named.contains(n))
+        .cloned()
+        .collect();
+    let mut said: Vec<String> = removing.iter().map(|key| key.to_string()).collect();
+    said.extend(removing_named.iter().map(|n| n.word()));
     let after_picks: Vec<&'static str> = create::all()
         .into_iter()
         .filter(|key| project.enabled.contains(key) && !removing.contains(key))
@@ -124,8 +139,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     still_needed(&after_picks, &removing)?;
     // A backend-choice Kind left with no provider gets its default back:
     // `added storage-fs: storage requires ObjectStore`.
-    let (after_picks, added) = crate::resolve::resolve(&after_picks, create::Door::Add)?;
+    let (after_picks, added) =
+        crate::resolve::resolve_named(&after_picks, &after_named, create::Door::Add)?;
     create::selection(&after_picks, create::Door::Add)?;
+    create::named_selection(&after_picks, &after_named, create::Door::Add)?;
 
     let manifest_path = root.join("Cargo.toml");
     let manifest_text =
@@ -136,19 +153,28 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
             .help("fix the TOML at the line above, then run `brocanth remove` again")]
     })?;
     let local = add::local_checkout(&manifest);
-    let answers = |picks: Vec<&'static str>| Answers {
+    let answers = |picks: Vec<&'static str>, named: &[crate::resolve::NamedBinding]| Answers {
         name: project.name.clone(),
         title: project.title.clone(),
         picks,
+        named: named.to_vec(),
         local: local.clone(),
         git: false,
     };
-    let before_answers = answers(project.enabled.clone());
-    let after_answers = answers(after_picks.clone());
+    let before_answers = answers(project.enabled.clone(), &project.named);
+    let after_answers = answers(after_picks.clone(), &after_named);
+    // The modules that leave the project: a provider a named binding still
+    // uses stays, and its tables with it.
+    let after_enabled = after_answers.enabled();
+    let gone: Vec<&'static str> = before_answers
+        .enabled()
+        .into_iter()
+        .filter(|key| !after_enabled.contains(key))
+        .collect();
     let before: BTreeMap<String, String> = create::scaffold(&before_answers)?.into_iter().collect();
     let after: BTreeMap<String, String> = create::scaffold(&after_answers)?.into_iter().collect();
 
-    ui.heading("remove", removing.join(", "));
+    ui.heading("remove", said.join(", "));
     for line in &added {
         ui.note(format!("  {}", line.line()));
     }
@@ -375,11 +401,11 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
             crate::ui::paint(DIM, format!("kept {path}: {why}"))
         ));
     }
-    let drops = drop_statements(&removing);
+    let drops = drop_statements(&gone);
     if !drops.is_empty() {
         let migration =
             if after_picks.contains(&"model") && root.join("migrations/mod.rs").is_file() {
-                let (path, text) = drop_migration(&brocanth_db::stamp::now(), &removing, &drops);
+                let (path, text) = drop_migration(&brocanth_db::stamp::now(), &gone, &drops);
                 let full = root.join(&path);
                 std::fs::write(&full, text).map_err(|e| write_error(&full, &e))?;
                 Some(path)
@@ -418,7 +444,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: RemoveArgs) -> Outcome {
     ui.done(format!(
         "{} {}",
         crate::ui::paint(crate::ui::PLAIN, "removed"),
-        crate::ui::paint(ACCENT, removing.join(", "))
+        crate::ui::paint(ACCENT, said.join(", "))
     ));
     ui.gap();
     let mut next = Table::new().indent(4);
@@ -1200,6 +1226,7 @@ mod tests {
                 .collect(),
             local: None,
             git: false,
+            named: Vec::new(),
         }
     }
 
@@ -1317,6 +1344,59 @@ mod tests {
 
     fn with(picks: &[&'static str], more: &[&'static str]) -> Vec<&'static str> {
         picks.iter().chain(more).copied().collect()
+    }
+
+    /// `add storage-s3@public` writes a named store beside the default
+    /// one; `remove storage-s3@public` leaves the project as `create` made
+    /// it. `add storage-gcs` without a name still swaps the default store.
+    #[test]
+    fn a_named_store_comes_and_goes_with_its_word() {
+        let base: &[&'static str] = &["config", "storage", "storage-fs"];
+        let root = project("rmnamed", base);
+        if let Err(e) = add(&root, &["storage-s3@public"]) {
+            panic!("{}", said(&e));
+        }
+        let record = read(&root, "brocanth.toml");
+        assert!(
+            record.contains("[named_bindings]\nObjectStore = { public = \"storage-s3\" }\n"),
+            "{record}"
+        );
+        assert!(
+            record.contains("enabled = [\"config\", \"storage\", \"storage-fs\", \"storage-s3\"]")
+        );
+        assert!(record.contains("ObjectStore = { provider = \"storage-fs\""));
+        assert!(read(&root, "config/development.toml").contains("\n[storage.public]\n"));
+        assert!(read(&root, "Cargo.toml").contains("\"s3\""));
+        assert!(read(&root, "src/plugins/storage/stores.rs").contains("pub public: NamedStore,"));
+        // Again: already there. Another provider under the name: refused.
+        add(&root, &["storage-s3@public"]).expect("nothing to do");
+        let taken = add(&root, &["storage-gcs@public"]).expect_err("the name is taken");
+        assert!(
+            said(&taken).contains("is bound to `storage-s3`"),
+            "{}",
+            said(&taken)
+        );
+
+        if let Err(e) = remove(&root, &["storage-s3@public"]) {
+            panic!("{}", said(&e));
+        }
+        assert_as_created(&root, "rmnamed", base, &[]);
+
+        // Without `@`, a backend swaps the default and keeps the names.
+        add(&root, &["storage-s3@public"]).expect("adds the name");
+        if let Err(e) = add(&root, &["storage-gcs"]) {
+            panic!("{}", said(&e));
+        }
+        let record = read(&root, "brocanth.toml");
+        assert!(
+            record.contains("ObjectStore = { provider = \"storage-gcs\""),
+            "{record}"
+        );
+        assert!(
+            record.contains("ObjectStore = { public = \"storage-s3\" }"),
+            "{record}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

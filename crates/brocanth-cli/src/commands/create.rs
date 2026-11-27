@@ -105,12 +105,48 @@ pub struct CreateArgs {
     pub options: Vec<(String, String, String)>,
 }
 
-/// Every module this CLI has, as clap's possible values.
+/// Every module this CLI has, as clap's possible values, and each with a
+/// name after `@`: `storage-s3@public` binds a named store
+/// (`docs/object-storage.md` §9.1). The part before `@` must be a module;
+/// the name is checked where the bindings are.
 ///
 /// Built from the registry rather than written out, so a CLI compiled with
 /// somebody's module offers it in `--help` with its own one-line gist and
 /// without a line changing here.
-pub fn offered() -> clap::builder::PossibleValuesParser {
+pub fn offered() -> Offered {
+    Offered(modules_offered())
+}
+
+/// The parser of a module word: a module key, or a key and a name joined
+/// by `@`. `--help` lists the keys.
+#[derive(Clone)]
+pub struct Offered(clap::builder::PossibleValuesParser);
+
+impl clap::builder::TypedValueParser for Offered {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        let Some(text) = value.to_str() else {
+            return self.0.parse_ref(cmd, arg, value);
+        };
+        let key = text.split_once('@').map_or(text, |(key, _)| key);
+        self.0.parse_ref(cmd, arg, std::ffi::OsStr::new(key))?;
+        Ok(text.to_string())
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        self.0.possible_values()
+    }
+}
+
+fn modules_offered() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(
         crate::modules::ALL
             .iter()
@@ -231,7 +267,13 @@ pub struct Answers {
     pub name: String,
     /// The human name.
     pub title: String,
+    /// The modules chosen, and the provider the resolver bound to each
+    /// Kind. A provider that serves only named bindings is not here: it is
+    /// in `named`, and [`Answers::enabled`] lists both.
     pub picks: Vec<&'static str>,
+    /// The named bindings: `storage-s3@public` (`docs/object-storage.md`
+    /// §9.1). Empty for a project with one store.
+    pub named: Vec<crate::resolve::NamedBinding>,
     /// A local checkout to depend on, instead of the repository.
     pub local: Option<String>,
     pub git: bool,
@@ -243,7 +285,23 @@ impl Answers {
             crate::modules::find(key).is_some(),
             "asked about `{key}`, which no module declares"
         );
-        self.picks.contains(&key)
+        self.picks.contains(&key) || self.named.iter().any(|n| n.provider == key)
+    }
+
+    /// Every module of the project: `picks`, and the provider of each named
+    /// binding once. What `[modules] enabled` lists. Equal to `picks` in a
+    /// project with no named binding.
+    pub fn enabled(&self) -> Vec<&'static str> {
+        crate::resolve::enabled(&self.picks, &self.named)
+    }
+
+    /// The named bindings as the scaffold reads them: `(Kind, name,
+    /// provider)`.
+    fn named_triples(&self) -> Vec<(&str, &str, &str)> {
+        self.named
+            .iter()
+            .map(|n| (n.kind, n.name.as_str(), n.provider))
+            .collect()
     }
 
     /// The command line that would have produced these answers with nothing
@@ -258,7 +316,8 @@ impl Answers {
         if self.picks.is_empty() {
             out.push_str(" --core-only");
         } else {
-            let names: Vec<&str> = self.picks.clone();
+            let mut names: Vec<String> = self.picks.iter().map(|k| k.to_string()).collect();
+            names.extend(self.named.iter().map(|n| n.word()));
             out.push_str(&format!(" --with {}", names.join(",")));
         }
         out.push_str(if self.git { " --git" } else { " --no-git" });
@@ -425,8 +484,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: CreateArgs) -> Outcome {
 
 fn ask(ui: &Ui, args: &CreateArgs) -> Result<(Answers, Vec<Added>), Vec<Diagnostic>> {
     let local = local_checkout(args)?;
-    let (picks, added) = crate::resolve::resolve(&picked(args), Door::Create)?;
+    let named = picked_named(args)?;
+    let (picks, added) = crate::resolve::resolve_named(&picked(args), &named, Door::Create)?;
     selection(&picks, Door::Create)?;
+    named_selection(&picks, &named, Door::Create)?;
 
     // The chooser is reached on one condition, and the condition is the single
     // answer that has no default. Everything else falls back to something this
@@ -449,10 +510,14 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<(Answers, Vec<Added>), Vec<Diagnost
         let mut answers = chooser(ui, args, local)?;
         check_title(&answers.title)?;
         // The chooser ticks the provider of a requirement it can see; a
-        // requirement a child lifts is resolved here, and said.
-        let (picks, added) = crate::resolve::resolve(&answers.picks, Door::Create)?;
+        // requirement a child lifts is resolved here, and said. A named
+        // binding comes from `--with` only.
+        answers.named = named;
+        let (picks, added) =
+            crate::resolve::resolve_named(&answers.picks, &answers.named, Door::Create)?;
         answers.picks = picks;
         selection(&answers.picks, Door::Create)?;
+        named_selection(&answers.picks, &answers.named, Door::Create)?;
         return Ok((answers, added));
     }
 
@@ -474,6 +539,7 @@ fn ask(ui: &Ui, args: &CreateArgs) -> Result<(Answers, Vec<Added>), Vec<Diagnost
             // receipt this command prints names `--git` as the way to
             // change it.
             git: args.git,
+            named,
         },
         added,
     ))
@@ -504,6 +570,14 @@ fn picked(args: &CreateArgs) -> Vec<&'static str> {
     } else {
         DEFAULT.to_vec()
     }
+}
+
+/// The named bindings `--with` asked for: each `<module>@<name>`.
+fn picked_named(args: &CreateArgs) -> Result<Vec<crate::resolve::NamedBinding>, Vec<Diagnostic>> {
+    if args.core_only {
+        return Ok(Vec::new());
+    }
+    crate::resolve::split_words(&args.with).map(|(_, named)| named)
 }
 
 /// Which front door a selection came through, so a refusal can say what to
@@ -547,6 +621,28 @@ pub fn selection(picks: &[&'static str], door: Door) -> Result<(), Vec<Diagnosti
     unmet(picks, door)?;
     kinds(picks, door)?;
     exclusive(picks)
+}
+
+/// The rules of named bindings beside `picks`
+/// ([`crate::resolve::named_refusals`]), and the requirements of their
+/// providers: a named `storage-db` needs `db`.
+pub fn named_selection(
+    picks: &[&'static str],
+    named: &[crate::resolve::NamedBinding],
+    door: Door,
+) -> Result<(), Vec<Diagnostic>> {
+    if named.is_empty() {
+        return Ok(());
+    }
+    let mut bad = crate::resolve::named_refusals(picks, named);
+    if bad.is_empty() {
+        bad.extend(crate::resolve::refusals_named(picks, named, door));
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
 }
 
 /// A requirement on a Kind that no chosen module provides, and two chosen
@@ -753,6 +849,7 @@ fn chooser(ui: &Ui, args: &CreateArgs, local: Option<String>) -> Result<Answers,
         picks,
         local,
         git: draft.git,
+        named: Vec::new(),
     };
 
     // What the chooser stood in for. Every answer it collects has a flag, and
@@ -920,8 +1017,11 @@ fn io_error(path: &Path, e: &std::io::Error) -> Vec<Diagnostic> {
 /// than as a project that compiles and is missing a piece.
 pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, Vec<Diagnostic>> {
     let known = all();
-    let mounts: Vec<(&str, &str, brocanth_scaffold::MountRole)> = a
-        .picks
+    // Every module writes, a provider of named bindings only too; the
+    // bindings are the resolver's, over `picks`.
+    let enabled = a.enabled();
+    let named = a.named_triples();
+    let mounts: Vec<(&str, &str, brocanth_scaffold::MountRole)> = enabled
         .iter()
         .flat_map(|&key| {
             about(key)
@@ -939,11 +1039,12 @@ pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, 
         .iter()
         .flat_map(|&key| about(key).exports.into_iter().map(move |e| (key, e)))
         .collect();
-    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &a.picks, &known)
+    let project = brocanth_scaffold::Project::new(&a.name, &a.title, &enabled, &known)
         .with_mounts(&mounts)
         .with_bindings(&bindings)
+        .with_named(&named)
         .with_exports(&exports);
-    let order = brocanth_scaffold::order(&a.picks, |key| crate::resolve::after(key, &a.picks))
+    let order = brocanth_scaffold::order(&enabled, |key| crate::resolve::after(key, &a.picks))
         .map_err(|stuck| {
             vec![Diagnostic::error(
                 "cycle",
@@ -1002,7 +1103,7 @@ pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, 
     wrong.extend(node_clashes(&built));
     // A hook a project may turn off needs the instance name, or the
     // generated `hooks_off` cannot name the plugin.
-    for key in &a.picks {
+    for key in &enabled {
         if about(key).hook_toggles().next().is_some() && built.instance_of(key).is_none() {
             wrong.push(
                 Diagnostic::error(
@@ -1133,6 +1234,7 @@ pub fn scaffold(a: &Answers) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
     // The front doors check first, with their own help line. This is the
     // floor under them: nothing reaches the generator that they would refuse.
     selection(&a.picks, Door::Create)?;
+    named_selection(&a.picks, &a.named, Door::Create)?;
     let built = contributions(a)?;
     let mut files = scaffold_files(a)?;
 
@@ -1439,7 +1541,7 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
         name = a.name,
         title = brocanth_scaffold::toml_string(&a.title),
         enabled = a
-            .picks
+            .enabled()
             .iter()
             .map(|key| format!("{key:?}"))
             .collect::<Vec<_>>()
@@ -1459,7 +1561,27 @@ fn brocanth_toml(a: &Answers, built: &Built, files: &[(String, String)]) -> Stri
             why = crate::resolve::why(&a.picks, kind),
         ));
     }
-    for key in &a.picks {
+    // The named bindings, per Kind, in the order they were given. Only in a
+    // project that has one, so a one-store record keeps its bytes.
+    let mut kinds: Vec<&str> = Vec::new();
+    for n in &a.named {
+        if !kinds.contains(&n.kind) {
+            kinds.push(n.kind);
+        }
+    }
+    if !kinds.is_empty() {
+        out.push_str("\n[named_bindings]\n");
+        for kind in kinds {
+            let pairs: Vec<String> = a
+                .named
+                .iter()
+                .filter(|n| n.kind == kind)
+                .map(|n| format!("{} = {:?}", n.name, n.provider))
+                .collect();
+            out.push_str(&format!("{kind} = {{ {} }}\n", pairs.join(", ")));
+        }
+    }
+    for key in &a.enabled() {
         // `adapted_to` is the optional dependencies that were present, so
         // the file says which other choice shaped this one's code: removing
         // that one changes what this one wrote.
@@ -1539,6 +1661,12 @@ fn attributed(a: &Answers, files: &[(String, String)], key: &str) -> Vec<String>
         picks: a.picks.iter().copied().filter(|k| k != &key).collect(),
         local: a.local.clone(),
         git: a.git,
+        named: a
+            .named
+            .iter()
+            .filter(|n| n.provider != key)
+            .cloned()
+            .collect(),
     };
     // A smaller module list cannot make two modules collide, so this cannot
     // fail where the list it came from did not.
@@ -2013,7 +2141,7 @@ fn cargo_toml(a: &Answers, built: &Built) -> String {
     // `expect` and not `?`: `ask` already refused a pick whose module is
     // not in this build, and two sources for one name is a mistake in this
     // repository's own registry rather than anything a user typed.
-    let mut picked = merged(&a.picks).expect("the registry does not disagree with itself");
+    let mut picked = merged(&a.enabled()).expect("the registry does not disagree with itself");
     // serde is the one registry crate that both a module and this file may
     // ask for, so it is held back and written once, after the others.
     let serde = serde_dep(&mut picked, needs_serde(a, built));
@@ -6242,6 +6370,7 @@ mod tests {
             picks: picks.to_vec(),
             local: None,
             git: false,
+            named: Vec::new(),
         }
     }
 
@@ -7293,6 +7422,7 @@ mod tests {
             picks: vec!["jobs"],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, contents) in scaffold(&a).expect("the modules agree") {
             let full = root.join(&path);
@@ -8216,6 +8346,7 @@ mod tests {
             picks: vec!["logging", "config", "sessions", "rsx", "jt"],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, contents) in scaffold(&a).expect("the modules agree") {
             let full = root.join(&path);
@@ -8415,6 +8546,7 @@ mod tests {
                 picks,
                 local: Some(brocanth.display().to_string()),
                 git: false,
+                named: Vec::new(),
             };
             for (path, contents) in scaffold(&a).expect("the modules agree") {
                 let full = root.join(&path);
@@ -8709,6 +8841,7 @@ mod tests {
                 picks,
                 local: Some(brocanth.display().to_string()),
                 git: false,
+                named: Vec::new(),
             };
             for (path, contents) in scaffold(&a).expect("the modules agree") {
                 let full = root.join(&path);
@@ -8925,6 +9058,7 @@ mod tests {
             ],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, contents) in scaffold(&a).expect("the modules agree") {
             let full = root.join(&path);
@@ -9156,6 +9290,7 @@ mod context {
             ],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, contents) in scaffold(&a).expect("the modules agree") {
             let full = root.join(&path);
@@ -9211,6 +9346,7 @@ mod context {
             picks: vec!["logging", "config", "rsx", "admin", "resource"],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, contents) in scaffold(&a).expect("the modules agree") {
             let full = root.join(&path);

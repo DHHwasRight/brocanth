@@ -50,6 +50,7 @@ fn explained(text: &str) -> Result<crate::explain::Explained, Vec<Diagnostic>> {
         picks: record.enabled.clone(),
         local: None,
         git: false,
+        named: record.named.clone(),
     };
     let built = create::contributions(&answers).map_err(|mut wrong| {
         wrong.push(
@@ -73,9 +74,10 @@ fn explained(text: &str) -> Result<crate::explain::Explained, Vec<Diagnostic>> {
             )
         })
         .collect();
-    Ok(crate::explain::facts(
+    Ok(crate::explain::facts_named(
         &record.name,
         &record.enabled,
+        &record.named,
         recorded.as_ref(),
         &settings,
     ))
@@ -179,6 +181,7 @@ mod tests {
             picks,
             local: None,
             git: false,
+            named: Vec::new(),
         };
         create::scaffold(&answers)
             .expect("the modules agree")
@@ -186,6 +189,47 @@ mod tests {
             .find(|(path, _)| path == super::super::delegate::MARKER)
             .map(|(_, text)| text)
             .expect("create writes brocanth.toml")
+    }
+
+    /// A named store is a line of its own, and the binding in `[bindings]`
+    /// says it is the default. The JSON has a `named` list only then.
+    #[test]
+    fn a_named_store_is_explained_beside_the_default() {
+        let words: Vec<String> = ["config", "storage", "storage-fs", "storage-s3@public"]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+        let (picks, named) = crate::resolve::split_words(&words).expect("words");
+        let answers = create::Answers {
+            name: "my-app".into(),
+            title: "My App".into(),
+            picks,
+            local: None,
+            git: false,
+            named,
+        };
+        let record = create::scaffold(&answers)
+            .expect("the modules agree")
+            .into_iter()
+            .find(|(path, _)| path == super::super::delegate::MARKER)
+            .map(|(_, text)| text)
+            .expect("create writes brocanth.toml");
+        let facts = explained(&record).expect("it explains");
+        let out = crate::explain::text(&facts);
+        assert!(
+            out.contains("ObjectStore    <- storage-fs (default; storage requires ObjectStore)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("ObjectStore[public] <- storage-s3 (named)"),
+            "{out}"
+        );
+        assert!(out.contains("provides ObjectStore[public]: named"), "{out}");
+        let json = crate::explain::json(&facts);
+        assert!(json.contains("\"named\""), "{json}");
+        assert!(
+            !crate::explain::json(&explained(&record_of(FIXED)).unwrap()).contains("\"named\"")
+        );
     }
 
     /// `brocanth explain --json` for the fixed project prints what it

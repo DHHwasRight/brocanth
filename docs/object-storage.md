@@ -572,8 +572,8 @@ What the emulators cannot prove:
 |---|---|---|
 | 1 | Library: `SignedGet`, `Bucket::signed_url` over `signed_url_opts`, rule D29 in `Storage::signed_url`, `Content-Disposition` on put (D31), `object_store` 0.14.2, conformance rows. **Done 2026-11-27.** | 8-10 |
 | 2 | Redirect: `downloads` and `signed_ttl` in `FileRoutes` and in the routes generator (cloud only), D30, D32, D33, start check D34, `check --deploy` rules, golden `storage-s3-redirect`. **Done 2026-11-27.** | 10-12 |
-| 3 | Resolver and CLI: `named` Kinds, `[named_bindings]`, `@name` in `add`, `remove`, `create`, `explain`, `check --deploy` per store | 14-18 |
-| 4 | Generator and library for names: `[storage.<name>]`, `NamedStores`, token keys per store, overlap check, routes and guards per store, `image::src_in`, golden `storage-named` | 14-18 |
+| 3 | Resolver and CLI: `named` Kinds, `[named_bindings]`, `@name` in `add`, `remove`, `create`, `explain`, `check --deploy` per store. **Done.** | 14-18 |
+| 4 | Generator and library for names: `[storage.<name>]`, `NamedStores`, token keys per store, overlap check, routes and guards per store, `image::src_in`, golden `storage-named`. **Done**, except `image::src_in`. | 14-18 |
 | 5 | Docs: this section into §0, ADR 14, `docs/modules/storage*.md`, AGENTS sections | 3 |
 | | Total | 49-61 |
 
@@ -611,6 +611,38 @@ the smaller choices the code made, each with its reason:
   `storage-s3` or `storage-gcs`, so every earlier golden is unchanged. The
   shape `storage-s3-redirect` writes `downloads = "proxy"` (answer 2) and
   the start check.
+
+**How phases 3 and 4 were built**, inside D19 to D27:
+
+- **`picks` holds no provider that serves only names.** The resolver works
+  on the default bindings as before, so D20 holds with no change to
+  `doubled` or `requires`. `[modules] enabled` lists `picks` and the
+  providers of the named bindings, once each. The record reads a provider
+  in `[named_bindings]` that `[bindings]` does not record as a named-only
+  one.
+- **A named provider's own requirements hold.** `storage-db@archive` brings
+  `db`; it meets no requirement of another module.
+- **The fixed-tables rule is general.** A provider with `Manifest::tables`
+  backs at most one binding. Only `storage-db` has tables, so this is D22
+  and answer 7.
+- **A named cloud store with no bucket stops the start, not `configure`.**
+  The store is a deferred store that refuses every call, and a readiness
+  check fails with the `help:` line. Reason: the project's own tests build
+  the application, and they must pass before a bucket is chosen.
+- **Overlap is equality** (D24): the canonical directory, or the endpoint,
+  bucket and prefix. A nested directory and another prefix in one bucket
+  hold different keys, so they are apart.
+- **`ProvidesBoth<A, B>`** in the core lets the storage plugin put `FileStore`
+  and `NamedStores` on the context. A one-store project keeps
+  `ProvidesContext<FileStore>`.
+- **Routes:** `brocanth_storage::named::AnyRoutes` runs the routes of each
+  store as one hook, the named ones first. `FileRoutes` does not change.
+- **`downloads` per named store** takes `proxy` only. The redirect of
+  phase 2 plugs into `downloads()` in the generated
+  `src/plugins/storage_routes/mod.rs`, and sets it on the store's
+  `RoutesConfig`.
+- **Open:** `image::src_in(ctx, "<name>", ..)`. A named store's route path
+  is a run-time setting the image helper does not read yet.
 
 ### 9.7 Questions answered by the owner
 

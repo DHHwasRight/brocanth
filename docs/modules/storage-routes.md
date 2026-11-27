@@ -38,6 +38,24 @@ An option is set at build time in `src/modules/storage_routes.rs`. A setting is 
 | Settings (run time) | `[storage_routes]`: `max_bytes`, `dedupe` |
 <!-- end generated: capabilities -->
 
+## Named stores
+
+Each named store ([`storage`](storage.md#named-stores)) gets its own routes,
+at `path/<name>`: uploads at `/files/public`, files at
+`/files/public/{address}`. An address is 64 hex characters, so a store name
+never takes its place. The routes of the named stores answer before the
+default's: the default routes would answer `POST /files/public` with a 405.
+
+| Per store | Where |
+|---|---|
+| Who may upload | `may_upload_<name>` in `src/plugins/storage_routes/mod.rs`; it answers no until you change it |
+| `path` | `[storage_routes.<name>] path`; empty means `path/<name>`. The name is then part of a public URL: a new name breaks links already sent |
+| `public`, `max_bytes` | `[storage_routes.<name>]` |
+| `downloads` | `[storage_routes.<name>]`, cloud stores only. `proxy` is the one value this build takes |
+
+The thumbnails, `dedupe` and the formats are the default store's. A
+thumbnail lives in the store of its object.
+
 ## What it does
 
 - `POST /files` takes a `multipart/form-data` form and stores its `file`

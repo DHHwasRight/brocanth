@@ -117,11 +117,12 @@ pub mod testing {
     ) -> Result<Vec<(String, String)>, String> {
         // The generator takes a key it does not know for a bug in itself;
         // here it is a typo in a test.
+        // A word may bind a named store: `storage-s3@public`.
         let unknown: Vec<&str> = crate::modules::with_extra(extra, || {
             let known = crate::modules::keys();
             picks
                 .iter()
-                .copied()
+                .map(|word| word.split_once('@').map_or(*word, |(key, _)| key))
                 .filter(|key| !known.contains(key))
                 .collect()
         });
@@ -136,31 +137,38 @@ pub mod testing {
                     .join(", ")
             ));
         }
+        let words: Vec<String> = picks.iter().map(|word| word.to_string()).collect();
+        let (picks, named) =
+            crate::modules::with_extra(extra, || crate::resolve::split_words(&words))
+                .map_err(|wrong| rendered(&wrong))?;
         let answers = crate::commands::create::Answers {
             name: name.to_string(),
             title: crate::ui::title_case(name),
-            picks: picks.to_vec(),
+            picks,
             local,
             git: false,
+            named,
         };
-        crate::modules::with_extra(extra, || crate::commands::create::scaffold(&answers)).map_err(
-            |wrong| {
-                wrong
-                    .iter()
-                    .map(|d| {
-                        let mut out = format!(
-                            "error[{}]: {}",
-                            d.code.as_deref().unwrap_or("create"),
-                            d.message
-                        );
-                        for (kind, text) in &d.notes {
-                            out.push_str(&format!("\n  {kind}: {text}"));
-                        }
-                        out
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-        )
+        crate::modules::with_extra(extra, || crate::commands::create::scaffold(&answers))
+            .map_err(|wrong| rendered(&wrong))
+    }
+
+    /// Each diagnostic on its lines, with its notes and its `help:` line.
+    fn rendered(wrong: &[crate::ui::Diagnostic]) -> String {
+        wrong
+            .iter()
+            .map(|d| {
+                let mut out = format!(
+                    "error[{}]: {}",
+                    d.code.as_deref().unwrap_or("create"),
+                    d.message
+                );
+                for (kind, text) in &d.notes {
+                    out.push_str(&format!("\n  {kind}: {text}"));
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

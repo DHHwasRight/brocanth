@@ -503,6 +503,12 @@ filled by whatever links. This model adds none.
    - One provider: bind it.
    - Two providers: a conflict that names both. Reason: two queues or two
      session cookies are a bug, not a choice.
+   - A Kind that takes names (`kind!(.., One, named)`, only
+     `ObjectStore`) also has named bindings: `brocanth add
+     storage-s3@public`. A named binding meets no `requires` and is no
+     second provider. Its provider enters `[modules] enabled` once, the
+     binding goes in `[named_bindings]`, and a module reads the list with
+     `Project::named::<K>()` (`docs/object-storage.md` §9.1).
 3. For each Kind with cardinality **many**: collect all, in registry
    order. Zero is not an error.
 4. Add an order edge from each provider to each consumer, as `needs` does.

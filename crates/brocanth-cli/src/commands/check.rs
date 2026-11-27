@@ -478,6 +478,7 @@ mod tests {
             picks: vec!["config", "admin"],
             local: None,
             git: false,
+            named: Vec::new(),
         };
         let files = crate::commands::create::scaffold(&answers).expect("the modules agree");
         let record = &files

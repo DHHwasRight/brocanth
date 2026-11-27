@@ -27,7 +27,7 @@
 //! | `deploy/migrate` | warning | a module's `migrate` is true, or unset where the module contributed the check (it defaults to true) |
 //! | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
 //! | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
-//! | `deploy/storage-local` | warning | the object store is `storage-fs` (or, before the Kind, `storage` with no `db`), so its files are on one machine's disk |
+//! | `deploy/storage-local` | warning | the object store is `storage-fs` (or, before the Kind, `storage` with no `db`), so its files are on one machine's disk; once per store, each named store (`[named_bindings]`) by its name |
 //! | `deploy/storage-redirect-http` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` is `http://`, so the signed URL travels in clear text |
 //! | `deploy/storage-signed-ttl` | warning | `[storage_routes] downloads` is `redirect` and `signed_ttl` is above 3600 seconds |
 //! | `deploy/storage-sibling-domain` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` shares its registrable domain with the site's own address (`[meta] base_url`, `[sitemap] base_url` or `[feed] site_url`) |
@@ -294,6 +294,11 @@ struct Project {
     /// `[bindings]` table: a project written before the generator recorded
     /// them, read through [`BEFORE_BINDINGS`].
     bound: Option<Vec<String>>,
+    /// The provider `[bindings]` records for `ObjectStore`: the default
+    /// store's module.
+    object_store: Option<String>,
+    /// `[named_bindings] ObjectStore`: each named store and its module.
+    named_stores: Vec<(String, String)>,
 }
 
 /// The modules that provided each Kind a check reads, before the generator
@@ -331,11 +336,31 @@ impl Project {
             let bindings = marker.root().at("bindings")?.as_table()?;
             Some(bindings.keys().map(|k| k.to_owned()).collect())
         });
+        let object_store = marker.as_ref().and_then(|marker| {
+            let provider = marker.root().at("bindings.ObjectStore.provider")?;
+            provider.as_str().map(str::to_owned)
+        });
+        let named_stores = marker
+            .as_ref()
+            .and_then(|marker| {
+                let named = marker.root().at("named_bindings.ObjectStore")?.as_table()?;
+                Some(
+                    named
+                        .iter()
+                        .filter_map(|(name, provider)| {
+                            Some((name.to_owned(), provider.as_str()?.to_owned()))
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
         Self {
             root: root.to_path_buf(),
             app,
             modules,
             bound,
+            object_store,
+            named_stores,
         }
     }
 
@@ -695,13 +720,20 @@ fn deploy(
     out.extend(observability(project, config, &file));
     // `storage-fs` is the object store, or a project from before the
     // `ObjectStore` Kind has `storage` with no pool to keep the files in.
-    let on_disk = project.has("storage-fs")
-        || (project.has("storage")
-            && !project.recorded("ObjectStore")
-            && !["storage-db", "storage-s3", "storage-gcs"]
-                .iter()
-                .any(|k| project.has(k))
-            && !project.binds("PgPool"));
+    // With named stores, `storage-fs` may be in the list for one of them:
+    // the default store is the one `[bindings]` records.
+    let on_disk = match &project.object_store {
+        Some(provider) if !project.named_stores.is_empty() => provider == "storage-fs",
+        _ => {
+            project.has("storage-fs")
+                || (project.has("storage")
+                    && !project.recorded("ObjectStore")
+                    && !["storage-db", "storage-s3", "storage-gcs"]
+                        .iter()
+                        .any(|k| project.has(k))
+                    && !project.binds("PgPool"))
+        }
+    };
     if on_disk {
         let mut d = Finding::warning(
             "deploy/storage-local",
@@ -710,6 +742,24 @@ fn deploy(
         .note("a second instance does not see the files the first one stored, and a new machine has none")
         .help("`brocanth add storage-s3` (or `storage-gcs`, `storage-db`) so every instance sees the files, or run one instance on a disk that outlives it");
         if let Some(v) = get(config, "storage.root") {
+            d = d.at(place(project, v));
+        }
+        out.push(d);
+    }
+    // Each named store on a disk, by its name.
+    for (name, provider) in &project.named_stores {
+        if provider != "storage-fs" {
+            continue;
+        }
+        let mut d = Finding::warning(
+            "deploy/storage-local",
+            format!("the file store `{name}` is a directory on this machine's disk"),
+        )
+        .note("a second instance does not see the files the first one stored, and a new machine has none")
+        .help(format!(
+            "`brocanth remove storage-fs@{name}`, then `brocanth add storage-s3@{name}` (or `storage-gcs`), so every instance sees the files"
+        ));
+        if let Some(v) = get(config, &format!("storage.{name}.root")) {
             d = d.at(place(project, v));
         }
         out.push(d);
@@ -1090,6 +1140,8 @@ mod tests {
                 .map(|(kind, _)| kind.to_owned())
                 .collect(),
             ),
+            object_store: None,
+            named_stores: Vec::new(),
         }
     }
 
@@ -1223,6 +1275,48 @@ base_url = "https://shop.example"
                 "{picks:?}"
             );
         }
+    }
+
+    /// With named stores, the check runs once per store and names each one
+    /// on a disk; the default store is the one `[bindings]` records.
+    #[test]
+    fn each_store_on_a_disk_is_its_own_warning() {
+        let config = Config::from_toml(
+            "shop",
+            "production",
+            "[storage]\nbucket = \"b\"\n\n[storage.archive]\nroot = \"/srv/archive\"\n",
+        )
+        .unwrap();
+        let src = sources(&[]);
+        let mut p = project(&["storage", "storage-fs", "storage-s3"]);
+        p.object_store = Some("storage-s3".to_owned());
+        p.named_stores = vec![
+            ("archive".to_owned(), "storage-fs".to_owned()),
+            ("public".to_owned(), "storage-s3".to_owned()),
+        ];
+        let found = deploy(&p, &config, &src, &|_| None, &[]);
+        let local: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.id == "deploy/storage-local")
+            .collect();
+        assert_eq!(local.len(), 1, "{found:?}");
+        assert!(
+            local[0].message.contains("`archive`"),
+            "{}",
+            local[0].message
+        );
+        assert!(local[0].location.is_some());
+        // The disk as the default, and a bucket by name: one warning, the
+        // default's.
+        p.object_store = Some("storage-fs".to_owned());
+        p.named_stores = vec![("public".to_owned(), "storage-s3".to_owned())];
+        let found = deploy(&p, &config, &src, &|_| None, &[]);
+        let local: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.id == "deploy/storage-local")
+            .collect();
+        assert_eq!(local.len(), 1);
+        assert!(!local[0].message.contains('`'), "{}", local[0].message);
     }
 
     #[test]

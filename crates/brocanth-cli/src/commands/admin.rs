@@ -796,6 +796,7 @@ mod tests {
             picks: picks.to_vec(),
             local: None,
             git: false,
+            named: Vec::new(),
         };
         for (path, text) in create::scaffold(&answers).expect("the modules agree") {
             let full = root.join(&path);
@@ -1165,6 +1166,7 @@ mod tests {
             ],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, text) in create::scaffold(&answers).expect("the modules agree") {
             let full = root.join(&path);

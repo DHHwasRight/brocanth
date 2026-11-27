@@ -126,21 +126,48 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     }
     let project = read_record(&recorded)?;
 
-    let wanted = named(&args.modules)?;
-    let already: Vec<&str> = wanted
+    let (wanted, wanted_named) = crate::resolve::split_words(&args.modules)?;
+    let mut already: Vec<String> = wanted
         .iter()
-        .copied()
         .filter(|key| project.enabled.contains(key))
+        .map(|key| key.to_string())
         .collect();
     let adding: Vec<&'static str> = wanted
         .iter()
         .copied()
         .filter(|key| !project.enabled.contains(key))
         .collect();
-    if adding.is_empty() {
+    // A named binding: new, already there, or a name another provider holds.
+    let mut adding_named: Vec<crate::resolve::NamedBinding> = Vec::new();
+    for binding in wanted_named {
+        match project
+            .named
+            .iter()
+            .find(|n| n.kind == binding.kind && n.name == binding.name)
+        {
+            Some(n) if n.provider == binding.provider => already.push(binding.word()),
+            Some(n) => {
+                return Err(vec![Diagnostic::error(
+                    binding.word(),
+                    format!("the name `{}` is bound to `{}`", n.name, n.provider),
+                )
+                .note("one binding per name")
+                .help(format!(
+                    "run `brocanth remove {}` first, or choose another name",
+                    n.word()
+                ))])
+            }
+            None => adding_named.push(binding),
+        }
+    }
+    if adding.is_empty() && adding_named.is_empty() {
         ui.done(format!("{} is already in this project", already.join(", ")));
         return Ok(ExitCode::SUCCESS);
     }
+    let mut after_named = project.named.clone();
+    after_named.extend(adding_named.iter().cloned());
+    let mut said: Vec<String> = adding.iter().map(|key| key.to_string()).collect();
+    said.extend(adding_named.iter().map(|n| n.word()));
 
     // In the registry's order and not the order they were typed, for the
     // reason `create` gives: the same set of words has to produce the same
@@ -155,8 +182,10 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     let (after_picks, replaced) = crate::resolve::replace(&after_picks, &adding);
     // The provider of a Kind a new module requires comes with it, and is
     // said: `added db: jobs requires PgPool`.
-    let (after_picks, added) = crate::resolve::resolve(&after_picks, create::Door::Add)?;
+    let (after_picks, added) =
+        crate::resolve::resolve_named(&after_picks, &after_named, create::Door::Add)?;
     create::selection(&after_picks, create::Door::Add)?;
+    create::named_selection(&after_picks, &after_named, create::Door::Add)?;
 
     // Where this project's brocanth comes from. Read back out of its own
     // manifest rather than recorded in `brocanth.toml`, because the answer
@@ -170,27 +199,29 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
         .map_err(|e| vec![Diagnostic::error("Cargo.toml", format!("{e}")).at("Cargo.toml")])?;
     let local = local_checkout(&manifest);
 
-    let answers = |picks: Vec<&'static str>| Answers {
+    let answers = |picks: Vec<&'static str>, named: &[crate::resolve::NamedBinding]| Answers {
         name: project.name.clone(),
         title: project.title.clone(),
         picks,
+        named: named.to_vec(),
         local: local.clone(),
         git: false,
     };
-    let before: BTreeMap<String, String> = create::scaffold(&answers(project.enabled.clone()))?
-        .into_iter()
-        .collect();
-    let mut after = create::scaffold(&answers(after_picks.clone()))?;
+    let before: BTreeMap<String, String> =
+        create::scaffold(&answers(project.enabled.clone(), &project.named))?
+            .into_iter()
+            .collect();
+    let mut after = create::scaffold(&answers(after_picks.clone(), &after_named))?;
     // `--<module>.<option>=VALUE`: written into a module file this add
     // writes, and refused for one the project already has.
     crate::choices::set_options(
-        &create::module_shapes(&answers(after_picks.clone()))?,
+        &create::module_shapes(&answers(after_picks.clone(), &after_named))?,
         &mut after,
         &args.options,
         |path| !root.join(path).exists(),
     )?;
 
-    ui.heading("add", adding.join(", "));
+    ui.heading("add", said.join(", "));
     for line in &replaced {
         ui.note(format!("  {}", line.line()));
     }
@@ -210,7 +241,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     // the module files, which this add writes.
     let moved = legacy_flags(
         &root,
-        &create::module_shapes(&answers(after_picks.clone()))?,
+        &create::module_shapes(&answers(after_picks.clone(), &after_named))?,
     )?;
 
     let mut kept_deleted: Vec<&str> = Vec::new();
@@ -428,7 +459,7 @@ pub fn run(ui: &Ui, dir: Option<&Path>, args: AddArgs) -> Outcome {
     ui.done(format!(
         "{} {}",
         crate::ui::paint(crate::ui::PLAIN, "added"),
-        crate::ui::paint(ACCENT, adding.join(", "))
+        crate::ui::paint(ACCENT, said.join(", "))
     ));
     ui.gap();
     let mut next = Table::new().indent(4);
@@ -529,7 +560,11 @@ pub(crate) fn legacy_in_the_way(path: &str) -> Diagnostic {
 pub(crate) struct Record {
     pub(crate) name: String,
     pub(crate) title: String,
+    /// `[modules] enabled`, without a provider that serves only named
+    /// bindings: the `picks` of [`Answers`].
     pub(crate) enabled: Vec<&'static str>,
+    /// `[named_bindings]`.
+    pub(crate) named: Vec<crate::resolve::NamedBinding>,
 }
 
 pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
@@ -598,32 +633,68 @@ pub(crate) fn read_record(text: &str) -> Result<Record, Vec<Diagnostic>> {
         .and_then(|p| p.get("title"))
         .and_then(|t| t.as_str())
         .map_or_else(|| crate::ui::title_case(&name), str::to_string);
+    let named = read_named(&doc)?;
+    // A provider in `[named_bindings]` that `[bindings]` does not record as
+    // the default serves names only: it is not a pick.
+    enabled.retain(|key| {
+        !named.iter().any(|n| {
+            n.provider == *key
+                && doc
+                    .get("bindings")
+                    .and_then(|b| b.get(n.kind))
+                    .and_then(|b| b.get("provider"))
+                    .and_then(|p| p.as_str())
+                    != Some(*key)
+        })
+    });
     Ok(Record {
         name,
         title,
         enabled,
+        named,
     })
 }
 
-/// The modules named on the command line, as the registry spells them.
-pub(crate) fn named(words: &[String]) -> Result<Vec<&'static str>, Vec<Diagnostic>> {
+/// `[named_bindings]`: `ObjectStore = { public = "storage-s3" }`, each
+/// entry a named binding. Empty when the table is not there.
+fn read_named(doc: &DocumentMut) -> Result<Vec<crate::resolve::NamedBinding>, Vec<Diagnostic>> {
+    let wrong = |what: String| {
+        vec![Diagnostic::error("brocanth.toml", what)
+            .at("brocanth.toml")
+            .help("`brocanth add` and `brocanth remove` write `[named_bindings]`; restore it from version control")]
+    };
     let mut out = Vec::new();
-    let mut wrong = Vec::new();
-    for word in words {
-        match create::all().into_iter().find(|key| key == word) {
-            Some(key) if !out.contains(&key) => out.push(key),
-            Some(_) => {}
-            None => wrong.push(
-                Diagnostic::error(word.clone(), format!("`{word}` is not a module"))
-                    .help("`brocanth add --help` lists what this build can add"),
-            ),
+    let Some(table) = doc.get("named_bindings").and_then(|t| t.as_table_like()) else {
+        return Ok(out);
+    };
+    for (kind, names) in table.iter() {
+        let Some(names) = names.as_table_like() else {
+            return Err(wrong(format!(
+                "`[named_bindings] {kind}` is not a table of names"
+            )));
+        };
+        for (name, provider) in names.iter() {
+            let Some(provider) = provider.as_str() else {
+                return Err(wrong(format!(
+                    "`[named_bindings] {kind}.{name}` is not a module key"
+                )));
+            };
+            let Some(key) = create::all().into_iter().find(|k| *k == provider) else {
+                return Err(wrong(format!(
+                    "no module in this brocanth is called {provider}"
+                )));
+            };
+            let Some(bound) = crate::resolve::named_kind(key).filter(|k| k.name == kind) else {
+                return Err(wrong(format!("`{key}` binds no name under {kind}")));
+            };
+            out.push(crate::resolve::NamedBinding {
+                kind: bound.name,
+                name: name.to_string(),
+                provider: key,
+            });
         }
     }
-    if wrong.is_empty() {
-        Ok(out)
-    } else {
-        Err(wrong)
-    }
+    Ok(out)
 }
 
 /// `--brocanth-path`, read back out of the project's own manifest.
@@ -851,7 +922,9 @@ fn same_source(deps: &toml_edit::Table, item: &Item) -> Item {
 /// A section the file already has is left exactly as it is, comments,
 /// values and all: the developer has had a chance to set the URL in it, and
 /// a generator that reset it to `postgres://localhost/development` would be
-/// a generator nobody runs twice.
+/// a generator nobody runs twice. A subsection it lacks is appended, so a
+/// named store's `[storage.<name>]` arrives beside a `[storage]` that
+/// stays as it is.
 ///
 /// Appended as text at the end of the file, after a blank line. Inserted
 /// through the document instead, a section lands before the file's
@@ -861,12 +934,31 @@ fn merge_config(path: &str, current: &str, generated: &str) -> Result<String, Ve
     let doc: DocumentMut = current.parse().map_err(|e| toml_error(path, &e))?;
     let want: DocumentMut = generated.parse().map_err(|e| toml_error(path, &e))?;
     let mut out = current.to_string();
+    // Each section to append, as a document of one: a new section, or a
+    // new subsection of a section the file has.
+    let mut new: Vec<DocumentMut> = Vec::new();
     for (key, item) in want.iter() {
-        if doc.contains_key(key) {
+        let Some(have) = doc.get(key) else {
+            let mut one = DocumentMut::new();
+            one.insert(key, item.clone());
+            new.push(one);
             continue;
+        };
+        let (Some(have), Some(want)) = (have.as_table(), item.as_table()) else {
+            continue;
+        };
+        for (sub, item) in want.iter() {
+            if item.is_table() && !have.contains_key(sub) {
+                let mut parent = toml_edit::Table::new();
+                parent.set_implicit(true);
+                parent.insert(sub, item.clone());
+                let mut one = DocumentMut::new();
+                one.insert(key, Item::Table(parent));
+                new.push(one);
+            }
         }
-        let mut one = DocumentMut::new();
-        one.insert(key, item.clone());
+    }
+    for one in new {
         let text = one.to_string();
         if !out.is_empty() {
             if !out.ends_with('\n') {
@@ -974,6 +1066,7 @@ mod tests {
             picks: picks.to_vec(),
             local: None,
             git: false,
+            named: Vec::new(),
         };
         for (path, text) in create::scaffold(&answers).expect("the modules agree") {
             let full = root.join(&path);
@@ -1026,6 +1119,7 @@ mod tests {
             picks: vec!["logging", "config", "db", "cache"],
             local: None,
             git: false,
+            named: Vec::new(),
         };
         for (path, want) in create::scaffold(&both).expect("the modules agree") {
             // `Cargo.toml` and the config are appended to rather than
@@ -1186,6 +1280,7 @@ mod tests {
             picks: vec!["logging", "config", "commands"],
             local: Some(brocanth.display().to_string()),
             git: false,
+            named: Vec::new(),
         };
         for (path, text) in create::scaffold(&answers).expect("the modules agree") {
             let full = root.join(&path);
@@ -1249,6 +1344,7 @@ mod tests {
                 .collect(),
             local: None,
             git: false,
+            named: Vec::new(),
         };
         create::scaffold(&answers)
             .expect("the modules agree")

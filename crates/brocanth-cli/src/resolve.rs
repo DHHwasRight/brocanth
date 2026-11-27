@@ -20,6 +20,14 @@
 //! plugin chain and a `[bindings]` entry in `brocanth.toml`, and the chain
 //! names every plugin as before.
 //!
+//! A Kind that takes names ([`brocanth_scaffold::kind::Kind::NAMED`], only
+//! `ObjectStore`) has, beside its one default provider, zero or more named
+//! bindings: `storage-s3@public`. A named binding never meets a requirement
+//! and never counts as a second provider. Its provider enters `[modules]
+//! enabled` once, and the binding goes in `[named_bindings]`
+//! (`docs/object-storage.md` §9.1). [`NamedBinding`] holds one; `picks`
+//! never holds a provider that serves only names.
+//!
 //! [`Manifest::default_for`]: brocanth_scaffold::Manifest::default_for
 
 use brocanth_scaffold::kind::Cardinality;
@@ -48,6 +56,220 @@ impl Added {
             self.key, self.by, self.kind, self.kind.gist
         )
     }
+}
+
+/// A provider bound to a Kind under a name: `storage-s3@public`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedBinding {
+    /// The Kind, which takes names.
+    pub kind: &'static str,
+    /// The name: `public`.
+    pub name: String,
+    /// The provider: `storage-s3`.
+    pub provider: &'static str,
+}
+
+impl NamedBinding {
+    /// The word a front door takes for it: `storage-s3@public`.
+    pub fn word(&self) -> String {
+        format!("{}@{}", self.provider, self.name)
+    }
+}
+
+/// The longest name a named binding takes.
+pub const MAX_NAME_LEN: usize = 24;
+
+/// Whether `name` is a name a binding may take: `[a-z][a-z0-9_]{0,23}`, and
+/// not `default`. The name is a TOML table, a flag segment, a Rust field and
+/// a URL segment. The module that reads the names refuses the words that
+/// are its own setting keys (`docs/object-storage.md` §9.0, D22).
+pub fn valid_name(name: &str) -> bool {
+    name.len() <= MAX_NAME_LEN
+        && name != "default"
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The Kind of `provider` that takes names, if it provides one.
+pub fn named_kind(provider: &str) -> Option<KindRef> {
+    about(provider)
+        .provides
+        .iter()
+        .map(|(kind, _)| *kind)
+        .find(|kind| kind.named)
+}
+
+/// The modules of a project: `picks`, and the provider of each named
+/// binding once, in registry order. What `[modules] enabled` lists, what
+/// links a crate feature, and what writes a module file.
+pub fn enabled(picks: &[&'static str], named: &[NamedBinding]) -> Vec<&'static str> {
+    if named.is_empty() {
+        return picks.to_vec();
+    }
+    crate::commands::create::all()
+        .into_iter()
+        .filter(|key| picks.contains(key) || named.iter().any(|n| n.provider == *key))
+        .collect()
+}
+
+/// The words of a front door, split: module keys, and named bindings
+/// (`<module>@<name>`). A key twice is one key; a binding twice is one
+/// binding.
+///
+/// Refuses a word whose module is not in this build, and a name on a
+/// module that provides no Kind that takes names.
+pub fn split_words(
+    words: &[String],
+) -> Result<(Vec<&'static str>, Vec<NamedBinding>), Vec<Diagnostic>> {
+    let mut keys: Vec<&'static str> = Vec::new();
+    let mut named: Vec<NamedBinding> = Vec::new();
+    let mut wrong = Vec::new();
+    for word in words {
+        let (key, name) = match word.split_once('@') {
+            Some((key, name)) => (key, Some(name)),
+            None => (word.as_str(), None),
+        };
+        let Some(key) = crate::commands::create::all()
+            .into_iter()
+            .find(|k| *k == key)
+        else {
+            wrong.push(
+                Diagnostic::error(word.clone(), format!("`{key}` is not a module"))
+                    .help("`brocanth add --help` lists what this build can add"),
+            );
+            continue;
+        };
+        let Some(name) = name else {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+            continue;
+        };
+        let Some(kind) = named_kind(key) else {
+            wrong.push(
+                Diagnostic::error(word.clone(), format!("`{key}` takes no name"))
+                    .note("a name binds a second store: only a module that provides a Kind that takes names has one")
+                    .help(format!("drop `@{name}`: `{key}`")),
+            );
+            continue;
+        };
+        let binding = NamedBinding {
+            kind: kind.name,
+            name: name.to_string(),
+            provider: key,
+        };
+        if !named.contains(&binding) {
+            named.push(binding);
+        }
+    }
+    if wrong.is_empty() {
+        Ok((keys, named))
+    } else {
+        Err(wrong)
+    }
+}
+
+/// The providers that serve only named bindings: in `named`, and not in
+/// `picks`. Their requirements hold (`storage-db@archive` brings `db`), and
+/// they meet none.
+fn named_only(picks: &[&'static str], named: &[NamedBinding]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for n in named {
+        if !picks.contains(&n.provider) && !out.contains(&n.provider) {
+            out.push(n.provider);
+        }
+    }
+    out
+}
+
+/// Every rule a set of named bindings must keep beside `picks`: a Kind that
+/// takes names, a valid name, one binding per name, the provider's parent
+/// chosen, and a provider with fixed tables backing at most one binding,
+/// the default one included (`storage-db`, D22).
+pub fn named_refusals(picks: &[&'static str], named: &[NamedBinding]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for n in named {
+        let word = n.word();
+        if named_kind(n.provider).is_none_or(|k| k.name != n.kind) {
+            let takers: Vec<&str> = available()
+                .into_iter()
+                .filter(|key| named_kind(key).is_some())
+                .collect();
+            out.push(
+                Diagnostic::error(word.clone(), format!("`{}` takes no name", n.provider))
+                    .note(format!(
+                        "only a provider of a Kind that takes names binds under one: {}",
+                        takers.join(", ")
+                    ))
+                    .help(format!("drop `@{}`: `{}`", n.name, n.provider)),
+            );
+            continue;
+        }
+        if !valid_name(&n.name) {
+            out.push(
+                Diagnostic::error(word.clone(), format!("`{}` is not a name a store may take", n.name))
+                    .note("a name is a TOML table, a flag segment, a Rust field and a URL segment")
+                    .help(format!(
+                        "use a lower case letter, then at most {} lower case letters, digits or `_`, and not `default`",
+                        MAX_NAME_LEN - 1
+                    )),
+            );
+        }
+        if seen.contains(&(n.kind, n.name.as_str())) {
+            out.push(
+                Diagnostic::error(
+                    word.clone(),
+                    format!("the name `{}` is bound twice", n.name),
+                )
+                .help(format!("give each {} binding a name of its own", n.kind)),
+            );
+        }
+        seen.push((n.kind, n.name.as_str()));
+        let m = about(n.provider);
+        if let Some(why) = m.blocked {
+            out.push(
+                Diagnostic::error(
+                    word.clone(),
+                    format!("`{}` is not available yet", n.provider),
+                )
+                .note(why),
+            );
+        }
+        if let Some(parent) = m.parent.filter(|parent| !picks.contains(parent)) {
+            out.push(
+                Diagnostic::error(
+                    word.clone(),
+                    format!("`{}` is part of `{parent}`", n.provider),
+                )
+                .note(m.because)
+                .help(format!("add `{parent}` with it, or remove `{word}`")),
+            );
+        }
+    }
+    // A provider with fixed table names: two bindings would share its rows.
+    for provider in enabled(picks, named) {
+        if about(provider).tables.is_empty() {
+            continue;
+        }
+        let uses = named.iter().filter(|n| n.provider == provider).count()
+            + usize::from(picks.contains(&provider));
+        if uses > 1 {
+            out.push(
+                Diagnostic::error(
+                    provider,
+                    format!("`{provider}` backs {uses} bindings, and its tables have fixed names"),
+                )
+                .note("two bindings on one set of tables would share their rows")
+                .help(format!(
+                    "keep one binding on `{provider}`, and put each other store on another backend"
+                )),
+            );
+        }
+    }
+    out
 }
 
 /// Every module in this build that provides `kind`, in registry order.
@@ -157,10 +379,11 @@ pub fn upgrade_record(picks: &mut Vec<&'static str>) -> Option<&'static str> {
 }
 
 /// Each chosen module's requirement that no chosen module provides, in
-/// registry order.
-fn unmet(picks: &[&'static str]) -> Vec<(&'static str, Requirement)> {
+/// registry order. `also` holds the providers of named bindings only: their
+/// requirements count, and they meet none.
+fn unmet(picks: &[&'static str], also: &[&'static str]) -> Vec<(&'static str, Requirement)> {
     let mut out = Vec::new();
-    for pick in picks {
+    for pick in picks.iter().chain(also) {
         let m = about(pick);
         for r in m.requirements(picks) {
             if !picks.iter().any(|p| about(p).gives(r.kind.name)) {
@@ -181,10 +404,22 @@ pub fn resolve(
     picks: &[&'static str],
     door: Door,
 ) -> Result<(Vec<&'static str>, Vec<Added>), Vec<Diagnostic>> {
+    resolve_named(picks, &[], door)
+}
+
+/// [`resolve`], with the requirements of the providers of `named` too: a
+/// named `storage-db` brings `db`. A named binding meets no requirement, so
+/// `storage` beside `storage-s3@public` alone still brings `storage-fs`.
+pub fn resolve_named(
+    picks: &[&'static str],
+    named: &[NamedBinding],
+    door: Door,
+) -> Result<(Vec<&'static str>, Vec<Added>), Vec<Diagnostic>> {
     let mut picks = picks.to_vec();
     let mut added: Vec<Added> = Vec::new();
     loop {
-        let missing = unmet(&picks);
+        let also = named_only(&picks, named);
+        let missing = unmet(&picks, &also);
         if missing.is_empty() {
             return Ok((picks, added));
         }
@@ -200,7 +435,7 @@ pub fn resolve(
                     .find_map(|(by, r)| default_provider(r.kind.name).map(|key| (by, r, key)))
             });
         let Some((by, r, key)) = pick else {
-            return Err(refusals(&picks, door));
+            return Err(refusals_named(&picks, named, door));
         };
         added.push(Added {
             key,
@@ -217,7 +452,16 @@ pub fn resolve(
 /// the front doors: [`crate::commands::create::selection`] calls it after
 /// they resolved, so only a requirement with no single provider is left.
 pub fn refusals(picks: &[&'static str], door: Door) -> Vec<Diagnostic> {
-    unmet(picks)
+    refusals_named(picks, &[], door)
+}
+
+/// [`refusals`], with the requirements of the providers of `named` too.
+pub fn refusals_named(
+    picks: &[&'static str],
+    named: &[NamedBinding],
+    door: Door,
+) -> Vec<Diagnostic> {
+    unmet(picks, &named_only(picks, named))
         .into_iter()
         .map(|(pick, r)| {
             let kind = r.kind;
@@ -642,6 +886,79 @@ mod tests {
         // The default itself cannot leave while `storage` stays.
         let orphans = orphaned_by("storage-fs", &["storage"]);
         assert_eq!(orphans[0].0, "storage");
+    }
+
+    // -- named bindings (docs/object-storage.md §9.1) ---------------------
+
+    fn words(list: &[&str]) -> (Vec<&'static str>, Vec<NamedBinding>) {
+        let list: Vec<String> = list.iter().map(|w| w.to_string()).collect();
+        split_words(&list).expect("words this build knows")
+    }
+
+    #[test]
+    fn a_word_with_a_name_is_a_named_binding() {
+        let (keys, named) = words(&["storage", "storage-s3@public", "storage-s3@public"]);
+        assert_eq!(keys, ["storage"]);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].kind, "ObjectStore");
+        assert_eq!(named[0].word(), "storage-s3@public");
+        let refused = split_words(&["db@main".to_string()]).unwrap_err();
+        assert!(refused[0].render().contains("`db` takes no name"));
+    }
+
+    #[test]
+    fn a_named_binding_meets_no_requirement_and_is_no_second_provider() {
+        let (keys, named) = words(&["storage", "storage-s3@public"]);
+        let (picks, added) = resolve_named(&keys, &named, Door::Create).expect("resolves");
+        // `storage` still requires a default store: the disk comes.
+        assert_eq!(picks, ["storage", "storage-fs"]);
+        assert_eq!(added[0].key, "storage-fs");
+        assert!(doubled(&picks).is_empty());
+        assert!(named_refusals(&picks, &named).is_empty());
+        assert_eq!(bindings(&picks), [("ObjectStore", "storage-fs")]);
+        assert_eq!(
+            enabled(&picks, &named),
+            ["storage", "storage-fs", "storage-s3"]
+        );
+        // The default and a name on one provider: the module comes once.
+        let (keys, named) = words(&["storage", "storage-s3", "storage-s3@public"]);
+        let (picks, added) = resolve_named(&keys, &named, Door::Create).expect("resolves");
+        assert!(added.is_empty());
+        assert_eq!(enabled(&picks, &named), ["storage", "storage-s3"]);
+    }
+
+    #[test]
+    fn a_named_store_brings_what_its_provider_requires() {
+        let (keys, named) = words(&["storage", "storage-db@archive"]);
+        let (picks, _) = resolve_named(&keys, &named, Door::Create).expect("resolves");
+        assert!(picks.contains(&"db"), "{picks:?}");
+        assert!(picks.contains(&"storage-fs"), "{picks:?}");
+        assert!(!picks.contains(&"storage-db"), "{picks:?}");
+    }
+
+    #[test]
+    fn a_name_breaks_no_rule() {
+        let refused = |list: &[&str]| -> String {
+            let (keys, named) = words(list);
+            named_refusals(&keys, &named)
+                .iter()
+                .map(Diagnostic::render)
+                .collect()
+        };
+        assert!(refused(&["storage", "storage-fs", "storage-s3@Public"]).contains("not a name"));
+        assert!(refused(&["storage", "storage-fs", "storage-s3@default"]).contains("not a name"));
+        assert!(refused(&["storage", "storage-fs", "storage-s3@a-b"]).contains("not a name"));
+        let twice = refused(&["storage", "storage-fs", "storage-s3@x", "storage-gcs@x"]);
+        assert!(twice.contains("bound twice"), "{twice}");
+        let orphan = refused(&["storage-s3@public"]);
+        assert!(
+            orphan.contains("`storage-s3` is part of `storage`"),
+            "{orphan}"
+        );
+        // `storage-db` has fixed table names: one binding, default or named.
+        let db = refused(&["db", "storage", "storage-db", "storage-db@archive"]);
+        assert!(db.contains("backs 2 bindings"), "{db}");
+        assert!(refused(&["db", "storage", "storage-fs", "storage-db@archive"]).is_empty());
     }
 
     #[test]

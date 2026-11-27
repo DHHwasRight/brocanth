@@ -97,7 +97,7 @@ pub fn is_module_file(path: &str) -> bool {
 /// module in `brocanth.toml` order.
 pub fn shapes(a: &Answers, built: &Built) -> Vec<Shape> {
     let mut out = vec![shape(FRAMEWORK, built)];
-    for key in &a.picks {
+    for key in &a.enabled() {
         out.push(shape(key, built));
     }
     out
@@ -202,7 +202,7 @@ pub fn mod_rs(a: &Answers) -> String {
     );
     // Sorted, as rustfmt sorts `mod` lines.
     let mut mods: Vec<String> = a
-        .picks
+        .enabled()
         .iter()
         .map(|key| format!("pub mod {};\n", module_ident(key)))
         .collect();
@@ -215,7 +215,11 @@ pub fn mod_rs(a: &Answers) -> String {
         "\n/// Every module in `brocanth.toml`, in registration order: the list of\n\
          /// `[modules] enabled`, which `brocanth add` and `brocanth remove` keep.\n",
     );
-    out.push_str(&string_array("pub const ALL: &[&str] = &[", &a.picks, "];"));
+    out.push_str(&string_array(
+        "pub const ALL: &[&str] = &[",
+        &a.enabled(),
+        "];",
+    ));
     out
 }
 

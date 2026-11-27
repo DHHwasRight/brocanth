@@ -103,6 +103,24 @@ impl FileTokenKey {
         Self(h.finalize().into())
     }
 
+    /// Derives the key of the named store `store` from the deployment
+    /// secret: the store name is in the domain separator, so a token one
+    /// store minted does not open an address in another
+    /// (`docs/object-storage.md` §9, D26).
+    ///
+    /// The default store keeps [`FileTokenKey::from_secret`], so its tokens
+    /// and its derivation do not change when a project adds a named store.
+    /// The name is length-prefixed, so no name and secret pair can spell
+    /// another name's input.
+    pub fn from_secret_for(secret: &[u8], store: &str) -> Self {
+        let mut h = Sha256::new();
+        h.update(b"brocanth-storage/file-token-key/v1/store/");
+        h.update((store.len() as u64).to_be_bytes());
+        h.update(store.as_bytes());
+        h.update(secret);
+        Self(h.finalize().into())
+    }
+
     /// A fresh key from the OS CSPRNG.
     ///
     /// Useful in a test and in a single-process deployment. A deployment with
@@ -318,4 +336,38 @@ pub fn now() -> UnixTime {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod key_vectors {
+    use super::FileTokenKey;
+
+    fn hex(key: &FileTokenKey) -> String {
+        key.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The default store's derivation is fixed: a project that adds a named
+    /// store keeps every token it minted before (D26).
+    #[test]
+    fn the_default_key_matches_a_fixed_vector() {
+        assert_eq!(
+            hex(&FileTokenKey::from_secret(b"deployment secret")),
+            "032459a175f1f660813fd3742b8be15f39b538490c88159c7623e25ac5af6964"
+        );
+    }
+
+    #[test]
+    fn a_named_store_key_puts_the_name_in_the_domain() {
+        let public = FileTokenKey::from_secret_for(b"deployment secret", "public");
+        assert_eq!(
+            hex(&public),
+            "51caf823f3aaf87bd561fbc48fa4d996ac1e125dbe5e0bed368fe68b9012e3e8"
+        );
+        let archive = FileTokenKey::from_secret_for(b"deployment secret", "archive");
+        assert_ne!(hex(&public), hex(&archive));
+        assert_ne!(
+            hex(&public),
+            hex(&FileTokenKey::from_secret(b"deployment secret"))
+        );
+    }
 }

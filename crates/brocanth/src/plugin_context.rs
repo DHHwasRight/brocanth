@@ -102,8 +102,9 @@ impl<T, U, Rest, I> Has<U, There<I>> for With<T, Rest> where Rest: Has<U, I> {}
 
 /// What a plugin contributes to the context, at the type level.
 ///
-/// Implemented by [`NoContext`] and [`ProvidesContext<T>`]; a plugin names one
-/// of them as its `Plugin::Provides`.
+/// Implemented by [`NoContext`], [`ProvidesContext<T>`] and
+/// [`ProvidesBoth<A, B>`]; a plugin names one of them as its
+/// `Plugin::Provides`.
 pub trait Provided {
     /// The provider list `E` after this plugin is installed.
     type Install<E>;
@@ -115,12 +116,24 @@ pub struct NoContext;
 /// The plugin puts a `T` in the context.
 pub struct ProvidesContext<T>(PhantomData<fn() -> T>);
 
+/// The plugin puts an `A` and a `B` in the context.
+///
+/// For a plugin whose second item exists only in some projects: a storage
+/// plugin with named stores provides its default store and the named ones,
+/// and a project with one store keeps [`ProvidesContext`]. Two items, not a
+/// list: a plugin that provides more is two plugins.
+pub struct ProvidesBoth<A, B>(PhantomData<fn() -> (A, B)>);
+
 impl Provided for NoContext {
     type Install<E> = E;
 }
 
 impl<T: ContextItem> Provided for ProvidesContext<T> {
     type Install<E> = With<T, E>;
+}
+
+impl<A: ContextItem, B: ContextItem> Provided for ProvidesBoth<A, B> {
+    type Install<E> = With<B, With<A, E>>;
 }
 
 /// The provider list after `P` is registered on top of `E`.
@@ -260,6 +273,17 @@ mod tests {
 
         let user: &CurrentUser = cx.extract();
         assert_eq!(user.0, 7);
+    }
+
+    #[test]
+    fn a_plugin_that_provides_both_installs_both() {
+        type Two = <ProvidesBoth<RequestId, CurrentUser> as Provided>::Install<Base>;
+        let mut b = ContextBuilder::new();
+        b.insert(RequestId("r-2".into()));
+        b.insert(CurrentUser(8));
+        let cx = b.build::<Two>();
+        assert_eq!(cx.get::<RequestId, _>().0, "r-2");
+        assert_eq!(cx.get::<CurrentUser, _>().0, 8);
     }
 
     #[test]

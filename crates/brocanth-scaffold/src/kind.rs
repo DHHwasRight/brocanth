@@ -50,6 +50,11 @@ pub trait Kind: 'static {
     /// collector is always there, and turning the entry off would only
     /// hide a rule or a check.
     const COLLECTED_BY: Option<&'static str> = None;
+    /// Whether a project may bind the Kind under a name too, beside its one
+    /// default provider: `brocanth add storage-s3@public`. A named binding
+    /// never meets a requirement and never counts as a second provider
+    /// (`docs/object-storage.md` §9.1). Only `ObjectStore` takes names.
+    const NAMED: bool = false;
 }
 
 /// A Kind as a value, so a [`Manifest`](crate::Manifest) can hold it.
@@ -70,6 +75,8 @@ pub struct KindRef {
     pub cardinality: Cardinality,
     /// [`Kind::COLLECTED_BY`].
     pub collected_by: Option<&'static str>,
+    /// [`Kind::NAMED`].
+    pub named: bool,
 }
 
 impl KindRef {
@@ -82,6 +89,7 @@ impl KindRef {
             gist: K::GIST,
             cardinality: K::CARDINALITY,
             collected_by: K::COLLECTED_BY,
+            named: K::NAMED,
         }
     }
 }
@@ -94,16 +102,20 @@ impl fmt::Display for KindRef {
 
 /// Declare a Kind: a unit struct and its [`Kind`] impl. A Kind of
 /// cardinality many that the generator collects ends with
-/// `collected_by = ".."` ([`Kind::COLLECTED_BY`]).
+/// `collected_by = ".."` ([`Kind::COLLECTED_BY`]). A Kind of cardinality
+/// one that also takes named bindings ends with `named` ([`Kind::NAMED`]).
 #[macro_export]
 macro_rules! kind {
     ($(#[$doc:meta])* $name:ident, group = $group:literal, runtime = $runtime:literal, gist = $gist:literal, $card:ident, collected_by = $by:literal) => {
-        $crate::kind!(@impl $(#[$doc])* $name, $group, $runtime, $gist, $card, Some($by));
+        $crate::kind!(@impl $(#[$doc])* $name, $group, $runtime, $gist, $card, Some($by), false);
+    };
+    ($(#[$doc:meta])* $name:ident, group = $group:literal, runtime = $runtime:literal, gist = $gist:literal, One, named) => {
+        $crate::kind!(@impl $(#[$doc])* $name, $group, $runtime, $gist, One, None, true);
     };
     ($(#[$doc:meta])* $name:ident, group = $group:literal, runtime = $runtime:literal, gist = $gist:literal, $card:ident) => {
-        $crate::kind!(@impl $(#[$doc])* $name, $group, $runtime, $gist, $card, None);
+        $crate::kind!(@impl $(#[$doc])* $name, $group, $runtime, $gist, $card, None, false);
     };
-    (@impl $(#[$doc:meta])* $name:ident, $group:literal, $runtime:literal, $gist:literal, $card:ident, $by:expr) => {
+    (@impl $(#[$doc:meta])* $name:ident, $group:literal, $runtime:literal, $gist:literal, $card:ident, $by:expr, $named:literal) => {
         $(#[$doc])*
         #[derive(Debug, Clone, Copy)]
         pub struct $name;
@@ -114,6 +126,7 @@ macro_rules! kind {
             const GIST: &'static str = $gist;
             const CARDINALITY: $crate::kind::Cardinality = $crate::kind::Cardinality::$card;
             const COLLECTED_BY: Option<&'static str> = $by;
+            const NAMED: bool = $named;
         }
     };
 }
@@ -158,11 +171,15 @@ kind!(
     /// a directory from `storage-fs` (the default), S3 from `storage-s3`,
     /// Google Cloud Storage from `storage-gcs`, Postgres from `storage-db`
     /// (`docs/object-storage.md`).
+    ///
+    /// It takes names: one default store, and zero or more named ones, such
+    /// as `storage-s3@public` (`docs/object-storage.md` §9.1).
     ObjectStore,
     group = "storage",
     runtime = "dyn brocanth_storage::Storage",
     gist = "an object store",
-    One
+    One,
+    named
 );
 
 kind!(
@@ -338,6 +355,8 @@ mod tests {
         assert_eq!(pool.group, "db");
         assert_eq!(pool.cardinality, Cardinality::One);
         assert_eq!(pool.to_string(), "PgPool");
+        assert!(!pool.named);
+        assert!(KindRef::of::<ObjectStore>().named);
     }
 
     #[test]

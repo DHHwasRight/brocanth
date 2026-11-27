@@ -114,6 +114,67 @@ fn with_db_the_objects_live_in_postgres() {
     shape("storage-db", &["config", "db", "storage", "storage-db"]);
 }
 
+/// Two named stores beside the default disk: `storage-s3@public` and
+/// `storage-fs@archive` (`docs/object-storage.md` §9.1). `stores.rs` opens
+/// them, `[storage.<name>]` holds their settings, and the routes answer at
+/// `/files/<name>`. The project's own tests prove the stores keep their
+/// bytes apart, refuse each other's tokens, and refuse one directory.
+#[test]
+fn named_stores_open_beside_the_default_one() {
+    shape(
+        "storage-named",
+        &[
+            "config",
+            "middleware",
+            "middleware-csrf",
+            "storage",
+            "storage-fs",
+            "storage-routes",
+            "storage-s3@public",
+            "storage-fs@archive",
+        ],
+    );
+}
+
+/// Named stores with no config file: each setting is a flag, such as
+/// `--storage.public.bucket`. A cloud default, and a named store of each
+/// cloud.
+#[test]
+fn named_stores_take_their_settings_from_flags() {
+    shape(
+        "storage-named-flags",
+        &[
+            "storage",
+            "storage-gcs",
+            "storage-s3@public",
+            "storage-gcs@media",
+        ],
+    );
+}
+
+/// A named Postgres store waits for the `db` pool at `before_start`. Its
+/// code is checked by rustfmt here; it needs a database to run.
+#[test]
+fn a_named_postgres_store_is_written_in_shape() {
+    let modules: [&dyn brocanth_scaffold::Module; 4] =
+        [&FileStorage, &StorageRoutes, &StorageThumbnails, &Image];
+    let picks = ["db", "storage", "storage-fs", "storage-db@archive"];
+    let files = brocanth_cli::testing::generate("my-photos", &picks, &modules)
+        .unwrap_or_else(|e| panic!("{e}"));
+    testing::assert_formatted(&files);
+    let stores = files
+        .iter()
+        .find(|(path, _)| path == "src/plugins/storage/stores.rs")
+        .map(|(_, text)| text)
+        .expect("stores.rs");
+    assert!(stores.contains("pub(super) fn before_start("), "{stores}");
+    // Two bindings on `storage-db` share its tables, so the CLI refuses
+    // them before the generator runs.
+    let doubled = ["db", "storage", "storage-db", "storage-db@archive"];
+    let said = brocanth_cli::testing::generate("my-photos", &doubled, &modules).unwrap_err();
+    assert!(said.contains("backs 2 bindings"), "{said}");
+}
+
 /// Without a config file: the settings are literals and flags.
 #[test]
 fn the_routes_work_without_a_config_file() {

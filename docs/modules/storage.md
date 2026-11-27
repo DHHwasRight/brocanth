@@ -43,6 +43,7 @@ An option is set at build time in `src/modules/storage.rs`. A setting is read at
 Files:
 
 - `src/plugins/storage/mod.rs`
+- `src/plugins/storage/stores.rs`, with a named store only (see below)
 
 Slots:
 
@@ -88,6 +89,47 @@ writes the open code for the bound one into `src/plugins/storage/mod.rs`,
 and every caller holds `Arc<dyn Storage>`. A project made before the Kind
 keeps its backend: `storage` with `db` reads as `storage-db`. The design is
 in [`docs/object-storage.md`](../object-storage.md).
+
+## Named stores
+
+A project has one default store and zero or more named ones
+([`docs/object-storage.md`](../object-storage.md) §9.1):
+
+```text
+brocanth add storage-s3@public      # a named store on S3, beside the default one
+brocanth remove storage-s3@public   # takes it out, and its config section
+brocanth add storage-s3             # still swaps the default store
+```
+
+`create --with storage,storage-s3@public` works the same. A named binding
+meets no requirement and is no second provider: `storage` beside
+`storage-s3@public` alone still brings `storage-fs` as the default. The
+provider enters `[modules] enabled` once, and the binding goes in
+`[named_bindings]` of `brocanth.toml`.
+
+| Rule | Reason |
+|---|---|
+| A name is `[a-z][a-z0-9_]{0,23}`, not `default`, not a key of `[storage]` or `[storage_routes]`, not a Rust keyword | it is a TOML table, a flag segment, a Rust field and a URL segment |
+| One binding per name | the name addresses the store |
+| `storage-db` backs one binding at most, default or named | its tables have fixed names |
+
+What the project gets:
+
+- `src/plugins/storage/stores.rs`: `NamedStores` on the context and in the
+  services, one field per name, each a `NamedStore { store, tokens }`. A
+  handler reads `ctx.provided::<NamedStores, _>()?.public.store`. `FileStore`
+  does not change.
+- Settings in `[storage.<name>]`, flags `--storage.<name>.<key>`. A named
+  disk store defaults to `root = "var/uploads-<name>"`. A named cloud store
+  has no default bucket: with none, the start stops with a `help:` line.
+  `secret` and `token_ttl` stay in `[storage]`.
+- A token key per store: the one secret, with the store name in the domain
+  separator. A token of one store opens nothing in another. The default
+  store's key does not change.
+- Two stores at one location stop the start: the same directory, or the
+  same endpoint, bucket and prefix.
+- `check --deploy` runs `deploy/storage-local` per store, and names a named
+  store on a disk.
 
 ## Read more
 

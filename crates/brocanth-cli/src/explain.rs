@@ -49,8 +49,14 @@ fn kind_name(kind: Kind) -> &'static str {
 /// What `brocanth.toml` records in `[bindings]`: Kind, provider, why.
 pub type Recorded = Vec<(String, String, String)>;
 
-/// Why `key` is in a project of `picks`, given the bindings.
-fn why_in(key: &str, picks: &[&'static str], bindings: &Recorded) -> Vec<String> {
+/// Why `key` is in a project of `picks`, given the bindings and the named
+/// bindings.
+fn why_in(
+    key: &str,
+    picks: &[&'static str],
+    bindings: &Recorded,
+    named: &[crate::resolve::NamedBinding],
+) -> Vec<String> {
     let m = about(key);
     let mut out = Vec::new();
     if let Some(parent) = m.parent.filter(|p| picks.contains(p)) {
@@ -65,6 +71,9 @@ fn why_in(key: &str, picks: &[&'static str], bindings: &Recorded) -> Vec<String>
         if provider == key && why != "chosen" {
             out.push(format!("provides {kind}: {why}"));
         }
+    }
+    for n in named.iter().filter(|n| n.provider == key) {
+        out.push(format!("provides {}[{}]: named", n.kind, n.name));
     }
     if out.is_empty() {
         out.push("chosen".to_string());
@@ -91,6 +100,10 @@ pub struct Explained {
     /// Each Kind of cardinality one that a module provides, requires or
     /// uses, in the order the modules name them.
     pub kinds: Vec<KindBinding>,
+    /// The named bindings of `[named_bindings]`, in order. Left out of the
+    /// JSON when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named: Vec<NamedFact>,
     /// Whether `[bindings]` in `brocanth.toml` agrees with the modules.
     pub bindings: BindingsRecord,
     /// What each module adds to a collection, sorted by Kind.
@@ -124,6 +137,14 @@ pub struct KindBinding {
     pub why: Option<String>,
     /// The modules that require or use it.
     pub read_by: Vec<String>,
+}
+
+/// A named binding: `ObjectStore[public] <- storage-s3`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedFact {
+    pub kind: String,
+    pub name: String,
+    pub provider: String,
 }
 
 /// `[bindings]` in `brocanth.toml`, against the modules.
@@ -244,12 +265,26 @@ pub struct OptionFact {
 /// What `brocanth explain` reports for a project of `picks`. `recorded` is
 /// `[bindings]` from `brocanth.toml`, `None` when the file has no table.
 /// `settings` is every setting the generator declares for these picks.
+#[cfg(test)]
 pub fn facts(
     name: &str,
     picks: &[&'static str],
     recorded: Option<&Recorded>,
     settings: &[(String, Declared)],
 ) -> Explained {
+    facts_named(name, picks, &[], recorded, settings)
+}
+
+/// [`facts`] for a project with named bindings: their providers are among
+/// the modules, and each binding is a line under the Kinds.
+pub fn facts_named(
+    name: &str,
+    picks: &[&'static str],
+    named: &[crate::resolve::NamedBinding],
+    recorded: Option<&Recorded>,
+    settings: &[(String, Declared)],
+) -> Explained {
+    let enabled = crate::resolve::enabled(picks, named);
     let computed: Recorded = crate::resolve::bindings(picks)
         .into_iter()
         .map(|(kind, provider)| {
@@ -263,16 +298,16 @@ pub fn facts(
     let bindings = recorded.unwrap_or(&computed);
     let ident = name.replace('-', "_").to_uppercase();
 
-    let modules = picks
+    let modules = enabled
         .iter()
         .map(|key| ModuleIn {
             key: key.to_string(),
-            why: why_in(key, picks, bindings),
+            why: why_in(key, picks, bindings, named),
         })
         .collect();
 
     // Each Kind of cardinality one that a module binds, requires or uses.
-    let mut named: Vec<brocanth_scaffold::KindRef> = Vec::new();
+    let mut seen_kinds: Vec<brocanth_scaffold::KindRef> = Vec::new();
     for key in picks {
         let m = about(key);
         let refs = m
@@ -282,12 +317,14 @@ pub fn facts(
             .chain(m.requires.iter().map(|r| r.kind))
             .chain(m.uses.iter().map(|(k, _)| *k));
         for k in refs {
-            if k.cardinality == Cardinality::One && !named.iter().any(|seen| seen.name == k.name) {
-                named.push(k);
+            if k.cardinality == Cardinality::One
+                && !seen_kinds.iter().any(|seen| seen.name == k.name)
+            {
+                seen_kinds.push(k);
             }
         }
     }
-    let kinds = named
+    let kinds = seen_kinds
         .iter()
         .map(|k| {
             let read_by = picks
@@ -325,7 +362,7 @@ pub fn facts(
 
     let collectors = crate::resolve::collectors(picks);
     let mut contributions = Vec::new();
-    for key in picks {
+    for key in &enabled {
         let m = about(key);
         for (k, c, on) in &m.contributions {
             let (collected_by, toggle) = match (
@@ -364,7 +401,7 @@ pub fn facts(
     contributions.sort_by(|a, b| a.kind().cmp(b.kind()));
 
     let mut hooks = Vec::new();
-    for key in picks {
+    for key in &enabled {
         for (hook, what, h) in &about(key).hooks {
             hooks.push(HookFact {
                 module: key.to_string(),
@@ -424,7 +461,7 @@ pub fn facts(
         .collect();
 
     let mut options = Vec::new();
-    for key in picks {
+    for key in &enabled {
         for o in &about(key).options {
             options.push(OptionFact {
                 module: key.to_string(),
@@ -440,6 +477,14 @@ pub fn facts(
         project: name.to_string(),
         modules,
         kinds,
+        named: named
+            .iter()
+            .map(|n| NamedFact {
+                kind: n.kind.to_string(),
+                name: n.name.clone(),
+                provider: n.provider.to_string(),
+            })
+            .collect(),
         bindings: BindingsRecord {
             recorded: recorded.is_some(),
             unrecorded,
@@ -487,9 +532,15 @@ pub fn text(e: &Explained) -> String {
         } else {
             format!("; read by {}", k.read_by.join(", "))
         };
+        // Beside named bindings, the one in `[bindings]` is the default.
+        let default = if e.named.iter().any(|n| n.kind == k.kind) {
+            "default; "
+        } else {
+            ""
+        };
         match &k.provider {
             Some(provider) => lines.push(format!(
-                "{:14} <- {provider} ({}){read_by}",
+                "{:14} <- {provider} ({default}{}){read_by}",
                 k.kind,
                 k.why.as_deref().unwrap_or_default()
             )),
@@ -497,6 +548,13 @@ pub fn text(e: &Explained) -> String {
                 "{:14} <- none: each reader writes its code without {}{read_by}",
                 k.kind, k.gist
             )),
+        }
+        for n in e.named.iter().filter(|n| n.kind == k.kind) {
+            lines.push(format!(
+                "{:14} <- {} (named)",
+                format!("{}[{}]", n.kind, n.name),
+                n.provider
+            ));
         }
     }
     if e.bindings.recorded {

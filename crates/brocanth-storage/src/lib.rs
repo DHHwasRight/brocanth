@@ -114,6 +114,7 @@ pub mod fs_bucket;
 pub mod key;
 pub mod local;
 pub mod meta;
+pub mod named;
 pub mod objects;
 pub mod spec;
 pub mod storage;
@@ -156,6 +157,7 @@ pub use fs_bucket::FsBucket;
 pub use key::{HashKey, ObjectKey, KEY_BYTES, KEY_HEX_LEN};
 pub use local::LocalDisk;
 pub use meta::{ContentType, Filename, ObjectInfo, ObjectMeta, MAX_FILENAME_LEN};
+pub use named::{Location, StoreName};
 pub use objects::ObjectStorage;
 pub use spec::{CropAnchor, VariantFormat, VariantMode, VariantSpec, MAX_VARIANT_DIM};
 

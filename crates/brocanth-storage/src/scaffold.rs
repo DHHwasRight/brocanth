@@ -49,6 +49,8 @@ use brocanth_scaffold::{
     Opt, PgPool, Project, Scaffold, Setting, Slot,
 };
 
+mod named;
+
 /// The scaffold's development secret. `brocanth check --deploy` finds it by
 /// its first words, and the generated plugin refuses it outside
 /// development.
@@ -69,10 +71,15 @@ impl Backend {
     /// (`docs/module-capabilities.md` §9). An unresolved selection, which
     /// only a test builds, writes the disk store.
     fn of(project: &Project) -> Self {
-        match project.provider::<ObjectStore>() {
-            Some("storage-db") => Self::Db,
-            Some("storage-s3") => Self::S3,
-            Some("storage-gcs") => Self::Gcs,
+        Self::from_key(project.provider::<ObjectStore>().unwrap_or("storage-fs"))
+    }
+
+    /// The backend of the provider `key`: a named binding's.
+    fn from_key(key: &str) -> Self {
+        match key {
+            "storage-db" => Self::Db,
+            "storage-s3" => Self::S3,
+            "storage-gcs" => Self::Gcs,
             _ => Self::Fs,
         }
     }
@@ -113,10 +120,20 @@ impl Module for FileStorage {
 
     fn contribute(&self, project: &Project, s: &mut Scaffold) {
         let backend = Backend::of(project);
+        // The named stores (`docs/object-storage.md` §9.1). None: every
+        // line below is what a one-store project always had.
+        let stores = named::stores(project, Some(s));
+        let plugin = named::plugin_rs(plugin_rs(project, backend), backend, &stores);
         s.file(
             "src/plugins/storage/mod.rs",
-            redact_secrets(&plugin_rs(project, backend), &settings(backend)),
+            redact_secrets(&plugin, &settings(backend)),
         );
+        if !stores.is_empty() {
+            s.file(
+                "src/plugins/storage/stores.rs",
+                named::stores_rs(project, backend, &stores),
+            );
+        }
         s.at(Slot::PluginsMod).line("pub mod storage;");
         // What makes the store a thing the project reads rather than a
         // field nothing touches. A generated application that warns on its
@@ -129,8 +146,11 @@ impl Module for FileStorage {
             \x20   crate::plugins::say!(info, \"storage: ready, download links last {ttl}s\"; ttl);"
                 .to_string(),
         );
-        configurable(s, project, "storage", "Files", settings(backend));
-        s.at(Slot::AgentsSections).block(agents(backend));
+        let mut declared = settings(backend);
+        declared.extend(named::storage_settings(&stores));
+        configurable(s, project, "storage", "Files", declared);
+        s.at(Slot::AgentsSections)
+            .block(agents(backend) + &named::agents(&stores));
         // No `.gitignore` line: `LocalDisk::open` writes one holding `*` into
         // the root, so the rule moves when `root` does.
     }
@@ -997,9 +1017,14 @@ impl Module for StorageRoutes {
         // and `uses::<ObjectStore>` would name the default store in the
         // `adapted_to` of every project with routes.
         let cloud = project.has("storage-s3") || project.has("storage-gcs");
+        let stores = named::stores(project, None);
         s.file(
             "src/plugins/storage_routes/mod.rs",
-            routes_rs(project, thumbnails, image, cloud),
+            named::routes_rs(
+                routes_rs(project, thumbnails, image, cloud),
+                project,
+                &stores,
+            ),
         );
         s.at(Slot::PluginsMod).line("pub mod storage_routes;");
         configurable_hooking(
@@ -1013,7 +1038,11 @@ impl Module for StorageRoutes {
                 prelude: ROUTES_COMMENT.to_string(),
                 adjust: None,
             },
-            routes_settings(thumbnails, image, cloud),
+            {
+                let mut declared = routes_settings(thumbnails, image, cloud);
+                declared.extend(named::routes_settings(&stores));
+                declared
+            },
         );
         let mut agents = ROUTES_AGENTS.to_string();
         if cloud {

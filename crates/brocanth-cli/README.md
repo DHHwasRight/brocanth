@@ -249,6 +249,7 @@ bumps `version`; a new field does not. Version 1:
 | `project` | the project name in `brocanth.toml` |
 | `modules[]` | `key`, and `why[]`: `chosen`, `part of <parent>`, `<module> needs it: <why>`, `provides <Kind>: <why>` |
 | `kinds[]` | each Kind of cardinality one a module provides, requires or uses: `kind`, `gist`, `provider` and `why` (both `null` when no module is bound), `read_by[]` |
+| `named[]` | each named binding of `[named_bindings]`: `kind`, `name`, `provider`. Left out when the project has none |
 | `bindings` | `recorded`: `brocanth.toml` has a `[bindings]` table (without one, `kinds` holds the computed bindings); `unrecorded[]`: `{kind, provider}` the modules bind and the table misses |
 | `contributions[]` | sorted by `kind`. `source: "contribution"`: `kind`, `module`, `name`, `what`, `collected_by` (`null`: no module collects it), `toggle` (`{group, default}` for `integrate.<group>`, `null` when a generator collects it). `source: "mount"`: `kind` (`Mount`), `module`, `option`, `default`, `role` |
 | `hooks[]` | `module`, `hook`, `phase` (`null`: none), `required`, `on` (on by default), `what` |

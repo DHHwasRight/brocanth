@@ -1231,6 +1231,8 @@ pub struct Project<'a> {
     mounts: &'a [(&'a str, &'a str, MountRole)],
     /// The provider bound to each Kind, as `(Kind name, module key)`.
     bindings: &'a [(&'a str, &'a str)],
+    /// The named bindings, as `(Kind name, name, module key)`.
+    named: &'a [(&'a str, &'a str, &'a str)],
     /// What each module exports, as `(module key, export)`.
     exports: &'a [(&'a str, Export)],
     /// Every export asked for through [`Project::export`], as `(module
@@ -1258,6 +1260,7 @@ impl<'a> Project<'a> {
             known,
             mounts: &[],
             bindings: &[],
+            named: &[],
             exports: &[],
             asked_exports: std::cell::RefCell::new(Vec::new()),
             asked_kinds: std::cell::RefCell::new(Vec::new()),
@@ -1279,6 +1282,14 @@ impl<'a> Project<'a> {
     /// many. A view without them binds nothing.
     pub fn with_bindings(mut self, bindings: &'a [(&'a str, &'a str)]) -> Self {
         self.bindings = bindings;
+        self
+    }
+
+    /// Give the view the named bindings the CLI recorded, as `(Kind name,
+    /// name, module key)`: `("ObjectStore", "public", "storage-s3")`. A
+    /// view without them has none, so a one-store project reads as before.
+    pub fn with_named(mut self, named: &'a [(&'a str, &'a str, &'a str)]) -> Self {
+        self.named = named;
         self
     }
 
@@ -1327,6 +1338,23 @@ impl<'a> Project<'a> {
             .iter()
             .find(|(kind, _)| *kind == K::NAME)
             .map(|(_, key)| *key)
+    }
+
+    /// The named bindings of the Kind `K`, as `(name, module key)`, in the
+    /// order `brocanth.toml` records them: `[("public", "storage-s3")]`.
+    /// Empty for a Kind that takes no names ([`kind::Kind::NAMED`]) and for
+    /// a project with one store.
+    ///
+    /// Not recorded as a question about a Kind: the answer is the list
+    /// `[named_bindings]` in `brocanth.toml` holds, and a reader of it, such
+    /// as `storage-routes`, writes one route per name and no provider's
+    /// code.
+    pub fn named<K: kind::Kind>(&self) -> Vec<(&'a str, &'a str)> {
+        self.named
+            .iter()
+            .filter(|(kind, _, _)| *kind == K::NAME)
+            .map(|(_, name, key)| (*name, *key))
+            .collect()
     }
 
     /// The module that collects the contributions to the Kind `K` in this
