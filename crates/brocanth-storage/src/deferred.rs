@@ -117,6 +117,16 @@ impl Storage for Deferred {
     ) -> Result<Option<String>, StorageError> {
         self.store()?.signed_url(key, ttl).await
     }
+
+    /// The store behind, once set; before, `false`. A deferred store holds
+    /// Postgres in a generated project, which cannot sign.
+    fn can_sign(&self) -> bool {
+        self.store().is_ok_and(|store| store.can_sign())
+    }
+
+    async fn signing_origin(&self) -> Result<Option<String>, StorageError> {
+        self.store()?.signing_origin().await
+    }
 }
 
 #[cfg(test)]

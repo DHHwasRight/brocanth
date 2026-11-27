@@ -14,10 +14,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::bucket::{Body, Bucket, ByteRange, ByteStream, ObjectPath, PutOptions, SignedMethod};
+use crate::bucket::{
+    Body, Bucket, ByteRange, ByteStream, ObjectPath, PutOptions, SignedGet, SignedMethod,
+};
 use crate::error::StorageError;
 use crate::key::ObjectKey;
-use crate::meta::ObjectInfo;
+use crate::meta::{ContentType, ObjectInfo};
 use crate::spec::VariantSpec;
 use crate::storage::Storage;
 
@@ -32,6 +34,34 @@ pub trait Fetch: Sync {
         url: &'a str,
         body: Vec<u8>,
     ) -> crate::conformance::Fut<'a, Result<(), String>>;
+    /// `method url`, answering the status, the headers and the body
+    /// whatever the status.
+    fn send<'a>(
+        &'a self,
+        method: &'a str,
+        url: &'a str,
+    ) -> crate::conformance::Fut<'a, Result<Fetched, String>>;
+}
+
+/// What [`Fetch::send`] answers.
+#[derive(Debug)]
+pub struct Fetched {
+    /// The status code.
+    pub status: u16,
+    /// The headers, names lowercased.
+    pub headers: Vec<(String, String)>,
+    /// The body.
+    pub body: Vec<u8>,
+}
+
+impl Fetched {
+    /// The first value of a header.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// A boxed future, for [`Fetch`].
@@ -54,6 +84,77 @@ pub struct Can<'a> {
     /// GCS emulator ignores `ifGenerationMatch`, so its run says `false`
     /// and the suite checks only that the put succeeds on a free path.
     pub create_only: bool,
+    /// The server checks a signed URL: its signature, its expiry and its
+    /// method. MinIO does; the GCS emulator checks none of them, so its run
+    /// says `false` and the suite reads the URL instead.
+    pub verifies: bool,
+    /// The server keeps a stored `Content-Disposition` and answers it on a
+    /// `head`. S3 does, and real GCS; the emulator drops it from an
+    /// XML-API put, and a disk keeps none.
+    pub disposition: bool,
+}
+
+/// The query of a URL as decoded pairs.
+fn query_pairs(url: &str) -> Vec<(String, String)> {
+    let query = url.split_once('?').map_or("", |(_, q)| q);
+    let decode = |s: &str| {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => out.push(b' '),
+                b'%' if i + 2 < bytes.len() => {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("zz");
+                    match u8::from_str_radix(hex, 16) {
+                        Ok(b) => {
+                            out.push(b);
+                            i += 2;
+                        }
+                        Err(_) => out.push(b'%'),
+                    }
+                }
+                b => out.push(b),
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(k), decode(v))
+        })
+        .collect()
+}
+
+/// The decoded value of one query parameter, by name, any case.
+fn query_value(url: &str, name: &str) -> Option<String> {
+    query_pairs(url)
+        .into_iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v)
+}
+
+/// The URL with one query parameter taken out: what a bearer who wants the
+/// object rendered would try.
+fn without_param(url: &str, name: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            !pair
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .eq_ignore_ascii_case(name)
+        })
+        .collect();
+    format!("{base}?{}", kept.join("&"))
 }
 
 /// A PNG header and some bytes no other run stores.
@@ -203,24 +304,111 @@ pub async fn storage(store: Arc<dyn Storage>, can: Can<'_>) {
         }
     }
 
-    // Signed URLs.
+    // Signed URLs carry the download rule (D29): a non-image as an
+    // attachment of type `octet-stream`, a sniffed image inline as its type.
+    assert!(!can.signs || store.can_sign());
     let url = store
         .signed_url(&random, Duration::from_secs(60))
         .await
         .expect("signed url");
+    let png = unique_png("signed");
+    let png_key = store
+        .put(&png, &ObjectInfo::new().with_filename("p.png"))
+        .await
+        .expect("put png");
+    let png_url = store
+        .signed_url(&png_key, Duration::from_secs(60))
+        .await
+        .expect("signed url of a png");
     if can.signs {
         let url = url.expect("this backend signs");
         assert!(url.starts_with("http"), "a signed URL is a URL");
+        assert_eq!(
+            query_value(&url, "response-content-type").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            query_value(&url, "response-content-disposition").as_deref(),
+            Some("attachment; filename=\"download\"")
+        );
+        let png_url = png_url.expect("this backend signs");
+        assert_eq!(
+            query_value(&png_url, "response-content-type").as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(query_value(&png_url, "response-content-disposition"), None);
         if let Some(fetch) = can.fetch {
             assert_eq!(
                 fetch.get(&url).await.expect("fetch"),
                 b"at a random address"
             );
+            if can.verifies {
+                let got = fetch.send("GET", &url).await.expect("fetch");
+                assert_eq!(got.status, 200);
+                assert_eq!(got.header("content-type"), Some("application/octet-stream"));
+                assert_eq!(
+                    got.header("content-disposition"),
+                    Some("attachment; filename=\"download\"")
+                );
+                let got = fetch.send("GET", &png_url).await.expect("fetch");
+                assert_eq!(got.status, 200);
+                assert_eq!(got.header("content-type"), Some("image/png"));
+                assert_eq!(got.body, png);
+            }
         }
+        assert!(matches!(
+            store.signed_url(&missing, Duration::from_secs(60)).await,
+            Err(StorageError::NotFound)
+        ));
+        let origin = store
+            .signing_origin()
+            .await
+            .expect("signs a probe")
+            .expect("an origin");
+        assert!(url.starts_with(&origin), "{url} is not under {origin}");
     } else {
         assert_eq!(url, None);
+        assert_eq!(png_url, None);
+        assert_eq!(store.signing_origin().await.expect("answers"), None);
     }
+    store.delete(&png_key).await.unwrap();
     store.delete(&random).await.unwrap();
+}
+
+/// What a cloud put stores beside the bytes (D31): a non-image carries
+/// `Content-Disposition: attachment`, a sniffed image none. Read back with
+/// the bucket's `head`.
+#[cfg(any(feature = "s3", feature = "gcs"))]
+pub async fn stored_disposition(store: &crate::objects::ObjectStorage) {
+    let text = format!("<html>{}</html>", ObjectKey::random().unwrap()).into_bytes();
+    let k = store
+        .put(
+            &text,
+            &ObjectInfo::new()
+                .with_filename("page.html")
+                .with_declared_type("text/html"),
+        )
+        .await
+        .expect("put html");
+    let head = store
+        .bucket()
+        .head(&crate::objects::object_path(&k))
+        .await
+        .expect("head");
+    assert_eq!(
+        head.content_disposition.as_deref(),
+        Some("attachment; filename=\"page.html\"")
+    );
+    let png = unique_png("disposition");
+    let p = store.put(&png, &ObjectInfo::new()).await.expect("put png");
+    let head = store
+        .bucket()
+        .head(&crate::objects::object_path(&p))
+        .await
+        .expect("head");
+    assert_eq!(head.content_disposition, None);
+    store.delete(&k).await.unwrap();
+    store.delete(&p).await.unwrap();
 }
 
 fn path(base: &str, rest: &str) -> ObjectPath {
@@ -430,18 +618,48 @@ pub async fn bucket(b: Arc<dyn Bucket>, base: &str, can: Can<'_>) {
     assert_eq!(b.list(&format!("{base}/l/a/")).await.unwrap().len(), 2);
 
     // Signed URLs, both ways.
+    assert!(!can.signs || b.can_sign());
     let ttl = Duration::from_secs(120);
+    let none = SignedGet::none();
     let get = b
-        .signed_url(SignedMethod::Get, &p, ttl)
+        .signed_url(SignedMethod::Get, &p, ttl, &none)
         .await
         .expect("sign");
     let put_path = path(base, "signed/put");
     let put = b
-        .signed_url(SignedMethod::Put, &put_path, ttl)
+        .signed_url(SignedMethod::Put, &put_path, ttl, &none)
         .await
         .expect("sign");
+    // A GET with the download rule's overrides, inside the signature.
+    let overrides = SignedGet::for_object(&ContentType::octet_stream(), None);
+    let with = b
+        .signed_url(SignedMethod::Get, &p, ttl, &overrides)
+        .await
+        .expect("sign with overrides");
     if can.signs {
         let (get, put) = (get.expect("signs a get"), put.expect("signs a put"));
+        let with = with.expect("signs a get with overrides");
+        assert_eq!(
+            query_value(&with, "response-content-type").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            query_value(&with, "response-content-disposition").as_deref(),
+            Some("attachment; filename=\"download\"")
+        );
+        // The signature covers them: S3 and GCS list the query in the
+        // canonical request, and name the signed headers in the URL.
+        assert!(
+            query_value(&with, "X-Amz-SignedHeaders").is_some()
+                || query_value(&with, "X-Goog-SignedHeaders").is_some(),
+            "{with}"
+        );
+        assert!(
+            b.signed_url(SignedMethod::Put, &put_path, ttl, &overrides)
+                .await
+                .is_err(),
+            "a PUT takes no overrides"
+        );
         if let Some(fetch) = can.fetch {
             assert_eq!(fetch.get(&get).await.expect("signed get"), b"replaced");
             fetch
@@ -452,9 +670,66 @@ pub async fn bucket(b: Arc<dyn Bucket>, base: &str, can: Can<'_>) {
                 b.get(&put_path, None).await.unwrap().bytes().await.unwrap(),
                 b"through a signed url"
             );
+            let got = fetch.send("GET", &with).await.expect("signed get");
+            assert_eq!(got.status, 200, "{got:?}");
+            assert_eq!(got.body, b"replaced");
+            if can.verifies {
+                // Both overrides come back as response headers.
+                assert_eq!(got.header("content-type"), Some("application/octet-stream"));
+                assert_eq!(
+                    got.header("content-disposition"),
+                    Some("attachment; filename=\"download\"")
+                );
+                // The bearer cannot drop the attachment: the signature then
+                // fails.
+                let tampered = without_param(&with, "response-content-disposition");
+                assert_ne!(tampered, with);
+                let got = fetch.send("GET", &tampered).await.expect("tampered");
+                assert_eq!(got.status, 403, "a tampered URL must be refused");
+                // A URL signed for GET refuses HEAD: the reason the route
+                // answers HEAD itself (D30).
+                let got = fetch.send("HEAD", &with).await.expect("head");
+                assert_eq!(got.status, 403, "a GET URL must refuse HEAD");
+                // An expired URL is refused.
+                let short = b
+                    .signed_url(SignedMethod::Get, &p, Duration::from_secs(1), &overrides)
+                    .await
+                    .expect("sign")
+                    .expect("a url");
+                std::thread::sleep(Duration::from_secs(3));
+                let got = fetch.send("GET", &short).await.expect("expired");
+                assert_eq!(got.status, 403, "an expired URL must be refused");
+            } else {
+                // The emulator may not echo the overrides; when it does,
+                // they are right.
+                if let Some(ct) = got.header("content-type") {
+                    if got.header("content-disposition").is_some() {
+                        assert_eq!(ct, "application/octet-stream");
+                    }
+                }
+                if let Some(cd) = got.header("content-disposition") {
+                    assert_eq!(cd, "attachment; filename=\"download\"");
+                }
+            }
         }
     } else {
-        assert_eq!((get, put), (None, None));
+        assert_eq!((get, put, with), (None, None, None));
+    }
+
+    // A stored disposition comes back on a cloud head; a disk keeps none.
+    let d = path(base, "one/disposed");
+    b.put(
+        &d,
+        b"x".as_slice().into(),
+        PutOptions::new().with_content_disposition("attachment; filename=\"d.bin\""),
+    )
+    .await
+    .expect("put with a disposition");
+    let stored = b.head(&d).await.expect("head").content_disposition;
+    if can.disposition {
+        assert_eq!(stored.as_deref(), Some("attachment; filename=\"d.bin\""));
+    } else if !can.signs {
+        assert_eq!(stored, None, "a disk keeps no disposition");
     }
 
     // Clean the run's prefix.

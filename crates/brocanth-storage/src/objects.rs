@@ -23,6 +23,12 @@
 //!   the Postgres foreign key do.
 //! * **A size limit**, [`DEFAULT_MAX_OBJECT_BYTES`] unless set, checked
 //!   before a byte leaves the process.
+//! * **A non-image is an attachment wherever it is read.** A put of
+//!   anything that is not a sniffed image stores `Content-Disposition:
+//!   attachment` on the object, and every signed URL carries the rule of
+//!   [`SignedGet::for_object`] (`docs/object-storage.md` D29, D31). Objects
+//!   stored before keep no stored disposition; the signed override still
+//!   covers them.
 //!
 //! The filename is stored as the metadata entry `filename`. On a disk that
 //! is the `filename:` line `LocalDisk` writes, so the two read each other's
@@ -33,10 +39,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::bucket::{Bucket, ByteRange, ObjectPath, PutOptions, SignedMethod};
+use crate::bucket::{Bucket, ByteRange, ObjectPath, PutOptions, SignedGet, SignedMethod};
 use crate::error::StorageError;
 use crate::key::{HashKey, ObjectKey};
-use crate::meta::{ContentType, Filename, ObjectInfo, ObjectMeta};
+use crate::meta::{attachment, ContentType, Filename, ObjectInfo, ObjectMeta};
 use crate::spec::VariantSpec;
 use crate::storage::Storage;
 
@@ -170,6 +176,11 @@ impl Storage for ObjectStorage {
         if let Some(name) = &about.filename {
             options = options.with_metadata(FILENAME, name.as_str());
         }
+        // D31: any URL that reaches the object, signed with overrides or
+        // not, saves it rather than renders it.
+        if !content_type.is_safe_to_inline() {
+            options = options.with_content_disposition(attachment(about.filename.as_ref()));
+        }
         match self.bucket.put(&path, content.into(), options).await {
             Ok(_) | Err(StorageError::Exists) => Ok(()),
             Err(e) => Err(e),
@@ -266,8 +277,72 @@ impl Storage for ObjectStorage {
         key: &ObjectKey,
         ttl: Duration,
     ) -> Result<Option<String>, StorageError> {
+        if !self.bucket.can_sign() {
+            return Ok(None);
+        }
+        // The rule needs the type and the name: one `head`. The type is
+        // the one `put` sniffed and stored.
+        let meta = self.meta(key).await?;
+        let overrides = SignedGet::for_object(&meta.content_type, meta.filename.as_ref());
         self.bucket
-            .signed_url(SignedMethod::Get, &object_path(key), ttl)
+            .signed_url(SignedMethod::Get, &object_path(key), ttl, &overrides)
             .await
+    }
+
+    fn can_sign(&self) -> bool {
+        self.bucket.can_sign()
+    }
+
+    async fn signing_origin(&self) -> Result<Option<String>, StorageError> {
+        // An address nothing is stored at: signing needs no object. The
+        // attachment overrides go in, so a signer that cannot sign them
+        // fails here and not at the first download.
+        let probe = object_path(&ObjectKey::of(b"brocanth.signing-probe"));
+        let overrides = SignedGet::for_object(&ContentType::octet_stream(), None);
+        let url = self
+            .bucket
+            .signed_url(
+                SignedMethod::Get,
+                &probe,
+                Duration::from_secs(60),
+                &overrides,
+            )
+            .await?;
+        Ok(url.as_deref().and_then(origin_of))
+    }
+}
+
+/// `scheme://host[:port]` of a URL, or `None` when it is not one.
+pub(crate) fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // A signed URL holds no user, but an origin never does.
+    let host = authority.rsplit('@').next()?;
+    (!scheme.is_empty() && !host.is_empty()).then(|| {
+        format!(
+            "{}://{}",
+            scheme.to_ascii_lowercase(),
+            host.to_ascii_lowercase()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_of;
+
+    #[test]
+    fn the_origin_is_the_scheme_and_the_authority() {
+        assert_eq!(
+            origin_of("https://b.s3.eu-west-1.amazonaws.com/objects/ab?X-Amz-Signature=1")
+                .as_deref(),
+            Some("https://b.s3.eu-west-1.amazonaws.com")
+        );
+        assert_eq!(
+            origin_of("http://LOCALHOST:9000/bucket/objects/ab").as_deref(),
+            Some("http://localhost:9000")
+        );
+        assert_eq!(origin_of("not a url"), None);
+        assert_eq!(origin_of("https:///path"), None);
     }
 }

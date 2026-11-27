@@ -32,6 +32,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 
 use crate::error::StorageError;
+use crate::meta::{attachment, ContentType, Filename};
 
 /// The longest [`ObjectPath`], in bytes. S3 and GCS take 1024.
 pub const MAX_PATH_LEN: usize = 1024;
@@ -224,6 +225,10 @@ pub struct PutOptions {
     /// The media type to store. A bucket stores what it is given: sniffing
     /// is [`ObjectStorage`](crate::ObjectStorage)'s job, not the backend's.
     pub content_type: Option<String>,
+    /// The `Content-Disposition` to store, which S3 and GCS send with every
+    /// read of the object, a signed URL's included. A disk serves nothing
+    /// by URL, so [`FsBucket`](crate::FsBucket) does not keep it.
+    pub content_disposition: Option<String>,
     /// User metadata. Keys are `a-z 0-9 -`; values are text with no control
     /// character. Each backend encodes them as its headers need.
     pub metadata: BTreeMap<String, String>,
@@ -250,6 +255,13 @@ impl PutOptions {
     #[must_use]
     pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
         self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// With this `Content-Disposition`.
+    #[must_use]
+    pub fn with_content_disposition(mut self, disposition: impl Into<String>) -> Self {
+        self.content_disposition = Some(disposition.into());
         self
     }
 
@@ -307,6 +319,14 @@ impl PutOptions {
                 ));
             }
         }
+        if let Some(cd) = &self.content_disposition {
+            if cd.chars().any(|c| c.is_control() || !c.is_ascii()) {
+                return Err(StorageError::backend(
+                    "the content disposition holds a character a header cannot carry\n\
+                     help: build it with `brocanth_storage::meta::attachment`",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -320,6 +340,9 @@ pub struct ObjectHead {
     pub size: u64,
     /// The media type it was stored with, if any.
     pub content_type: Option<String>,
+    /// The `Content-Disposition` it was stored with, if the backend keeps
+    /// one: S3 and GCS do, a disk does not.
+    pub content_disposition: Option<String>,
     /// The user metadata it was stored with.
     pub metadata: BTreeMap<String, String>,
 }
@@ -376,6 +399,63 @@ pub enum SignedMethod {
     Get,
     /// Store a body at the path.
     Put,
+}
+
+/// The response headers a signed `GET` makes the bucket send, inside the
+/// signature: `response-content-type` and `response-content-disposition`.
+///
+/// The bearer of the URL cannot remove them: the signature then fails. An
+/// empty one signs a plain URL. [`SignedGet::for_object`] is the rule a
+/// download follows (`docs/object-storage.md` D29).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct SignedGet {
+    /// The `Content-Type` the bucket answers with.
+    pub content_type: Option<String>,
+    /// The `Content-Disposition` the bucket answers with.
+    pub content_disposition: Option<String>,
+}
+
+impl SignedGet {
+    /// No override: the bucket answers with what it stored.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The rule for a download (D29). A sniffed PNG, JPEG, GIF or WebP goes
+    /// inline, as its type. Every other object goes as an attachment of
+    /// type `application/octet-stream`, so a browser saves it and renders
+    /// nothing: not HTML, not SVG, not a PDF with script.
+    pub fn for_object(content_type: &ContentType, filename: Option<&Filename>) -> Self {
+        if content_type.is_safe_to_inline() {
+            Self {
+                content_type: Some(content_type.essence().to_string()),
+                content_disposition: None,
+            }
+        } else {
+            Self {
+                content_type: Some(ContentType::octet_stream().as_str().to_string()),
+                content_disposition: Some(attachment(filename)),
+            }
+        }
+    }
+
+    /// Whether it overrides nothing.
+    pub fn is_empty(&self) -> bool {
+        self.content_type.is_none() && self.content_disposition.is_none()
+    }
+
+    /// The query pairs S3 and the GCS XML API read: `response-content-type`
+    /// and `response-content-disposition`.
+    pub fn query(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(ct) = &self.content_type {
+            out.push(("response-content-type".to_string(), ct.clone()));
+        }
+        if let Some(cd) = &self.content_disposition {
+            out.push(("response-content-disposition".to_string(), cd.clone()));
+        }
+        out
+    }
 }
 
 /// The next chunk of a stream, with no combinator crate: `poll_next` under
@@ -455,14 +535,26 @@ pub trait Bucket: Send + Sync + 'static {
     /// A URL that allows `method` on `path` for `ttl`, with no other
     /// credential. `None` when this backend cannot sign: a disk cannot.
     ///
+    /// For a `GET`, `overrides` are signed into the URL, and the bucket
+    /// answers with them. A `PUT` takes none.
+    ///
     /// # Errors
-    /// [`StorageError::Backend`] when the backend can sign and failed to.
+    /// [`StorageError::Backend`] when the backend can sign and failed to,
+    /// or when a `PUT` is given overrides.
     async fn signed_url(
         &self,
         method: SignedMethod,
         path: &ObjectPath,
         ttl: Duration,
+        overrides: &SignedGet,
     ) -> Result<Option<String>, StorageError>;
+
+    /// Whether [`Bucket::signed_url`] answers a URL. Known when the bucket
+    /// is built, so a setting that needs one fails at start
+    /// (`docs/object-storage.md` D33). A disk cannot sign.
+    fn can_sign(&self) -> bool {
+        false
+    }
 
     /// The start-time check: the bucket exists and the credentials can
     /// read it. Cheap: one list of at most one object.
@@ -509,8 +601,13 @@ impl<T: Bucket + ?Sized> Bucket for std::sync::Arc<T> {
         method: SignedMethod,
         path: &ObjectPath,
         ttl: Duration,
+        overrides: &SignedGet,
     ) -> Result<Option<String>, StorageError> {
-        (**self).signed_url(method, path, ttl).await
+        (**self).signed_url(method, path, ttl, overrides).await
+    }
+
+    fn can_sign(&self) -> bool {
+        (**self).can_sign()
     }
 
     async fn probe(&self) -> Result<(), StorageError> {
@@ -568,6 +665,48 @@ mod tests {
     }
 
     #[test]
+    fn a_download_signs_an_image_inline_and_anything_else_as_an_attachment() {
+        let png = ContentType::parse("image/png").unwrap();
+        assert_eq!(
+            SignedGet::for_object(&png, None),
+            SignedGet {
+                content_type: Some("image/png".into()),
+                content_disposition: None,
+            }
+        );
+        let name = Filename::sanitise("résumé.html");
+        for declared in ["text/html", "image/svg+xml", "application/pdf"] {
+            let ct = ContentType::parse(declared).unwrap();
+            let rule = SignedGet::for_object(&ct, name.as_ref());
+            assert_eq!(
+                rule.content_type.as_deref(),
+                Some("application/octet-stream")
+            );
+            assert_eq!(
+                rule.content_disposition.as_deref(),
+                Some(
+                    "attachment; filename=\"r_sum_.html\"; filename*=UTF-8''r%C3%A9sum%C3%A9.html"
+                )
+            );
+        }
+        let pairs = SignedGet::for_object(&ContentType::octet_stream(), None).query();
+        assert_eq!(
+            pairs,
+            [
+                (
+                    "response-content-type".to_string(),
+                    "application/octet-stream".to_string()
+                ),
+                (
+                    "response-content-disposition".to_string(),
+                    "attachment; filename=\"download\"".to_string()
+                ),
+            ]
+        );
+        assert!(SignedGet::none().query().is_empty());
+    }
+
+    #[test]
     fn metadata_is_checked_before_any_backend_sees_it() {
         assert!(PutOptions::new()
             .with_metadata("filename", "ünïcode % ok.png")
@@ -587,6 +726,10 @@ mod tests {
             .is_err());
         assert!(PutOptions::new()
             .with_content_type("text/plain\r\nx: y")
+            .check()
+            .is_err());
+        assert!(PutOptions::new()
+            .with_content_disposition("attachment\r\nx: y")
             .check()
             .is_err());
     }

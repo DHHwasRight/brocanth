@@ -205,11 +205,18 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// The URL is a bearer credential, like a [`FileToken`]: mint it only
     /// after the policy allowed the read. It reaches the bucket directly, so
-    /// none of the headers the download route sets come with it.
+    /// the bucket answers it, not the download route. The rule of
+    /// [`SignedGet::for_object`] is signed into every URL: a sniffed image
+    /// comes back inline as its type, anything else as an attachment of
+    /// type `application/octet-stream` (`docs/object-storage.md` D29, D31).
+    /// `nosniff` and the sandbox policy cannot travel in a URL; §9.4 of that
+    /// document says why the rule covers them.
     ///
     /// [`FileToken`]: crate::FileToken
+    /// [`SignedGet::for_object`]: crate::SignedGet::for_object
     ///
     /// # Errors
+    /// [`StorageError::NotFound`] when nothing is stored there, and
     /// [`StorageError::Backend`] when the backend can sign and failed to.
     async fn signed_url(
         &self,
@@ -217,6 +224,28 @@ pub trait Storage: Send + Sync + 'static {
         ttl: Duration,
     ) -> Result<Option<String>, StorageError> {
         let _ = (key, ttl);
+        Ok(None)
+    }
+
+    /// Whether [`Storage::signed_url`] answers a URL, known without a
+    /// request. A setting that needs a signed URL reads it at start, so a
+    /// disk or Postgres store fails there and not at the first download
+    /// (`docs/object-storage.md` D33).
+    fn can_sign(&self) -> bool {
+        false
+    }
+
+    /// Signs one URL for an address nothing is stored at, and answers the
+    /// origin it points at: `https://bucket.s3.eu-west-1.amazonaws.com`.
+    /// `None` when this backend cannot sign.
+    ///
+    /// The start check of a redirecting download route calls it: a key
+    /// that cannot sign fails there, and the origin is what the
+    /// Content-Security-Policy `img-src` must allow (D34).
+    ///
+    /// # Errors
+    /// [`StorageError::Backend`] when the backend can sign and failed to.
+    async fn signing_origin(&self) -> Result<Option<String>, StorageError> {
         Ok(None)
     }
 }
@@ -279,5 +308,13 @@ impl<T: Storage + ?Sized> Storage for std::sync::Arc<T> {
         ttl: Duration,
     ) -> Result<Option<String>, StorageError> {
         (**self).signed_url(key, ttl).await
+    }
+
+    fn can_sign(&self) -> bool {
+        (**self).can_sign()
+    }
+
+    async fn signing_origin(&self) -> Result<Option<String>, StorageError> {
+        (**self).signing_origin().await
     }
 }

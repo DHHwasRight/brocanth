@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use object_store::path::Path as OsPath;
-use object_store::signer::Signer;
+use object_store::signer::{SignedUrlOptions, Signer};
 use object_store::{
     Attribute, AttributeValue, Attributes, GetOptions, GetRange, ObjectStore, ObjectStoreExt as _,
     PutMode, PutMultipartOptions, PutPayload, WriteMultipart,
@@ -57,7 +57,7 @@ use object_store::{
 
 use crate::bucket::{
     check_prefix, next, Body, Bucket, ByteRange, ByteStream, GetObject, Listed, ObjectHead,
-    ObjectPath, PutOptions, SignedMethod,
+    ObjectPath, PutOptions, SignedGet, SignedMethod,
 };
 use crate::error::StorageError;
 
@@ -396,9 +396,13 @@ impl CloudBucket {
     fn head_from(&self, path: &ObjectPath, size: u64, attributes: &Attributes) -> ObjectHead {
         let mut metadata = std::collections::BTreeMap::new();
         let mut content_type = None;
+        let mut content_disposition = None;
         for (key, value) in attributes {
             match key {
                 Attribute::ContentType => content_type = Some(value.as_ref().to_string()),
+                Attribute::ContentDisposition => {
+                    content_disposition = Some(value.as_ref().to_string());
+                }
                 Attribute::Metadata(name) => {
                     metadata.insert(name.to_ascii_lowercase(), unescape(value.as_ref()));
                 }
@@ -409,6 +413,7 @@ impl CloudBucket {
             path: path.clone(),
             size,
             content_type,
+            content_disposition,
             metadata,
         }
     }
@@ -417,6 +422,12 @@ impl CloudBucket {
         let mut attributes = Attributes::new();
         if let Some(ct) = &options.content_type {
             attributes.insert(Attribute::ContentType, AttributeValue::from(ct.clone()));
+        }
+        if let Some(cd) = &options.content_disposition {
+            attributes.insert(
+                Attribute::ContentDisposition,
+                AttributeValue::from(cd.clone()),
+            );
         }
         for (key, value) in &options.metadata {
             attributes.insert(
@@ -536,6 +547,7 @@ impl Bucket for CloudBucket {
             path: path.clone(),
             size,
             content_type: options.content_type.clone(),
+            content_disposition: options.content_disposition.clone(),
             metadata: options.metadata.clone(),
         };
         let mut stream = match body {
@@ -725,8 +737,9 @@ impl Bucket for CloudBucket {
         method: SignedMethod,
         path: &ObjectPath,
         ttl: Duration,
+        overrides: &SignedGet,
     ) -> Result<Option<String>, StorageError> {
-        if ttl > MAX_SIGNED_TTL || ttl.is_zero() {
+        if ttl > MAX_SIGNED_TTL || ttl < Duration::from_secs(1) {
             return Err(StorageError::backend(
                 "a signed URL must live between one second and seven days\n\
                  help: give a ttl inside that window",
@@ -735,11 +748,22 @@ impl Bucket for CloudBucket {
         let full = self.full(path);
         let method = match method {
             SignedMethod::Get => http::Method::GET,
-            SignedMethod::Put => http::Method::PUT,
+            SignedMethod::Put if overrides.is_empty() => http::Method::PUT,
+            SignedMethod::Put => {
+                return Err(StorageError::backend(
+                    "a signed PUT takes no response overrides\n\
+                     help: pass `SignedGet::none()` for a PUT",
+                ))
+            }
         };
+        // The overrides are query pairs inside the signature: S3 and GCS
+        // both append them before they compute it (`object_store` 0.14.2,
+        // `docs/object-storage.md` §9.2). A signer that cannot sign them
+        // answers an error, never a URL without them.
+        let options = SignedUrlOptions::new().with_query(overrides.query());
         let url = self
             .signer
-            .signed_url(method, &full, ttl)
+            .signed_url_opts(method, &full, ttl, &options)
             .await
             .map_err(|e| {
                 StorageError::backend(format!(
@@ -752,6 +776,10 @@ impl Bucket for CloudBucket {
                 ))
             })?;
         Ok(Some(url.to_string()))
+    }
+
+    fn can_sign(&self) -> bool {
+        true
     }
 
     async fn probe(&self) -> Result<(), StorageError> {

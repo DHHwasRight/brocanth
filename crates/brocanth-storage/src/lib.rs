@@ -148,7 +148,7 @@ mod tests;
 
 pub use bucket::{
     Body, Bucket, ByteRange, ByteStream, GetObject, Listed, ObjectHead, ObjectPath, PutOptions,
-    SignedMethod,
+    SignedGet, SignedMethod,
 };
 pub use deferred::Deferred;
 pub use error::StorageError;

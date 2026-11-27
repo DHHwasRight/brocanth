@@ -46,7 +46,9 @@ futures-core = "0.3"
 # `docs/object-storage.md` §4 has the comparison with the two vendor SDKs.
 # No default features: its `fs` backend would be a second disk store
 # beside `FsBucket`, without the `fsync`, the `0600` and the sidecar.
-object_store = { version = "0.14", default-features = false, optional = true }
+# 0.14.2 at least: `Signer::signed_url_opts` signs the response overrides a
+# redirected download carries (`docs/object-storage.md` §9.2, D35).
+object_store = { version = "0.14.2", default-features = false, optional = true }
 # The combinators a cloud backend needs to read a list and a body. Only with
 # `s3` or `gcs`: the disk code polls a stream by hand.
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }

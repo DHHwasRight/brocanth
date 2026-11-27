@@ -34,7 +34,7 @@ use bytes::Bytes;
 
 use crate::bucket::{
     check_prefix, next, once, Body, Bucket, ByteRange, GetObject, Listed, ObjectHead, ObjectPath,
-    PutOptions, SignedMethod,
+    PutOptions, SignedGet, SignedMethod,
 };
 use crate::error::StorageError;
 use crate::local::{offload, remove_if_present, restrict, restrict_file, temp_name};
@@ -107,6 +107,7 @@ impl FsBucket {
             path: path.clone(),
             size,
             content_type,
+            content_disposition: None,
             metadata,
         })
     }
@@ -331,6 +332,7 @@ impl Bucket for FsBucket {
             path: path.clone(),
             size,
             content_type: options.content_type,
+            content_disposition: None,
             metadata: options.metadata,
         })
     }
@@ -404,6 +406,7 @@ impl Bucket for FsBucket {
         _method: SignedMethod,
         _path: &ObjectPath,
         _ttl: Duration,
+        _overrides: &SignedGet,
     ) -> Result<Option<String>, StorageError> {
         Ok(None)
     }

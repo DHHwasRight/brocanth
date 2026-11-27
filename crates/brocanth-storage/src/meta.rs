@@ -230,6 +230,35 @@ impl Filename {
     }
 }
 
+/// `attachment` with the name twice (RFC 6266): `filename=` in ASCII, every
+/// other character as `_`, for an old client, and `filename*=` with the
+/// whole name, percent-encoded in UTF-8 (RFC 5987). With no name, the name
+/// is `download`.
+///
+/// The name is a [`Filename`]: no quote, no backslash, no control. The
+/// download route sends this header; a signed URL carries it as a response
+/// override, and a cloud put stores it on the object (`docs/object-storage.md`
+/// D29, D31).
+pub fn attachment(name: Option<&Filename>) -> String {
+    let name = name.map_or("download", Filename::as_str);
+    let ascii: String = name
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '_' })
+        .collect();
+    if ascii == name {
+        return format!("attachment; filename=\"{name}\"");
+    }
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            encoded.push(char::from(b));
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 impl std::fmt::Display for Filename {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

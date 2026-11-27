@@ -1852,6 +1852,8 @@ mod conformance {
                 fetch: None,
                 big: false,
                 create_only: true,
+                verifies: false,
+                disposition: false,
             },
         ));
     }
@@ -1870,6 +1872,8 @@ mod conformance {
                 fetch: None,
                 big: false,
                 create_only: true,
+                verifies: false,
+                disposition: false,
             },
         ));
     }
@@ -1887,6 +1891,8 @@ mod conformance {
                 fetch: None,
                 big: true,
                 create_only: true,
+                verifies: false,
+                disposition: false,
             },
         ));
     }
@@ -1983,6 +1989,8 @@ mod conformance {
                     fetch: None,
                     big: false,
                     create_only: true,
+                    verifies: false,
+                    disposition: false,
                 },
             )
             .await;
@@ -2091,6 +2099,40 @@ mod cloud {
                 Ok(())
             })
         }
+
+        fn send<'a>(
+            &'a self,
+            method: &'a str,
+            url: &'a str,
+        ) -> crate::conformance::Fut<'a, Result<crate::conformance::Fetched, String>> {
+            Box::pin(async move {
+                let method =
+                    reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+                let r = self
+                    .0
+                    .request(method, url)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let status = r.status().as_u16();
+                let headers = r
+                    .headers()
+                    .iter()
+                    .map(|(n, v)| {
+                        (
+                            n.as_str().to_ascii_lowercase(),
+                            String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                        )
+                    })
+                    .collect();
+                let body = r.bytes().await.map_err(|e| e.to_string())?.to_vec();
+                Ok(crate::conformance::Fetched {
+                    status,
+                    headers,
+                    body,
+                })
+            })
+        }
     }
 }
 
@@ -2100,7 +2142,7 @@ mod s3 {
 
     use super::cloud::{reactor, run_prefix, skip, target, Reqwest, Target};
     use crate::cloud::{CloudBucket, S3Config};
-    use crate::conformance::{bucket, storage, Can};
+    use crate::conformance::{bucket, storage, stored_disposition, Can};
     use crate::{Bucket, ObjectStorage};
 
     const VAR: &str = "BROCANTH_STORAGE_TEST_S3";
@@ -2139,6 +2181,8 @@ mod s3 {
                     fetch: Some(&fetch),
                     big: true,
                     create_only: true,
+                    verifies: true,
+                    disposition: true,
                 },
             )
             .await;
@@ -2151,6 +2195,7 @@ mod s3 {
             let b = Arc::new(CloudBucket::s3(&config(&t, Some(run_prefix()))).expect("a client"));
             let fetch = Reqwest(reqwest::Client::new());
             let store = ObjectStorage::new(b.clone()).with_max_object_bytes(4096);
+            stored_disposition(&store).await;
             storage(
                 Arc::new(store),
                 Can {
@@ -2159,6 +2204,8 @@ mod s3 {
                     fetch: Some(&fetch),
                     big: false,
                     create_only: true,
+                    verifies: true,
+                    disposition: true,
                 },
             )
             .await;
@@ -2297,6 +2344,8 @@ mod gcs {
                     // two paths are checked against S3 only.
                     big: false,
                     create_only: false,
+                    verifies: false,
+                    disposition: false,
                 },
             )
             .await;
@@ -2312,6 +2361,8 @@ mod gcs {
                 Arc::new(CloudBucket::gcs(&config(&t, Some(run_prefix()), key)).expect("a client"));
             let fetch = Reqwest(reqwest::Client::new());
             let store = ObjectStorage::new(b.clone()).with_max_object_bytes(4096);
+            // No `stored_disposition` here: the emulator drops
+            // `Content-Disposition` from an XML-API put. S3 proves it.
             storage(
                 Arc::new(store),
                 Can {
@@ -2320,6 +2371,8 @@ mod gcs {
                     fetch: signs.then_some(&fetch as _),
                     big: false,
                     create_only: true,
+                    verifies: false,
+                    disposition: false,
                 },
             )
             .await;
