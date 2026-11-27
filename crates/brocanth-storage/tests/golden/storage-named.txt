@@ -35,7 +35,6 @@ publish = false
 #   impersonate             no impersonation; support sees a customer's page only by asking for a screenshot
 #   brocanth-policy         no rule algebra; authorisation is whatever each handler remembered to check
 #   brocanth-rls            no row-level security; a query that forgets its WHERE shows every tenant's rows
-#   image                   no format conversion; a thumbnail is JPEG or PNG, and a page writes its own srcset
 #   brocanth-input          no entrance; `handle_post` reads `ctx.body` and parses it by hand
 #   brocanth-client         no client; calling this application means writing the URL and the JSON by hand
 #   security-headers        no security headers; a browser sniffs types, frames the pages and runs any inline script
@@ -78,7 +77,7 @@ publish = false
 [dependencies]
 brocanth = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-config = { git = "https://github.com/DHHwasRight/brocanth.git" }
-brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["s3", "routes"] }
+brocanth-storage = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["s3", "routes", "variants"] }
 brocanth-middleware = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["config"] }
 brocanth-pages = { git = "https://github.com/DHHwasRight/brocanth.git" }
 brocanth-server = { git = "https://github.com/DHHwasRight/brocanth.git", features = ["bridge"] }
@@ -1410,6 +1409,7 @@ pub fn handle_post(ctx: &mut Ctx) -> Result<impl IntoResponse, Error> {
 //! generator rewrites it every time the module list changes, and `src/app.rs`
 //! is yours.
 
+pub mod image;
 pub mod shape;
 pub mod storage;
 pub mod storage_routes;
@@ -1867,18 +1867,28 @@ pub const SETTINGS: &[Setting] = &[
         list: false,
     },
     Setting {
-        path: "storage_routes.downloads",
-        help: "How a download is answered: \"proxy\" or \"redirect\".",
+        path: "storage_routes.thumb_sizes",
+        help: "The only sizes ?thumb= may ask for; any other is a 400.",
         flag: true,
         file: "src/modules/storage_routes.rs",
         flags: crate::modules::storage_routes::MODULE.flags,
         none_as: None,
-        text: true,
-        list: false,
+        text: false,
+        list: true,
     },
     Setting {
-        path: "storage_routes.signed_ttl",
-        help: "Seconds a signed URL of a redirect lives, from 1 to 604800.",
+        path: "storage_routes.formats",
+        help: "The formats &fmt= may convert a thumbnail to: webp, jpeg, png.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
+        list: true,
+    },
+    Setting {
+        path: "storage_routes.max_pixels",
+        help: "The most pixels a source may declare before a thumbnail of it is a 413.",
         flag: true,
         file: "src/modules/storage_routes.rs",
         flags: crate::modules::storage_routes::MODULE.flags,
@@ -1918,12 +1928,22 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         path: "storage_routes.public.downloads",
-        help: "How a download answers: `proxy` sends the bytes through the application.",
+        help: "How a download of this store is answered: \"proxy\" or \"redirect\".",
         flag: true,
         file: "src/modules/storage_routes.rs",
         flags: crate::modules::storage_routes::MODULE.flags,
         none_as: None,
         text: true,
+        list: false,
+    },
+    Setting {
+        path: "storage_routes.public.signed_ttl",
+        help: "Seconds a signed URL of this store's redirect lives, from 1 to 604800.",
+        flag: true,
+        file: "src/modules/storage_routes.rs",
+        flags: crate::modules::storage_routes::MODULE.flags,
+        none_as: None,
+        text: false,
         list: false,
     },
     Setting {
@@ -2372,12 +2392,16 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", storage_routes.dedupe),
         ),
         (
-            "storage_routes.downloads",
-            format!("{:?}", storage_routes.downloads),
+            "storage_routes.thumb_sizes",
+            format!("{:?}", storage_routes.thumb_sizes),
         ),
         (
-            "storage_routes.signed_ttl",
-            format!("{:?}", storage_routes.signed_ttl),
+            "storage_routes.formats",
+            format!("{:?}", storage_routes.formats),
+        ),
+        (
+            "storage_routes.max_pixels",
+            format!("{:?}", storage_routes.max_pixels),
         ),
         (
             "storage_routes.public.path",
@@ -2394,6 +2418,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "storage_routes.public.downloads",
             format!("{:?}", storage_routes.public.downloads),
+        ),
+        (
+            "storage_routes.public.signed_ttl",
+            format!("{:?}", storage_routes.public.signed_ttl),
         ),
         (
             "storage_routes.archive.path",
@@ -2571,7 +2599,7 @@ mod flag_tests {
     }
 }
 
-// brocanth-digest: ae3fd16bbb483433
+// brocanth-digest: 57c6dcb1824a5382
 ===== src/plugins/shape.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! Your choices go in src/modules/<module>.rs; this file is their shape.
@@ -2765,12 +2793,14 @@ pub mod storage_routes {
     pub enum Key {
         MaxBytes,
         Dedupe,
-        Downloads,
-        SignedTtl,
+        ThumbSizes,
+        Formats,
+        MaxPixels,
         PublicPath,
         PublicPublic,
         PublicMaxBytes,
         PublicDownloads,
+        PublicSignedTtl,
         ArchivePath,
         ArchivePublic,
         ArchiveMaxBytes,
@@ -2782,12 +2812,14 @@ pub mod storage_routes {
             match self {
                 Key::MaxBytes => "storage_routes.max_bytes",
                 Key::Dedupe => "storage_routes.dedupe",
-                Key::Downloads => "storage_routes.downloads",
-                Key::SignedTtl => "storage_routes.signed_ttl",
+                Key::ThumbSizes => "storage_routes.thumb_sizes",
+                Key::Formats => "storage_routes.formats",
+                Key::MaxPixels => "storage_routes.max_pixels",
                 Key::PublicPath => "storage_routes.public.path",
                 Key::PublicPublic => "storage_routes.public.public",
                 Key::PublicMaxBytes => "storage_routes.public.max_bytes",
                 Key::PublicDownloads => "storage_routes.public.downloads",
+                Key::PublicSignedTtl => "storage_routes.public.signed_ttl",
                 Key::ArchivePath => "storage_routes.archive.path",
                 Key::ArchivePublic => "storage_routes.archive.public",
                 Key::ArchiveMaxBytes => "storage_routes.archive.max_bytes",
@@ -2845,6 +2877,28 @@ pub mod storage_routes {
             path: "/files",
             public: false,
         };
+    }
+}
+
+/// The shape of src/modules/storage_thumbnails.rs.
+pub mod storage_thumbnails {
+    /// What src/modules/storage_thumbnails.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
+    }
+}
+
+/// The shape of src/modules/image.rs.
+pub mod image {
+    /// What src/modules/image.rs holds.
+    pub struct Module {}
+
+    impl Module {
+        /// The value of each field the file does not name.
+        pub const DEFAULT: Self = Self {};
     }
 }
 
@@ -2908,7 +2962,7 @@ pub mod middleware_csrf {
     }
 }
 
-// brocanth-digest: 89fea362b82fff21
+// brocanth-digest: 8594131fbfd90e04
 ===== src/modules/mod.rs =====
 //! Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 //! A choice of yours goes in the module's own file, beside this one.
@@ -2927,12 +2981,14 @@ pub mod middleware_csrf {
 pub mod brocanth;
 
 pub mod config;
+pub mod image;
 pub mod middleware;
 pub mod middleware_csrf;
 pub mod storage;
 pub mod storage_fs;
 pub mod storage_routes;
 pub mod storage_s3;
+pub mod storage_thumbnails;
 
 /// Every module in `brocanth.toml`, in registration order: the list of
 /// `[modules] enabled`, which `brocanth add` and `brocanth remove` keep.
@@ -2942,11 +2998,13 @@ pub const ALL: &[&str] = &[
     "storage-fs",
     "storage-s3",
     "storage-routes",
+    "storage-thumbnails",
+    "image",
     "middleware",
     "middleware-csrf",
 ];
 
-// brocanth-digest: dcf75af8d3412bda
+// brocanth-digest: 82fed06e606c9bf0
 ===== src/modules/brocanth.rs =====
 //! The framework itself: `[server]`.
 //!
@@ -3102,6 +3160,34 @@ pub const MODULE: Module = Module {
 
     ..Module::DEFAULT
 };
+===== src/modules/storage_thumbnails.rs =====
+//! `storage-thumbnails`: ?thumb=WxH on the file routes, in listed sizes,
+//! rendered once each; links four image decoders.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::storage_thumbnails::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
+===== src/modules/image.rs =====
+//! `image`: thumbnails converted on request (&fmt=webp), a pixel cap against
+//! decompression bombs, a srcset helper.
+//!
+//! Written once by `brocanth`. This file is yours: no command rewrites it.
+//! A change here takes effect on the next `cargo build`.
+//!
+//! Nothing to choose yet. When a later version of the module adds a
+//! choice, this file takes its default.
+
+use crate::plugins::shape::image::Module;
+
+#[allow(clippy::needless_update)]
+pub const MODULE: Module = Module { ..Module::DEFAULT };
 ===== src/modules/middleware.rs =====
 //! `middleware`: proxy headers, method override, canonical host, content types,
 //! CORS.
@@ -3256,16 +3342,19 @@ max_bytes = 2097152
 # Off, each upload has an address of its own. On, a delete removes the file
 # for every holder: count the references before you delete.
 dedupe = false
-# How a download is answered: "proxy" or "redirect".
-# "proxy" sends the bytes from this process. "redirect" answers 307 to a URL
-# the bucket signs: an image inline, anything else as an attachment. It needs a
-# private bucket and the bucket's origin in the CSP img-src. HEAD and thumbnails
-# still go through this process.
-downloads = "proxy"
-# Seconds a signed URL of a redirect lives, from 1 to 604800.
-# It cannot be revoked, so this is the leak window. A browser keeps the redirect
-# for at most half of it.
-signed_ttl = 300
+# The only sizes ?thumb= may ask for; any other is a 400.
+# WxH crops to the middle, WxHt to the top, WxHb to the bottom, WxHf fits,
+# Wx0 and 0xH scale. Each size is rendered once per file and kept.
+thumb_sizes = ["150x150t", "300x200", "600x600f"]
+# The formats &fmt= may convert a thumbnail to: webp, jpeg, png.
+# Each format is one more rendering per size and file, so list only the ones
+# the pages ask for. WebP here is lossless: right for a logo, larger than JPEG
+# for a photograph.
+formats = ["webp", "jpeg"]
+# The most pixels a source may declare before a thumbnail of it is a 413.
+# Read from the image header before anything is decoded, so a small file that
+# declares 40000x40000 costs a few bytes of reading. At most 50000000.
+max_pixels = 24000000
 
 [storage_routes.public]
 # Where this store's routes answer. Empty: under `path`, at `path/<name>`.
@@ -3276,9 +3365,13 @@ path = ""
 public = false
 # The largest file this store accepts, in bytes.
 max_bytes = 2097152
-# How a download answers: `proxy` sends the bytes through the application.
-# `proxy` is the one value this build takes.
+# How a download of this store is answered: "proxy" or "redirect".
+# "proxy" sends the bytes from this process. "redirect" answers 307 to a URL
+# the bucket signs: keep the bucket private, and let `img-src` allow its origin.
 downloads = "proxy"
+# Seconds a signed URL of this store's redirect lives, from 1 to 604800.
+# It cannot be revoked, so this is the leak window.
+signed_ttl = 300
 
 [storage_routes.archive]
 # Where this store's routes answer. Empty: under `path`, at `path/<name>`.
@@ -3289,6 +3382,197 @@ path = ""
 public = false
 # The largest file this store accepts, in bytes.
 max_bytes = 2097152
+===== src/plugins/image/mod.rs =====
+//! Links to stored images, in a size and a format the file routes allow.
+//!
+//! Written once by `brocanth create`. This file is yours.
+//!
+//! ```ignore
+//! let src = crate::plugins::image::src(ctx, &key, "300x200", Some("webp"))?;
+//! let set = crate::plugins::image::srcset(ctx, &key, &["150x150t", "600x600f"], Some("webp"))?;
+//! // <img src="{src}" srcset="{set}" sizes="(max-width: 600px) 150px, 600px" alt="…">
+//! ```
+//!
+//! Each link carries a file token, so mint it after your policy allowed
+//! the read. A size must be in `thumb_sizes` and a format in `formats`
+//! under `[storage_routes]`: the routes answer any other with a 400 before
+//! they read the file, so nobody can make the server render a size no page
+//! uses. A source past `max_pixels` is a 413, read from its header before a
+//! pixel is decoded.
+
+use brocanth_storage::routes;
+use brocanth_storage::{ObjectKey, VariantFormat, VariantSpec};
+
+use crate::pages::Ctx;
+use crate::plugins::storage::FileStore;
+use crate::plugins::storage::NamedStores;
+
+/// Where the file routes answer: `path` in `src/modules/storage_routes.rs`.
+const PATH: &str = crate::modules::storage_routes::MODULE.path;
+
+/// One size and format, as `routes` spells them, or why not.
+fn spec(size: &str, format: Option<&str>) -> Result<VariantSpec, String> {
+    let spec = VariantSpec::parse(size).map_err(|e| format!("size `{size}`: {e}"))?;
+    let format = format
+        .map(|f| VariantFormat::parse(f).map_err(|e| format!("format `{f}`: {e}")))
+        .transpose()?;
+    Ok(spec.with_format(format))
+}
+
+fn files(ctx: &Ctx) -> Result<&FileStore, String> {
+    ctx.provided::<FileStore, _>()
+        .ok_or_else(|| "this Ctx has no file store: it was built by hand".to_string())
+}
+
+/// The link to one thumbnail of `key`: `<img src>`.
+#[allow(dead_code)]
+pub fn src(ctx: &Ctx, key: &ObjectKey, size: &str, format: Option<&str>) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    Ok(routes::thumb_url(PATH, key, &token, spec(size, format)?))
+}
+
+/// The links to several thumbnails of `key`, each with its width:
+/// `<img srcset>`. A size with no fixed width (`0xH`) is left out.
+#[allow(dead_code)]
+pub fn srcset(
+    ctx: &Ctx,
+    key: &ObjectKey,
+    sizes: &[&str],
+    format: Option<&str>,
+) -> Result<String, String> {
+    let token = files(ctx)?.tokens.issue(key);
+    let specs = sizes
+        .iter()
+        .map(|size| spec(size, format))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(routes::srcset(PATH, key, &token, &specs))
+}
+
+/// The link to one thumbnail of `key` in the named store `store`: `<img
+/// src>`. The path is the one that store's routes answer at, as
+/// `[storage_routes.<name>] path` set it.
+#[allow(dead_code)]
+pub fn src_in(
+    ctx: &Ctx,
+    store: &str,
+    key: &ObjectKey,
+    size: &str,
+    format: Option<&str>,
+) -> Result<String, String> {
+    let stores = ctx
+        .provided::<NamedStores, _>()
+        .ok_or_else(|| "this Ctx has no named stores: it was built by hand".to_string())?;
+    let named = stores
+        .get(store)
+        .ok_or_else(|| format!("no store is named `{store}`"))?;
+    let path = named
+        .path
+        .get()
+        .ok_or_else(|| format!("the store `{store}` has no routes"))?;
+    let token = named.tokens.issue(key);
+    Ok(routes::thumb_url(path, key, &token, spec(size, format)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use brocanth::routing::Verb;
+    use brocanth_server::Request;
+
+    use super::*;
+
+    /// A PNG of one red pixel.
+    const PNG: [u8; 69] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38,
+        0x21, 0x27, 0x07, 0x00, 0x02, 0xb6, 0x01, 0x05, 0x34, 0xa6, 0x75, 0xaa, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[tokio::test]
+    async fn a_thumbnail_converts_to_a_listed_format() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        let key = files
+            .store
+            .put(&PNG, &brocanth_storage::ObjectInfo::new())
+            .await
+            .expect("stored");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
+
+        let webp = crate::app::handle(&app, get(&link("150x150t", Some("webp")))).await;
+        assert_eq!(webp.status, 200);
+        assert_eq!(webp.header("content-type"), Some("image/webp"));
+    }
+
+    #[tokio::test]
+    async fn a_format_or_a_size_off_the_lists_is_refused_before_the_file_is_read() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let files: &FileStore = cx.extract();
+        // No file at this address: the lists are checked first.
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let token = files.tokens.issue(&key);
+        let link = |size: &str, format: Option<&str>| {
+            routes::thumb_url(
+                PATH,
+                &key,
+                &token,
+                spec(size, format).expect("a valid spec"),
+            )
+        };
+        // `png` is not in `formats` by default.
+        let png = crate::app::handle(&app, get(&link("150x150t", Some("png")))).await;
+        assert_eq!(png.status, 400);
+        // A size outside `thumb_sizes` is refused before anything renders.
+        let odd = crate::app::handle(&app, get(&link("151x150", Some("webp")))).await;
+        assert_eq!(odd.status, 400);
+    }
+
+    #[test]
+    fn srcset_gives_each_size_its_width_and_drops_a_free_one() {
+        let key = ObjectKey::parse(&"ab".repeat(32)).expect("an address");
+        let tokens =
+            brocanth_storage::FileTokens::new(brocanth_storage::FileTokenKey::from_secret(b"test"));
+        let token = tokens.issue(&key);
+        let sizes = ["150x150t", "0x200", "600x600f"]
+            .iter()
+            .map(|size| spec(size, Some("webp")).expect("a valid spec"))
+            .collect::<Vec<_>>();
+        let set = routes::srcset(PATH, &key, &token, &sizes);
+        assert!(set.contains("&thumb=150x150t&fmt=webp 150w, "), "{set}");
+        assert!(set.ends_with("&thumb=600x600f&fmt=webp 600w"), "{set}");
+        assert!(!set.contains("0x200"), "{set}");
+        assert!(spec("150x150t", Some("gif")).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_named_store_links_to_its_own_routes() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let stores: &NamedStores = cx.extract();
+        let store = stores.get("public").expect("the store");
+        let at = format!("{PATH}/public");
+        assert_eq!(store.path.get(), Some(&at));
+        assert!(stores.get("nowhere").is_none());
+    }
+
+    fn get(target: &str) -> Request {
+        let (path, query) = target.split_once('?').expect("a query");
+        let mut request = Request::new(Verb::Get, path);
+        request.query = query.to_string();
+        request
+    }
+}
 ===== src/plugins/storage/mod.rs =====
 //! File storage, as this application registers it.
 //!
@@ -3601,7 +3885,7 @@ mod tests {
 //! `brocanth add <module>@<name>` and `brocanth remove <module>@<name>`
 //! change the list, and rewrite this file while nobody has edited it.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use brocanth::plugin_api::{Lifecycle, PluginError};
 use brocanth::plugin_context::ContextItem;
@@ -3623,6 +3907,19 @@ pub struct NamedStores {
     pub archive: NamedStore,
 }
 
+impl NamedStores {
+    /// The store called `name`, for a caller that holds the name as text:
+    /// `image::src_in`. A handler names the field instead.
+    #[allow(dead_code)]
+    pub fn get(&self, name: &str) -> Option<&NamedStore> {
+        match name {
+            "public" => Some(&self.public),
+            "archive" => Some(&self.archive),
+            _ => None,
+        }
+    }
+}
+
 impl ContextItem for NamedStores {}
 
 /// One named store: the store, and the tokens that open its addresses.
@@ -3636,6 +3933,9 @@ pub struct NamedStore {
     /// Mints and verifies this store's tokens. A token of another store
     /// opens nothing here.
     pub tokens: FileTokens,
+    /// Where the store's routes answer, once `storage-routes` set it at
+    /// start. Unset in a project without the routes.
+    pub path: Arc<OnceLock<String>>,
 }
 
 /// A named store in a directory.
@@ -3780,6 +4080,7 @@ fn open_disk(
     Ok(NamedStore {
         store: Arc::new(disk),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 
@@ -3818,6 +4119,7 @@ fn open_s3(
     Ok(NamedStore {
         store: Arc::new(objects),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 
@@ -3834,6 +4136,7 @@ fn no_bucket(name: &'static str, settings: &super::Settings, lc: &mut Lifecycle<
     NamedStore {
         store: Arc::new(Deferred::new()),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     }
 }
 
@@ -3917,6 +4220,8 @@ mod tests {
 //! and answers `303` to the form's `return_to` field, with `?file=` and
 //! `&token=` added, or `201` with the address. `GET /files/{address}` serves
 //! the file to a request whose `?token=` opens it.
+//! Add `&thumb=300x200` for a thumbnail, in a size `thumb_sizes` lists, and
+//! `&fmt=webp` to convert it to a format `formats` lists.
 //! The path and `public` are in `src/modules/storage_routes.rs`.
 //!
 //! A plain form works with no script. The CSRF check reads no multipart
@@ -3944,13 +4249,6 @@ mod tests {
 //! let token = files.tokens.issue(&key);
 //! let src = format!("/files/{}?token={}", key.to_hex(), token.as_str());
 //! ```
-//!
-//! With `downloads = "redirect"`, `GET /files/{address}` answers 307 to a URL
-//! the bucket signs, which carries the type and the disposition inside its
-//! signature: an image inline, anything else as an attachment. The redirect
-//! is kept no longer than the token or half the URL's life, and sends no
-//! referrer. The start signs one URL, and refuses a Content-Security-Policy
-//! whose `img-src` does not allow the bucket.
 
 use std::sync::Arc;
 
@@ -3961,7 +4259,7 @@ use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
 use brocanth_storage::named::AnyRoutes;
 use brocanth_storage::routes::{Downloads, FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
-use brocanth_storage::{FileTokens, Storage};
+use brocanth_storage::{FileTokens, Storage, VariantFormat, VariantSpec};
 
 use crate::plugins::storage::stores::NamedStore;
 use crate::plugins::storage::NamedStores;
@@ -4033,10 +4331,12 @@ pub struct Settings {
     pub public: StoreRoutes,
     /// The routes of the store `archive`: `[storage_routes.archive]`.
     pub archive: StoreRoutes,
-    /// How a download is answered: "proxy" or "redirect".
-    pub downloads: String,
-    /// Seconds a signed URL of a redirect lives.
-    pub signed_ttl: u64,
+    /// The only sizes `?thumb=` may ask for; any other is a 400.
+    pub thumb_sizes: Vec<String>,
+    /// The formats `&fmt=` may convert a thumbnail to.
+    pub formats: Vec<String>,
+    /// The most pixels a source may declare before a thumbnail of it is a 413.
+    pub max_pixels: u64,
 }
 
 impl Default for Settings {
@@ -4046,8 +4346,12 @@ impl Default for Settings {
             dedupe: false,
             public: StoreRoutes::default(),
             archive: StoreRoutes::default(),
-            downloads: "proxy".to_string(),
-            signed_ttl: 300,
+            thumb_sizes: brocanth_storage::routes::DEFAULT_THUMB_SIZES
+                .iter()
+                .map(|size| size.to_string())
+                .collect(),
+            formats: vec!["webp".to_string(), "jpeg".to_string()],
+            max_pixels: 24_000_000,
         }
     }
 }
@@ -4067,8 +4371,10 @@ pub struct StoreRoutes {
     pub public: bool,
     /// The largest file accepted, in bytes.
     pub max_bytes: usize,
-    /// How a download answers: `proxy`, the bytes through this process.
+    /// How a download is answered: "proxy" or "redirect".
     pub downloads: String,
+    /// Seconds a signed URL of a redirect lives.
+    pub signed_ttl: u64,
 }
 
 impl Default for StoreRoutes {
@@ -4078,6 +4384,7 @@ impl Default for StoreRoutes {
             public: false,
             max_bytes: 2_097_152,
             downloads: "proxy".to_string(),
+            signed_ttl: 300,
         }
     }
 }
@@ -4124,25 +4431,40 @@ impl Plugin for StorageRoutes {
                  help: set `header` under [csrf], such as \"x-csrf-token\"",
             ));
         };
-        let downloads = Downloads::parse(&self.settings.downloads).map_err(PluginError::new)?;
-        // The policy the security headers send: a redirected image loads
-        // only when its `img-src` allows the bucket.
-        let csp = lc
-            .services()
-            .get::<brocanth_middleware::SecurityHeadersConfig>()
-            .and_then(|headers| headers.enforced_csp());
+        let thumb_sizes = self
+            .settings
+            .thumb_sizes
+            .iter()
+            .map(|size| {
+                VariantSpec::parse(size).map_err(|e| {
+                    PluginError::new(format!("[storage_routes] thumb_sizes `{size}`: {e}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let formats = self
+            .settings
+            .formats
+            .iter()
+            .map(|format| {
+                VariantFormat::parse(format).map_err(|e| {
+                    PluginError::new(format!(
+                        "[storage_routes] formats `{format}`: {e}\nhelp: list webp, jpeg or png"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let config = RoutesConfig {
             path: crate::modules::storage_routes::MODULE.path.to_string(),
             max_bytes: self.settings.max_bytes,
             server_max_body: Some(crate::plugins::max_body().map_err(PluginError::new)?),
             public: crate::modules::storage_routes::MODULE.public,
-            thumbnails: false,
+            thumbnails: true,
+            thumb_sizes,
+            formats,
+            max_pixels: self.settings.max_pixels,
             dedupe: self.settings.dedupe,
             csrf_field: csrf.field.clone(),
             csrf_header,
-            downloads,
-            signed_ttl: std::time::Duration::from_secs(self.settings.signed_ttl),
-            csp,
             ..RoutesConfig::default()
         };
         // The named stores first: the default's routes answer `POST
@@ -4153,34 +4475,32 @@ impl Plugin for StorageRoutes {
                  help: register the storage plugin before this one in src/app.rs",
             ));
         };
-        let mut all = vec![
-            named_routes(
-                "public",
-                &self.settings.public,
-                &config,
-                named.public,
-                GuardPublic,
-            )?,
-            named_routes(
-                "archive",
-                &self.settings.archive,
-                &config,
-                named.archive,
-                GuardArchive,
-            )?,
-        ];
-        let routes = FileRoutes::new(store, tokens, config, Guard)?;
-        // `serve` awaits this once before it listens: a redirecting route
-        // signs one URL, so a key that cannot sign, or an `img-src` that
-        // blocks the bucket, stops the start with a `help:` line.
-        if routes.redirects() {
-            let check = routes.clone();
-            lc.ready_when(move || {
-                let check = check.clone();
-                async move { check.check_signing().await }
-            });
-        }
-        all.push(routes);
+        // Each named store that redirects checks its own bucket's origin
+        // against the policy the security headers send (D34).
+        let csp_of_stores = lc
+            .services()
+            .get::<brocanth_middleware::SecurityHeadersConfig>()
+            .and_then(|headers| headers.enforced_csp());
+        let public_routes = named_routes(
+            "public",
+            &self.settings.public,
+            &config,
+            csp_of_stores.as_deref(),
+            named.public,
+            GuardPublic,
+        )?;
+        check_signing("public", &public_routes, lc);
+        let archive_routes = named_routes(
+            "archive",
+            &self.settings.archive,
+            &config,
+            csp_of_stores.as_deref(),
+            named.archive,
+            GuardArchive,
+        )?;
+        check_signing("archive", &archive_routes, lc);
+        let mut all = vec![public_routes, archive_routes];
+        all.push(FileRoutes::new(store, tokens, config, Guard)?);
         self.routes = Some(AnyRoutes::new(all));
         Ok(())
     }
@@ -4204,15 +4524,17 @@ impl HookSource for StorageRoutes {
 }
 
 /// The routes of the named store `name`: the default's configuration, with
-/// the store's own path, `public` and `max_bytes`.
+/// the store's own path, `public`, `max_bytes`, `downloads` and
+/// `signed_ttl`. A store that cannot sign, a disk or Postgres, refuses
+/// `redirect` here (D33).
 fn named_routes(
     name: &str,
     settings: &StoreRoutes,
     base: &RoutesConfig,
+    csp: Option<&str>,
     store: NamedStore,
     guard: impl UploadGuard,
 ) -> Result<FileRoutes, PluginError> {
-    downloads(name, &settings.downloads)?;
     let path = if settings.path.is_empty() {
         format!("{}/{name}", base.path.trim_end_matches('/'))
     } else {
@@ -4222,23 +4544,43 @@ fn named_routes(
         path,
         public: settings.public,
         max_bytes: settings.max_bytes,
+        downloads: downloads(name, &settings.downloads)?,
+        signed_ttl: std::time::Duration::from_secs(settings.signed_ttl),
+        csp: csp.map(str::to_string),
         ..base.clone()
     };
-    FileRoutes::new(store.store, store.tokens, config, guard)
+    let routes = FileRoutes::new(store.store, store.tokens, config, guard)
+        .map_err(|e| PluginError::new(in_store(name, &e.to_string())))?;
+    // `image::src_in` links to the path the routes answer at.
+    let _ = store.path.set(routes.path().to_string());
+    Ok(routes)
 }
 
-/// How the downloads of the named store `name` answer. `proxy` sends the
-/// bytes through this process, as the default store does.
-///
-/// The redirect to a signed URL (`redirect`, `docs/object-storage.md` §9.3)
-/// plugs in here: a new arm that sets it on the store's `RoutesConfig`.
-fn downloads(name: &str, value: &str) -> Result<(), PluginError> {
-    match value {
-        "proxy" => Ok(()),
-        other => Err(PluginError::new(format!(
-            "[storage_routes.{name}] downloads is {other:?}, and this build only proxies\n\
-             help: set `downloads = \"proxy\"` under [storage_routes.{name}]"
-        ))),
+/// How the downloads of the named store `name` are answered: `proxy`, the
+/// bytes from this process, or `redirect`, a 307 to a URL the bucket signs.
+fn downloads(name: &str, value: &str) -> Result<Downloads, PluginError> {
+    Downloads::parse(value).map_err(|e| PluginError::new(in_store(name, &e)))
+}
+
+/// A message of the routes, about the named store `name`: its section is
+/// `[storage_routes.<name>]`.
+fn in_store(name: &str, said: &str) -> String {
+    said.replace("[storage_routes]", &format!("[storage_routes.{name}]"))
+}
+
+/// The start check of a named store that redirects (D34): `serve` awaits
+/// it once before it listens, so a key that cannot sign, or an `img-src`
+/// that blocks this store's bucket, stops the start with a `help:` line.
+fn check_signing(name: &'static str, routes: &FileRoutes, lc: &mut Lifecycle<'_>) {
+    if routes.redirects() {
+        let check = routes.clone();
+        lc.ready_when(move || {
+            let check = check.clone();
+            async move {
+                let said = check.check_signing().await;
+                said.map_err(|e| format!("[storage_routes.{name}] {e}"))
+            }
+        });
     }
 }
 
@@ -4284,6 +4626,61 @@ mod tests {
             assert_eq!(response.status, 403, "{name}");
         }
     }
+
+    #[test]
+    fn a_named_bucket_store_may_redirect() {
+        use super::{named_routes, StoreRoutes};
+        use crate::plugins::storage::stores::NamedStore;
+        use brocanth_storage::cloud::{CloudBucket, S3Config};
+        use brocanth_storage::routes::RoutesConfig;
+        use brocanth_storage::{FileTokenKey, FileTokens, ObjectStorage};
+        use std::sync::Arc;
+
+        // Built with no request: the client signs, the bucket is not asked.
+        let bucket = CloudBucket::s3(&S3Config {
+            bucket: "assets".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: Some("http://localhost:9000".to_string()),
+            path_style: true,
+            access_key_id: Some("key".to_string()),
+            secret_access_key: Some("secret".to_string()),
+            prefix: None,
+        })
+        .expect("a client");
+        let store = NamedStore {
+            store: Arc::new(ObjectStorage::new(Arc::new(bucket))),
+            tokens: FileTokens::new(FileTokenKey::from_secret_for(b"test", "public")),
+            path: Arc::default(),
+        };
+        let settings = StoreRoutes {
+            downloads: "redirect".to_string(),
+            signed_ttl: 60,
+            ..StoreRoutes::default()
+        };
+        let base = RoutesConfig::default();
+        let made = named_routes("public", &settings, &base, None, store, super::GuardPublic);
+        let routes = made.expect("a bucket signs");
+        assert!(routes.redirects());
+        assert_eq!(routes.path(), "/files/public");
+
+        // A disk cannot sign, so the store refuses `redirect` (D33).
+        let disk = brocanth_storage::LocalDisk::open("var/uploads-archive").expect("a directory");
+        let store = NamedStore {
+            store: Arc::new(disk),
+            tokens: FileTokens::new(FileTokenKey::from_secret_for(b"test", "archive")),
+            path: Arc::default(),
+        };
+        let made = named_routes(
+            "archive",
+            &settings,
+            &base,
+            None,
+            store,
+            super::GuardArchive,
+        );
+        let said = made.expect_err("a disk does not sign").to_string();
+        assert!(said.contains("downloads is \"redirect\""), "{said}");
+    }
 }
 ===== AGENTS.md =====
 <!-- Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file. -->
@@ -4317,8 +4714,10 @@ request.
 - `storage`  uploads addressed by content hash, in the project's object store: a disk, S3, GCS or Postgres
 - `storage-fs`  the object store is a directory on this machine's disk; the default
 - `storage-routes`  POST /files and GET /files/{address}?token=: uploads your guard allows, downloads behind a file token
+- `storage-thumbnails`  ?thumb=WxH on the file routes, in listed sizes, rendered once each; links four image decoders
+- `image`  thumbnails converted on request (&fmt=webp), a pixel cap against decompression bombs, a srcset helper
 
-**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage-db`, `storage-gcs`, `storage-thumbnails`, `image`, `input`, `client`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
+**Absent:** `logging`, `observability`, `observability-logs`, `observability-health`, `observability-metrics`, `observability-tracing`, `analytics`, `beacon`, `sessions`, `db`, `db-embedded`, `db-embedded-prod`, `model`, `cache`, `cache-memory`, `cache-redis`, `jobs`, `jobs-memory`, `flags`, `audit`, `mail`, `auth`, `auth-oauth`, `auth-screens`, `auth-lockout`, `auth-otp`, `auth-mfa`, `superuser`, `roles`, `impersonate`, `policy`, `rls`, `storage-db`, `storage-gcs`, `input`, `client`, `middleware-security-headers`, `middleware-rate-limit`, `middleware-conditional-get`, `middleware-compression`, `flash`, `gtag`, `openapi`, `validation`, `resource`, `admin`, `admin-model`, `admin-actions`, `backoffice`, `webhooks`, `webhooks-in`, `webhooks-out`, `oauth`, `oauth-client`, `oauth-client-memory`, `realtime`, `realtime-sse`, `realtime-websocket`, `notifications`, `commands`, `rsx`, `jt`, `rsx-tailwind`, `rsx-htmx`, `sanitize`, `markdown`, `static`, `robots`, `sitemap`, `content`, `feed`, `pagination`, `filters`, `search`, `i18n`, `i18n-routing`, `humanize`, `meta`, `errors`, `debug`, `debug-toolbar`, `docker`, `docker-kubernetes`, `ci`, `ci-github`, `ci-security` — not compiled, not linked, absent from `Cargo.lock`. Do not write code that uses them; add the dependency and name the plugin in `main` first.
 
 That is the framework's central rule: a capability nobody asked for is
 not compiled and not linked. If you need one, add it to `Cargo.toml`
@@ -4408,11 +4807,15 @@ a page. A download needs a token: mint it with `FileStore::tokens` after
 your policy allowed the read, and never log the URL. Do not write an
 upload or download page beside these routes.
 
-`downloads = "redirect"` under `[storage_routes]` answers a download with
-a 307 to a signed URL of the bucket. Keep the bucket private: a public
-bucket serves every object to anyone who has its address. Add the
-bucket's origin to `img-src` under `[security_headers.csp.allow]`; the
-start names the value when it is missing.
+## Images
+
+Link a stored image through `crate::plugins::image`: `src(ctx, &key,
+size, format)` for one `<img src>`, `srcset(ctx, &key, sizes, format)`
+for `<img srcset>`. Call them after your policy allowed the read: each
+link carries a file token. A size must be in `thumb_sizes` and a format
+in `formats` under `[storage_routes]`, or the link answers 400; add the
+size there, never an open-ended width parameter. Use `webp` for a logo
+or a screenshot and `jpeg` for a photograph: WebP here is lossless.
 
 ## Decisions that belong to the person
 
@@ -4442,7 +4845,7 @@ Not chosen, and recommended by a module that is here. Ask about each:
 cannot compile and can therefore be relied on, what can still go wrong
 and therefore needs a test, and the crate map.
 
-<!-- brocanth-digest: f93211ba15b0152d -->
+<!-- brocanth-digest: 35f23d2e902e70bc -->
 ===== brocanth.toml =====
 # Written by `brocanth`. Do not edit -- `brocanth add` and `brocanth remove` rewrite this file.
 # Change the module list with `brocanth add` and `brocanth remove`, not here.
@@ -4454,7 +4857,7 @@ name = "my-photos"
 title = "My Photos"
 
 [modules]
-enabled = ["config", "storage", "storage-fs", "storage-s3", "storage-routes", "middleware", "middleware-csrf"]
+enabled = ["config", "storage", "storage-fs", "storage-s3", "storage-routes", "storage-thumbnails", "image", "middleware", "middleware-csrf"]
 
 [bindings]
 ConfigSource = { provider = "config", why = "chosen" }
@@ -4501,7 +4904,23 @@ kind = ["middleware"]
 files = ["src/modules/storage_routes.rs", "src/plugins/storage_routes/"]
 config = ["storage_routes", "storage_routes.public", "storage_routes.archive"]
 crates = ["brocanth-storage"]
-adapted_to = ["storage-s3"]
+adapted_to = ["storage-thumbnails", "image", "storage-s3"]
+
+[modules.storage-thumbnails]
+version = "0.1.0"
+kind = ["middleware"]
+files = ["src/modules/storage_thumbnails.rs"]
+config = []
+crates = ["brocanth-storage"]
+adapted_to = []
+
+[modules.image]
+version = "0.1.0"
+kind = ["renderer"]
+files = ["src/modules/image.rs", "src/plugins/image/"]
+config = []
+crates = []
+adapted_to = ["storage-fs"]
 
 [modules.middleware]
 version = "0.1.0"
@@ -4519,4 +4938,4 @@ config = ["csrf"]
 crates = []
 adapted_to = []
 
-# brocanth-digest: eb4575673e1ba555
+# brocanth-digest: 17bcac46aef1e524

@@ -1021,6 +1021,11 @@ pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, 
     // bindings are the resolver's, over `picks`.
     let enabled = a.enabled();
     let named = a.named_triples();
+    let named_only: Vec<&str> = enabled
+        .iter()
+        .copied()
+        .filter(|key| !a.picks.contains(key))
+        .collect();
     let mounts: Vec<(&str, &str, brocanth_scaffold::MountRole)> = enabled
         .iter()
         .flat_map(|&key| {
@@ -1042,7 +1047,7 @@ pub(crate) fn contributions(a: &Answers) -> Result<brocanth_scaffold::Scaffold, 
     let project = brocanth_scaffold::Project::new(&a.name, &a.title, &enabled, &known)
         .with_mounts(&mounts)
         .with_bindings(&bindings)
-        .with_named(&named)
+        .with_named(&named, &named_only)
         .with_exports(&exports);
     let order = brocanth_scaffold::order(&enabled, |key| crate::resolve::after(key, &a.picks))
         .map_err(|stuck| {

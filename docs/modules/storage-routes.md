@@ -51,10 +51,22 @@ default's: the default routes would answer `POST /files/public` with a 405.
 | Who may upload | `may_upload_<name>` in `src/plugins/storage_routes/mod.rs`; it answers no until you change it |
 | `path` | `[storage_routes.<name>] path`; empty means `path/<name>`. The name is then part of a public URL: a new name breaks links already sent |
 | `public`, `max_bytes` | `[storage_routes.<name>]` |
-| `downloads` | `[storage_routes.<name>]`, cloud stores only. `proxy` is the one value this build takes |
+| `downloads`, `signed_ttl` | `[storage_routes.<name>]`, written for an S3 or GCS store only. `redirect` on a disk or Postgres store stops the start (D33) |
+
+A named store that redirects runs its own start check (D34): it signs one
+URL, and the start stops when the `img-src` of the security headers does
+not allow that store's bucket. The `help:` line names the store's section.
+`check --deploy` runs the three redirect warnings for each store, by its
+`[storage_routes.<name>]` and `[storage.<name>]`.
+
+Which settings the default store gets follows its own backend: a project
+with a disk default and `storage-s3@public` writes `downloads` under
+`[storage_routes.public]`, and not under `[storage_routes]`.
 
 The thumbnails, `dedupe` and the formats are the default store's. A
-thumbnail lives in the store of its object.
+thumbnail lives in the store of its object. With [`image`](image.md),
+`crate::plugins::image::src_in(ctx, "public", &key, size, format)` links a
+thumbnail at the path that store's routes answer at.
 
 ## What it does
 

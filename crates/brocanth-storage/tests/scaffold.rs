@@ -130,6 +130,8 @@ fn named_stores_open_beside_the_default_one() {
             "storage",
             "storage-fs",
             "storage-routes",
+            "storage-thumbnails",
+            "image",
             "storage-s3@public",
             "storage-fs@archive",
         ],

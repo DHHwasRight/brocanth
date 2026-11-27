@@ -56,7 +56,11 @@ decodes. This module adds three things on top:
   behind it.
 - **Link helpers.** `src/plugins/image/mod.rs` has `src(ctx, &key, size,
   format)` and `srcset(ctx, &key, sizes, format)`. Each link carries a new
-  file token. A `0xH` size has no width, so `srcset` leaves it out.
+  file token. A `0xH` size has no width, so `srcset` leaves it out. With
+  a named store ([`storage`](storage.md#named-stores)), `src_in(ctx,
+  "<name>", &key, size, format)` links a thumbnail in that store, at the
+  path its routes answer at (`[storage_routes.<name>] path`, read at run
+  time), with a token of that store.
 
 ## Decisions
 

@@ -1233,6 +1233,8 @@ pub struct Project<'a> {
     bindings: &'a [(&'a str, &'a str)],
     /// The named bindings, as `(Kind name, name, module key)`.
     named: &'a [(&'a str, &'a str, &'a str)],
+    /// The modules in `on` only as the provider of a named binding.
+    named_only: &'a [&'a str],
     /// What each module exports, as `(module key, export)`.
     exports: &'a [(&'a str, Export)],
     /// Every export asked for through [`Project::export`], as `(module
@@ -1261,6 +1263,7 @@ impl<'a> Project<'a> {
             mounts: &[],
             bindings: &[],
             named: &[],
+            named_only: &[],
             exports: &[],
             asked_exports: std::cell::RefCell::new(Vec::new()),
             asked_kinds: std::cell::RefCell::new(Vec::new()),
@@ -1288,8 +1291,15 @@ impl<'a> Project<'a> {
     /// Give the view the named bindings the CLI recorded, as `(Kind name,
     /// name, module key)`: `("ObjectStore", "public", "storage-s3")`. A
     /// view without them has none, so a one-store project reads as before.
-    pub fn with_named(mut self, named: &'a [(&'a str, &'a str, &'a str)]) -> Self {
+    /// `named_only` lists the modules that are in the project only as the
+    /// provider of a named binding ([`Project::chosen`]).
+    pub fn with_named(
+        mut self,
+        named: &'a [(&'a str, &'a str, &'a str)],
+        named_only: &'a [&'a str],
+    ) -> Self {
         self.named = named;
+        self.named_only = named_only;
         self
     }
 
@@ -1442,6 +1452,15 @@ impl<'a> Project<'a> {
             return false;
         }
         self.on.contains(&key)
+    }
+
+    /// Whether `key` is part of this project for its own sake: [`Project::has`],
+    /// less a module that is here only as the provider of a named binding.
+    /// `storage-routes` asks it of `storage-s3`: the default store is on S3
+    /// only when `storage-s3` is chosen, not when only `storage-s3@public`
+    /// is. In a project with no named binding it is [`Project::has`].
+    pub fn chosen(&self, key: &str) -> bool {
+        self.has(key) && !self.named_only.contains(&key)
     }
 
     /// `my-blog` -> `my_blog`: the crate identifier, and the prefix of every

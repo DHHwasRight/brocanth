@@ -1016,7 +1016,10 @@ impl Module for StorageRoutes {
         // provider: one provider holds the Kind, so the two say the same,
         // and `uses::<ObjectStore>` would name the default store in the
         // `adapted_to` of every project with routes.
-        let cloud = project.has("storage-s3") || project.has("storage-gcs");
+        // `chosen`, not `has`: a module here only for a named store
+        // (`storage-s3@public`) is not the default store's backend. Each
+        // named store's `downloads` follows its own provider.
+        let cloud = project.chosen("storage-s3") || project.chosen("storage-gcs");
         let stores = named::stores(project, None);
         s.file(
             "src/plugins/storage_routes/mod.rs",
@@ -1126,11 +1129,15 @@ impl Module for Image {
             None | Some("storage-fs") => IMAGE_CONVERT_TEST,
             Some(_) => "",
         };
+        let stores = named::stores(project, None);
         s.file(
             "src/plugins/image/mod.rs",
-            IMAGE_RS
-                .replace("@PATH@", &module_ref("storage-routes", "path"))
-                .replace("@CONVERT@", convert),
+            named::image_rs(
+                IMAGE_RS
+                    .replace("@PATH@", &module_ref("storage-routes", "path"))
+                    .replace("@CONVERT@", convert),
+                &stores,
+            ),
         );
         s.at(Slot::PluginsMod).line("pub mod image;");
         s.at(Slot::AgentsSections).block(IMAGE_AGENTS.to_string());

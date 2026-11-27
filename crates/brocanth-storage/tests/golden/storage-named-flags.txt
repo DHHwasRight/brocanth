@@ -3091,7 +3091,7 @@ mod tests {
 //! `brocanth add <module>@<name>` and `brocanth remove <module>@<name>`
 //! change the list, and rewrite this file while nobody has edited it.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use brocanth::plugin_api::{Lifecycle, PluginError};
 use brocanth::plugin_context::ContextItem;
@@ -3111,6 +3111,19 @@ pub struct NamedStores {
     pub media: NamedStore,
 }
 
+impl NamedStores {
+    /// The store called `name`, for a caller that holds the name as text:
+    /// `image::src_in`. A handler names the field instead.
+    #[allow(dead_code)]
+    pub fn get(&self, name: &str) -> Option<&NamedStore> {
+        match name {
+            "public" => Some(&self.public),
+            "media" => Some(&self.media),
+            _ => None,
+        }
+    }
+}
+
 impl ContextItem for NamedStores {}
 
 /// One named store: the store, and the tokens that open its addresses.
@@ -3124,6 +3137,9 @@ pub struct NamedStore {
     /// Mints and verifies this store's tokens. A token of another store
     /// opens nothing here.
     pub tokens: FileTokens,
+    /// Where the store's routes answer, once `storage-routes` set it at
+    /// start. Unset in a project without the routes.
+    pub path: Arc<OnceLock<String>>,
 }
 
 /// A named store in an S3 bucket.
@@ -3300,6 +3316,7 @@ fn open_s3(
     Ok(NamedStore {
         store: Arc::new(objects),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 
@@ -3336,6 +3353,7 @@ fn open_gcs(
     Ok(NamedStore {
         store: Arc::new(objects),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 
@@ -3352,6 +3370,7 @@ fn no_bucket(name: &'static str, settings: &super::Settings, lc: &mut Lifecycle<
     NamedStore {
         store: Arc::new(Deferred::new()),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     }
 }
 

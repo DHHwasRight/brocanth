@@ -31,6 +31,7 @@
 //! | `deploy/storage-redirect-http` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` is `http://`, so the signed URL travels in clear text |
 //! | `deploy/storage-signed-ttl` | warning | `[storage_routes] downloads` is `redirect` and `signed_ttl` is above 3600 seconds |
 //! | `deploy/storage-sibling-domain` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` shares its registrable domain with the site's own address (`[meta] base_url`, `[sitemap] base_url` or `[feed] site_url`) |
+//! | (the three above) | warning | the same for each named store, by `[storage_routes.<name>]` and `[storage.<name>]` |
 //! | `deploy/csrf-off` | error | `[bindings]` binds `SessionCookie` and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
@@ -949,14 +950,37 @@ const REDIRECT_TTL_WARNING: i64 = 3600;
 /// signed URL of the bucket (`docs/object-storage.md` §9.3, §9.4). The URL
 /// is a bearer credential nobody can revoke.
 fn storage_redirect(project: &Project, config: &Config, file: &str) -> Vec<Finding> {
+    let mut out = redirect_of(project, config, file, "storage_routes", "storage");
+    // Each named store, by its own sections.
+    for (name, _) in &project.named_stores {
+        out.extend(redirect_of(
+            project,
+            config,
+            file,
+            &format!("storage_routes.{name}"),
+            &format!("storage.{name}"),
+        ));
+    }
+    out
+}
+
+/// The redirect warnings of one store: its routes read `[routes]`, its
+/// bucket `[store]`.
+fn redirect_of(
+    project: &Project,
+    config: &Config,
+    file: &str,
+    routes: &str,
+    store: &str,
+) -> Vec<Finding> {
     let mut out = Vec::new();
-    let Some(downloads) = get(config, "storage_routes.downloads") else {
+    let Some(downloads) = get(config, &format!("{routes}.downloads")) else {
         return out;
     };
     if downloads.as_str().map(str::trim) != Some("redirect") {
         return out;
     }
-    let endpoint = get(config, "storage.endpoint")
+    let endpoint = get(config, &format!("{store}.endpoint"))
         .and_then(|v| Some((v, v.as_str()?.trim())))
         .filter(|(_, url)| !url.is_empty());
     if let Some((v, url)) = endpoint {
@@ -964,27 +988,27 @@ fn storage_redirect(project: &Project, config: &Config, file: &str) -> Vec<Findi
             out.push(
                 Finding::warning(
                     "deploy/storage-redirect-http",
-                    "`[storage_routes] downloads` is `redirect` and `[storage] endpoint` is plain HTTP",
+                    format!("`[{routes}] downloads` is `redirect` and `[{store}] endpoint` is plain HTTP"),
                 )
                 .at(place(project, v))
                 .note("the signed URL is a bearer credential, and it travels in clear text to the browser and the bucket")
                 .help(format!(
-                    "set `endpoint` under `[storage]` in {file} to the server's https:// URL, or `downloads = \"proxy\"` under `[storage_routes]`"
+                    "set `endpoint` under `[{store}]` in {file} to the server's https:// URL, or `downloads = \"proxy\"` under `[{routes}]`"
                 )),
             );
         }
     }
-    if let Some(v) = get(config, "storage_routes.signed_ttl") {
+    if let Some(v) = get(config, &format!("{routes}.signed_ttl")) {
         if let Some(ttl) = v.as_integer().filter(|ttl| *ttl > REDIRECT_TTL_WARNING) {
             out.push(
                 Finding::warning(
                     "deploy/storage-signed-ttl",
-                    format!("`[storage_routes] signed_ttl` is {ttl} seconds"),
+                    format!("`[{routes}] signed_ttl` is {ttl} seconds"),
                 )
                 .at(place(project, v))
                 .note("a signed URL cannot be revoked: whoever holds a copy reads the file until it expires")
                 .help(format!(
-                    "set `signed_ttl` under `[storage_routes]` in {file} to at most {REDIRECT_TTL_WARNING}, such as 300"
+                    "set `signed_ttl` under `[{routes}]` in {file} to at most {REDIRECT_TTL_WARNING}, such as 300"
                 )),
             );
         }
@@ -1001,13 +1025,13 @@ fn storage_redirect(project: &Project, config: &Config, file: &str) -> Vec<Findi
                 out.push(
                     Finding::warning(
                         "deploy/storage-sibling-domain",
-                        format!("`[storage] endpoint` {host} is on {domain}, the site's own domain"),
+                        format!("`[{store}] endpoint` {host} is on {domain}, the site's own domain"),
                     )
                     .at(place(project, v))
                     .note("a redirect sends the browser there; a page rendered on a sibling host can set cookies for the whole domain")
                     .note("every non-image goes as an attachment, so nothing renders by design; keep the bucket on a domain of its own all the same")
                     .help(format!(
-                        "serve the bucket from a domain the site does not share, such as the provider's own host, or set `downloads = \"proxy\"` under `[storage_routes]` in {file}"
+                        "serve the bucket from a domain the site does not share, such as the provider's own host, or set `downloads = \"proxy\"` under `[{routes}]` in {file}"
                     )),
                 );
             }
@@ -1229,6 +1253,53 @@ base_url = "https://shop.example"
         assert!(run(fine).is_empty(), "{:?}", run(fine));
         // No endpoint (AWS) and no site address: nothing to compare.
         assert!(run("[storage_routes]\ndownloads = \"redirect\"\n").is_empty());
+    }
+
+    /// A named store that redirects is checked by its own sections, and
+    /// each finding names them.
+    #[test]
+    fn a_named_store_that_redirects_is_checked_by_its_own_sections() {
+        let src = sources(&[]);
+        let mut p = project(&["storage", "storage-fs", "storage-s3", "storage-routes"]);
+        p.object_store = Some("storage-fs".to_owned());
+        p.named_stores = vec![("public".to_owned(), "storage-s3".to_owned())];
+        let config = Config::from_toml(
+            "shop",
+            "production",
+            r#"
+[storage.public]
+endpoint = "http://files.shop.example"
+
+[storage_routes.public]
+downloads = "redirect"
+signed_ttl = 7200
+
+[meta]
+base_url = "https://shop.example/"
+"#,
+        )
+        .unwrap();
+        let found = deploy(&p, &config, &src, &|_| None, &[]);
+        let redirect: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.id.starts_with("deploy/storage-") && f.id != "deploy/storage-local")
+            .collect();
+        let ids: Vec<&str> = redirect.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "deploy/storage-redirect-http",
+                "deploy/storage-signed-ttl",
+                "deploy/storage-sibling-domain"
+            ]
+        );
+        assert!(redirect[0]
+            .message
+            .contains("`[storage_routes.public] downloads`"));
+        assert!(redirect[0].message.contains("`[storage.public] endpoint`"));
+        assert!(redirect[1]
+            .message
+            .contains("`[storage_routes.public] signed_ttl`"));
     }
 
     #[test]

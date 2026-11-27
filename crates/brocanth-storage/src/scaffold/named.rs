@@ -160,9 +160,20 @@ pub(super) fn routes_settings(stores: &[Named]) -> Vec<Setting> {
                 Setting::text(
                     key(name, "downloads"),
                     "proxy",
-                    "How a download answers: `proxy` sends the bytes through the application.",
+                    "How a download of this store is answered: \"proxy\" or \"redirect\".",
                 )
-                .note("`proxy` is the one value this build takes."),
+                .note(
+                    "\"proxy\" sends the bytes from this process. \"redirect\" answers 307 to a URL\n\
+                     the bucket signs: keep the bucket private, and let `img-src` allow its origin.",
+                ),
+            );
+            out.push(
+                Setting::integer(
+                    key(name, "signed_ttl"),
+                    300,
+                    "Seconds a signed URL of this store's redirect lives, from 1 to 604800.",
+                )
+                .note("It cannot be revoked, so this is the leak window."),
             );
         }
     }
@@ -361,14 +372,10 @@ pub(super) fn stores_rs(project: &Project, default: Backend, stores: &[Named]) -
     let mut out = String::from(STORES_HEAD);
 
     // The imports.
-    out.push_str("use std::sync::Arc;\n");
     if db {
         out.push_str("use std::sync::atomic::{AtomicBool, Ordering};\n");
-        out = out.replace(
-            "use std::sync::Arc;\nuse std::sync::atomic::{AtomicBool, Ordering};\n",
-            "use std::sync::atomic::{AtomicBool, Ordering};\nuse std::sync::Arc;\n",
-        );
     }
+    out.push_str("use std::sync::{Arc, OnceLock};\n");
     out.push('\n');
     out.push_str("use brocanth::plugin_api::{Lifecycle, PluginError};\n");
     out.push_str("use brocanth::plugin_context::ContextItem;\n");
@@ -431,6 +438,21 @@ pub(super) fn stores_rs(project: &Project, default: Backend, stores: &[Named]) -
         );
     }
     out.push_str("}\n");
+    out.push_str(
+        "\nimpl NamedStores {\n\
+         \x20   /// The store called `name`, for a caller that holds the name as text:\n\
+         \x20   /// `image::src_in`. A handler names the field instead.\n\
+         \x20   #[allow(dead_code)]\n\
+         \x20   pub fn get(&self, name: &str) -> Option<&NamedStore> {\n\
+         \x20       match name {\n",
+    );
+    for store in stores {
+        out.push_str(&format!(
+            "            {:?} => Some(&self.{}),\n",
+            store.name, store.name
+        ));
+    }
+    out.push_str("            _ => None,\n        }\n    }\n}\n");
     out.push_str(STORES_STRUCTS);
 
     // The settings of each backend.
@@ -582,6 +604,9 @@ pub struct NamedStore {
     /// Mints and verifies this store's tokens. A token of another store
     /// opens nothing here.
     pub tokens: FileTokens,
+    /// Where the store's routes answer, once `storage-routes` set it at
+    /// start. Unset in a project without the routes.
+    pub path: Arc<OnceLock<String>>,
 }
 "#;
 
@@ -777,6 +802,7 @@ fn open_disk(
     Ok(NamedStore {
         store: Arc::new(disk),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 "#;
@@ -817,6 +843,7 @@ fn open_s3(
     Ok(NamedStore {
         store: Arc::new(objects),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 "#;
@@ -855,6 +882,7 @@ fn open_gcs(
     Ok(NamedStore {
         store: Arc::new(objects),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     })
 }
 "#;
@@ -873,6 +901,7 @@ fn no_bucket(name: &'static str, settings: &super::Settings, lc: &mut Lifecycle<
     NamedStore {
         store: Arc::new(Deferred::new()),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     }
 }
 
@@ -907,6 +936,7 @@ fn open_db(name: &str, settings: &super::Settings, pending: &mut Option<Deferred
     NamedStore {
         store: Arc::new(deferred),
         tokens: tokens(name, settings),
+        path: Arc::default(),
     }
 }
 "#;
@@ -1068,6 +1098,13 @@ pub(super) fn routes_rs(mut text: String, project: &Project, stores: &[Named]) -
         "use brocanth_storage::routes::{",
         "use brocanth_storage::named::AnyRoutes;\n",
     );
+    if !text.contains("use brocanth_storage::routes::{Downloads, ") {
+        swap(
+            &mut text,
+            "use brocanth_storage::routes::{",
+            "use brocanth_storage::routes::{Downloads, ",
+        );
+    }
     // `use crate::...` after the crate imports.
     let storage_use = text
         .find("use brocanth_storage::{")
@@ -1137,14 +1174,27 @@ impl UploadGuard for Guard{camel} {{
         "    routes: Option<AnyRoutes>,",
     );
     let mut list = String::new();
+    let mut built: Vec<String> = Vec::new();
     for store in stores {
         let name = &store.name;
         // Past rustfmt's 60 columns of arguments, so one per line.
         list.push_str(&format!(
-            "            named_routes(\n                \"{name}\",\n                &self.settings.{name},\n                &config,\n                named.{name},\n                Guard{},\n            )?,\n",
+            "        let {name}_routes = named_routes(\n            \"{name}\",\n            &self.settings.{name},\n            &config,\n            csp_of_stores.as_deref(),\n            named.{name},\n            Guard{},\n        )?;\n        check_signing(\"{name}\", &{name}_routes, lc);\n",
             store.camel()
         ));
+        built.push(format!("{name}_routes"));
     }
+    let one = built.join(", ");
+    let vec = if one.len() <= 60 {
+        format!("vec![{one}]")
+    } else {
+        let mut v = String::from("vec![\n");
+        for b in &built {
+            v.push_str(&format!("            {b},\n"));
+        }
+        v.push_str("        ]");
+        v
+    };
     // The default store's routes are built last, as `routes` when they may
     // redirect and in one line when they may not.
     let redirect = "        let routes = FileRoutes::new(store, tokens, config, Guard)?;\n";
@@ -1166,7 +1216,13 @@ impl UploadGuard for Guard{camel} {{
              \x20                help: register the storage plugin before this one in src/app.rs\",\n\
              \x20           ));\n\
              \x20       }};\n\
-             \x20       let mut all = vec![\n{list}        ];\n"
+             \x20       // Each named store that redirects checks its own bucket's origin\n\
+             \x20       // against the policy the security headers send (D34).\n\
+             \x20       let csp_of_stores = lc\n\
+             \x20           .services()\n\
+             \x20           .get::<brocanth_middleware::SecurityHeadersConfig>()\n\
+             \x20           .and_then(|headers| headers.enforced_csp());\n\
+             {list}\x20       let mut all = {vec};\n"
         ),
     );
     if anchor == plain {
@@ -1205,10 +1261,163 @@ impl UploadGuard for Guard{camel} {{
 "#,
         names = names.join(", ")
     );
+    let mut test = test;
+    if let Some(bucket) = stores.iter().find(|s| s.backend == Backend::S3) {
+        test = test
+            .strip_suffix("}\n")
+            .expect("the end of the tests")
+            .to_string();
+        test.push_str(&redirect_test(bucket, stores));
+        test.push_str("}\n");
+    }
     let end = text.rfind("}\n").expect("the end of the tests");
     text.replace_range(end.., &test);
     text
 }
+
+/// The test that a named S3 store may redirect, and a named disk store,
+/// when there is one, may not (D33). A unit test of the routes: a 307
+/// needs a bucket, and the project's tests have none.
+fn redirect_test(bucket: &Named, stores: &[Named]) -> String {
+    let name = &bucket.name;
+    let camel = bucket.camel();
+    let made = call("made", "named_routes", name, &camel);
+    let mut out = format!(
+        r#"
+    #[test]
+    fn a_named_bucket_store_may_redirect() {{
+        use super::{{named_routes, StoreRoutes}};
+        use crate::plugins::storage::stores::NamedStore;
+        use brocanth_storage::cloud::{{CloudBucket, S3Config}};
+        use brocanth_storage::routes::RoutesConfig;
+        use brocanth_storage::{{FileTokenKey, FileTokens, ObjectStorage}};
+        use std::sync::Arc;
+
+        // Built with no request: the client signs, the bucket is not asked.
+        let bucket = CloudBucket::s3(&S3Config {{
+            bucket: "assets".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: Some("http://localhost:9000".to_string()),
+            path_style: true,
+            access_key_id: Some("key".to_string()),
+            secret_access_key: Some("secret".to_string()),
+            prefix: None,
+        }})
+        .expect("a client");
+        let store = NamedStore {{
+            store: Arc::new(ObjectStorage::new(Arc::new(bucket))),
+            tokens: FileTokens::new(FileTokenKey::from_secret_for(b"test", "{name}")),
+            path: Arc::default(),
+        }};
+        let settings = StoreRoutes {{
+            downloads: "redirect".to_string(),
+            signed_ttl: 60,
+            ..StoreRoutes::default()
+        }};
+        let base = RoutesConfig::default();
+{made}        let routes = made.expect("a bucket signs");
+        assert!(routes.redirects());
+        assert_eq!(routes.path(), "/files/{name}");
+"#
+    );
+    if let Some(disk) = stores.iter().find(|s| s.backend == Backend::Fs) {
+        let disk_name = &disk.name;
+        let disk_camel = disk.camel();
+        out.push_str(&format!(
+            r#"
+        // A disk cannot sign, so the store refuses `redirect` (D33).
+        let disk = brocanth_storage::LocalDisk::open("var/uploads-{disk_name}").expect("a directory");
+        let store = NamedStore {{
+            store: Arc::new(disk),
+            tokens: FileTokens::new(FileTokenKey::from_secret_for(b"test", "{disk_name}")),
+            path: Arc::default(),
+        }};
+{refused}        let said = made.expect_err("a disk does not sign").to_string();
+        assert!(said.contains("downloads is \"redirect\""), "{{said}}");
+"#,
+            refused = call("made", "named_routes", disk_name, &disk_camel)
+        ));
+    }
+    out.push_str("    }\n");
+    out
+}
+
+/// `let {var} = {fun}("<name>", &settings, &base, None, store, super::Guard<Camel>);`
+/// as rustfmt lays it out: one line while the arguments fit in 60 columns.
+fn call(var: &str, fun: &str, name: &str, camel: &str) -> String {
+    let args = format!("\"{name}\", &settings, &base, None, store, super::Guard{camel}");
+    if args.len() <= 60 {
+        format!("        let {var} = {fun}({args});\n")
+    } else {
+        let mut out = format!("        let {var} = {fun}(\n");
+        for arg in args.split(", ") {
+            out.push_str(&format!("            {arg},\n"));
+        }
+        out.push_str("        );\n");
+        out
+    }
+}
+
+/// `src/plugins/image/mod.rs` with `src_in`: a link to a thumbnail in a
+/// named store, at the path its routes answer.
+pub(super) fn image_rs(mut text: String, stores: &[Named]) -> String {
+    if stores.is_empty() {
+        return text;
+    }
+    swap(
+        &mut text,
+        "use crate::plugins::storage::FileStore;\n",
+        "use crate::plugins::storage::FileStore;\nuse crate::plugins::storage::NamedStores;\n",
+    );
+    before(&mut text, "\n#[cfg(test)]\nmod tests {", IMAGE_SRC_IN);
+    let first = &stores[0].name;
+    before(
+        &mut text,
+        "    fn get(target: &str) -> Request {",
+        &IMAGE_SRC_IN_TEST.replace("@NAME@", first),
+    );
+    text
+}
+
+const IMAGE_SRC_IN: &str = r#"
+/// The link to one thumbnail of `key` in the named store `store`: `<img
+/// src>`. The path is the one that store's routes answer at, as
+/// `[storage_routes.<name>] path` set it.
+#[allow(dead_code)]
+pub fn src_in(
+    ctx: &Ctx,
+    store: &str,
+    key: &ObjectKey,
+    size: &str,
+    format: Option<&str>,
+) -> Result<String, String> {
+    let stores = ctx
+        .provided::<NamedStores, _>()
+        .ok_or_else(|| "this Ctx has no named stores: it was built by hand".to_string())?;
+    let named = stores
+        .get(store)
+        .ok_or_else(|| format!("no store is named `{store}`"))?;
+    let path = named
+        .path
+        .get()
+        .ok_or_else(|| format!("the store `{store}` has no routes"))?;
+    let token = named.tokens.issue(key);
+    Ok(routes::thumb_url(path, key, &token, spec(size, format)?))
+}
+"#;
+
+const IMAGE_SRC_IN_TEST: &str = r#"    #[tokio::test]
+    async fn a_named_store_links_to_its_own_routes() {
+        let app = crate::app::build().expect("the application builds");
+        let cx = app.core.context();
+        let stores: &NamedStores = cx.extract();
+        let store = stores.get("@NAME@").expect("the store");
+        let at = format!("{PATH}/@NAME@");
+        assert_eq!(store.path.get(), Some(&at));
+        assert!(stores.get("nowhere").is_none());
+    }
+
+"#;
 
 const STORE_ROUTES: &str = r#"
 /// The routes of one named store: `[storage_routes.<name>]`. The rest, the
@@ -1223,8 +1432,10 @@ pub struct StoreRoutes {
     pub public: bool,
     /// The largest file accepted, in bytes.
     pub max_bytes: usize,
-    /// How a download answers: `proxy`, the bytes through this process.
+    /// How a download is answered: "proxy" or "redirect".
     pub downloads: String,
+    /// Seconds a signed URL of a redirect lives.
+    pub signed_ttl: u64,
 }
 
 impl Default for StoreRoutes {
@@ -1234,6 +1445,7 @@ impl Default for StoreRoutes {
             public: false,
             max_bytes: 2_097_152,
             downloads: "proxy".to_string(),
+            signed_ttl: 300,
         }
     }
 }
@@ -1241,15 +1453,17 @@ impl Default for StoreRoutes {
 
 const NAMED_ROUTES_FNS: &str = r#"
 /// The routes of the named store `name`: the default's configuration, with
-/// the store's own path, `public` and `max_bytes`.
+/// the store's own path, `public`, `max_bytes`, `downloads` and
+/// `signed_ttl`. A store that cannot sign, a disk or Postgres, refuses
+/// `redirect` here (D33).
 fn named_routes(
     name: &str,
     settings: &StoreRoutes,
     base: &RoutesConfig,
+    csp: Option<&str>,
     store: NamedStore,
     guard: impl UploadGuard,
 ) -> Result<FileRoutes, PluginError> {
-    downloads(name, &settings.downloads)?;
     let path = if settings.path.is_empty() {
         format!("{}/{name}", base.path.trim_end_matches('/'))
     } else {
@@ -1259,23 +1473,43 @@ fn named_routes(
         path,
         public: settings.public,
         max_bytes: settings.max_bytes,
+        downloads: downloads(name, &settings.downloads)?,
+        signed_ttl: std::time::Duration::from_secs(settings.signed_ttl),
+        csp: csp.map(str::to_string),
         ..base.clone()
     };
-    FileRoutes::new(store.store, store.tokens, config, guard)
+    let routes = FileRoutes::new(store.store, store.tokens, config, guard)
+        .map_err(|e| PluginError::new(in_store(name, &e.to_string())))?;
+    // `image::src_in` links to the path the routes answer at.
+    let _ = store.path.set(routes.path().to_string());
+    Ok(routes)
 }
 
-/// How the downloads of the named store `name` answer. `proxy` sends the
-/// bytes through this process, as the default store does.
-///
-/// The redirect to a signed URL (`redirect`, `docs/object-storage.md` §9.3)
-/// plugs in here: a new arm that sets it on the store's `RoutesConfig`.
-fn downloads(name: &str, value: &str) -> Result<(), PluginError> {
-    match value {
-        "proxy" => Ok(()),
-        other => Err(PluginError::new(format!(
-            "[storage_routes.{name}] downloads is {other:?}, and this build only proxies\n\
-             help: set `downloads = \"proxy\"` under [storage_routes.{name}]"
-        ))),
+/// How the downloads of the named store `name` are answered: `proxy`, the
+/// bytes from this process, or `redirect`, a 307 to a URL the bucket signs.
+fn downloads(name: &str, value: &str) -> Result<Downloads, PluginError> {
+    Downloads::parse(value).map_err(|e| PluginError::new(in_store(name, &e)))
+}
+
+/// A message of the routes, about the named store `name`: its section is
+/// `[storage_routes.<name>]`.
+fn in_store(name: &str, said: &str) -> String {
+    said.replace("[storage_routes]", &format!("[storage_routes.{name}]"))
+}
+
+/// The start check of a named store that redirects (D34): `serve` awaits
+/// it once before it listens, so a key that cannot sign, or an `img-src`
+/// that blocks this store's bucket, stops the start with a `help:` line.
+fn check_signing(name: &'static str, routes: &FileRoutes, lc: &mut Lifecycle<'_>) {
+    if routes.redirects() {
+        let check = routes.clone();
+        lc.ready_when(move || {
+            let check = check.clone();
+            async move {
+                let said = check.check_signing().await;
+                said.map_err(|e| format!("[storage_routes.{name}] {e}"))
+            }
+        });
     }
 }
 "#;
