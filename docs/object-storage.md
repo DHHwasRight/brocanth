@@ -316,10 +316,10 @@ an upload in parts (it has no XML multipart API). Real GCS has both.
 - S3 session tokens and assumed roles from settings (the credential
   chain covers them from the environment).
 
-## 9. Named stores and signed downloads (proposed)
+## 9. Named stores and signed downloads
 
-Status: proposed (2026-11-27). Not accepted. It reverses D6 and D16 when
-the owner accepts it. §0 to §8 stay as the record of v1.
+Status: accepted (2026-11-27). The owner took every recommended answer
+in §9.7. It reverses D6 and D16. §0 to §8 stay as the record of v1.
 
 Two items from §8:
 
@@ -576,7 +576,9 @@ What the emulators cannot prove:
 
 Phases 1 and 2 do not depend on phases 3 and 4. They ship first.
 
-### 9.7 Open questions for the owner
+### 9.7 Questions answered by the owner
+
+The owner accepted each recommended answer below (2026-11-27).
 
 1. **Where a named store's settings live.** Recommended: `[storage.<name>]`
    and `--storage.<name>.bucket`. Trade-off: a future `[storage]` key can
