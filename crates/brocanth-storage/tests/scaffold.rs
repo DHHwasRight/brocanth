@@ -85,6 +85,25 @@ fn with_s3_the_objects_live_in_a_bucket() {
     shape("storage-s3", &["config", "storage", "storage-s3"]);
 }
 
+/// With a bucket and the routes: `downloads` and `signed_ttl` under
+/// `[storage_routes]`, and the start check of a redirect, which reads the
+/// policy of the security headers.
+#[test]
+fn with_s3_the_routes_may_redirect_to_a_signed_url() {
+    shape(
+        "storage-s3-redirect",
+        &[
+            "config",
+            "middleware",
+            "middleware-csrf",
+            "middleware-security-headers",
+            "storage",
+            "storage-s3",
+            "storage-routes",
+        ],
+    );
+}
+
 #[test]
 fn with_gcs_the_objects_live_in_a_bucket() {
     shape("storage-gcs", &["config", "storage", "storage-gcs"]);

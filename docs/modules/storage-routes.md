@@ -29,7 +29,7 @@ An option is set at build time in `src/modules/storage_routes.rs`. A setting is 
 | Provides | none |
 | Requires | none |
 | Uses | none |
-| Adapts to | [`storage-thumbnails`](storage-thumbnails.md): `?thumb=WxH` answers in the sizes `thumb_sizes` lists; [`image`](image.md): `&fmt=` converts a thumbnail to a format `formats` lists, and `max_pixels` caps the source |
+| Adapts to | [`storage-thumbnails`](storage-thumbnails.md): `?thumb=WxH` answers in the sizes `thumb_sizes` lists; [`image`](image.md): `&fmt=` converts a thumbnail to a format `formats` lists, and `max_pixels` caps the source; [`storage-s3`](storage-s3.md): `downloads` and `signed_ttl`: a download may redirect to a signed URL of the bucket; [`storage-gcs`](storage-gcs.md): `downloads` and `signed_ttl`: a download may redirect to a signed URL of the bucket |
 | Contributes | `AgentsSection` `storage-routes`: which file routes exist, and how a file is served |
 | Collects | none |
 | Exports | none |
@@ -54,6 +54,58 @@ An option is set at build time in `src/modules/storage_routes.rs`. A setting is 
 - A file that is not a known image is served as an attachment of type
   `application/octet-stream`, never inline. The type the client declared
   is not repeated.
+- With [`storage-s3`](storage-s3.md) or [`storage-gcs`](storage-gcs.md),
+  `downloads = "redirect"` answers a download with a `307` to a URL the
+  bucket signs. See [Redirected downloads](#redirected-downloads).
+
+## Redirected downloads
+
+Off by default: `downloads = "proxy"` sends the bytes from this process.
+Opt in per store when the files are large or many. Reason: a redirect needs
+a private bucket, a CSP change and a key that can sign, and the proxy needs
+none of them (`docs/object-storage.md` §9, D28).
+
+With `downloads = "redirect"`:
+
+- A `GET` with a valid token answers `307` to a URL the store signs for
+  `signed_ttl` seconds (default 300, from 1 to 604800). The bucket sends
+  the bytes and answers a `Range` itself.
+- The URL carries the type and the disposition inside its signature. A
+  sniffed PNG, JPEG, GIF or WebP goes inline as its type. Every other file
+  goes as an attachment of type `application/octet-stream`, SVG and PDF
+  included. A URL with an override removed has no valid signature.
+- The `307` holds `Cache-Control: private, max-age=<min(token time left,
+  signed_ttl / 2)>` and `Referrer-Policy: no-referrer`. The process keeps
+  each signed URL for half its life, so a second page view gets the same
+  URL and the browser cache works.
+- `HEAD`, `&thumb=` and `&fmt=` keep proxying. A URL signed for `GET`
+  refuses `HEAD`, and a thumbnail is small and already cached.
+- New uploads of a non-image also store `Content-Disposition: attachment`
+  on the object, so any URL that reaches it downloads.
+
+What the bucket cannot send: `X-Content-Type-Options: nosniff` and
+`Content-Security-Policy: sandbox`. The forced attachment covers them: a
+browser saves an attachment and renders nothing (`docs/object-storage.md`
+§9.4). Keep the bucket private: a public bucket serves every object with
+its stored headers to anyone who has the address.
+
+The start refuses a mistake before the server listens:
+
+- On a disk or Postgres store, `redirect` fails at start with a `help:`
+  line. Such a store cannot sign.
+- The start signs one URL. A key that cannot sign fails there.
+- With [`middleware-security-headers`](middleware-security-headers.md), a
+  policy whose `img-src` does not allow the bucket's origin fails the start,
+  and the `help:` line names the value:
+
+  ```toml
+  [security_headers.csp.allow]
+  img-src = ["https://uploads.s3.eu-west-1.amazonaws.com"]
+  ```
+
+`check --deploy` warns about `redirect` with an `http://` endpoint, a
+`signed_ttl` above 3600 seconds, and an endpoint on the site's own
+registrable domain.
 
 **Who may upload is your decision.** The module writes `may_upload` in
 `src/plugins/storage_routes/mod.rs`, and it answers no. It is async, so it
@@ -109,6 +161,8 @@ Section `[storage_routes]`, the plugin's instance name, not the module key. Envi
 | `max_bytes` | integer | `2097152` | `--storage_routes.max_bytes` | The largest file accepted, in bytes. At most `[server] max_body_bytes` (16 MiB by default): a larger value stops the start, because the server would refuse the upload first. |
 | `dedupe` | bool | `false` | `--storage_routes.dedupe` | Store identical uploads once, at their content address. Off, each upload has an address of its own. On, a delete removes the file for every holder: count the references before you delete. |
 | `thumb_sizes` | list | `["150x150t", "300x200", "600x600f"]` | `--storage_routes.thumb_sizes` | With [`storage-thumbnails`](storage-thumbnails.md) only. The only sizes `?thumb=` may ask for; any other is a 400. |
+| `downloads` | text | `"proxy"` | `--storage_routes.downloads` | With [`storage-s3`](storage-s3.md) or [`storage-gcs`](storage-gcs.md) only. `"proxy"` sends the bytes from this process; `"redirect"` answers 307 to a signed URL of the bucket. |
+| `signed_ttl` | integer | `300` | `--storage_routes.signed_ttl` | With a bucket only. Seconds a signed URL of a redirect lives, from 1 to 604800. It cannot be revoked, so this is the leak window. |
 
 ## Read more
 

@@ -28,6 +28,9 @@
 //! | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
 //! | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
 //! | `deploy/storage-local` | warning | the object store is `storage-fs` (or, before the Kind, `storage` with no `db`), so its files are on one machine's disk |
+//! | `deploy/storage-redirect-http` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` is `http://`, so the signed URL travels in clear text |
+//! | `deploy/storage-signed-ttl` | warning | `[storage_routes] downloads` is `redirect` and `signed_ttl` is above 3600 seconds |
+//! | `deploy/storage-sibling-domain` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` shares its registrable domain with the site's own address (`[meta] base_url`, `[sitemap] base_url` or `[feed] site_url`) |
 //! | `deploy/csrf-off` | error | `[bindings]` binds `SessionCookie` and no `Csrf` hook is registered |
 //! | `deploy/hooks-not-run` | error | hooks are registered and nothing in `src/` runs them |
 //! | `deploy/hsts` | warning | no `SecurityHeaders` hook and no `Strict-Transport-Security` in `src/`, or the hook has HSTS off, or nothing tells it a request came over TLS |
@@ -711,6 +714,7 @@ fn deploy(
         }
         out.push(d);
     }
+    out.extend(storage_redirect(project, config, &file));
     // CSRF, and whether hooks run at all.
     // A marker with no module list says nothing, so assume cookies.
     let has_cookies = project.modules.is_empty() || project.binds("SessionCookie");
@@ -886,6 +890,115 @@ fn observability(project: &Project, config: &Config, file: &str) -> Vec<Finding>
     out
 }
 
+/// The longest `signed_ttl` a redirect may have before `check --deploy`
+/// says so: an hour.
+const REDIRECT_TTL_WARNING: i64 = 3600;
+
+/// `deploy/storage-redirect-http`, `deploy/storage-signed-ttl` and
+/// `deploy/storage-sibling-domain`: a download route that answers with a
+/// signed URL of the bucket (`docs/object-storage.md` §9.3, §9.4). The URL
+/// is a bearer credential nobody can revoke.
+fn storage_redirect(project: &Project, config: &Config, file: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let Some(downloads) = get(config, "storage_routes.downloads") else {
+        return out;
+    };
+    if downloads.as_str().map(str::trim) != Some("redirect") {
+        return out;
+    }
+    let endpoint = get(config, "storage.endpoint")
+        .and_then(|v| Some((v, v.as_str()?.trim())))
+        .filter(|(_, url)| !url.is_empty());
+    if let Some((v, url)) = endpoint {
+        if url.starts_with("http://") {
+            out.push(
+                Finding::warning(
+                    "deploy/storage-redirect-http",
+                    "`[storage_routes] downloads` is `redirect` and `[storage] endpoint` is plain HTTP",
+                )
+                .at(place(project, v))
+                .note("the signed URL is a bearer credential, and it travels in clear text to the browser and the bucket")
+                .help(format!(
+                    "set `endpoint` under `[storage]` in {file} to the server's https:// URL, or `downloads = \"proxy\"` under `[storage_routes]`"
+                )),
+            );
+        }
+    }
+    if let Some(v) = get(config, "storage_routes.signed_ttl") {
+        if let Some(ttl) = v.as_integer().filter(|ttl| *ttl > REDIRECT_TTL_WARNING) {
+            out.push(
+                Finding::warning(
+                    "deploy/storage-signed-ttl",
+                    format!("`[storage_routes] signed_ttl` is {ttl} seconds"),
+                )
+                .at(place(project, v))
+                .note("a signed URL cannot be revoked: whoever holds a copy reads the file until it expires")
+                .help(format!(
+                    "set `signed_ttl` under `[storage_routes]` in {file} to at most {REDIRECT_TTL_WARNING}, such as 300"
+                )),
+            );
+        }
+    }
+    let site = ["meta.base_url", "sitemap.base_url", "feed.site_url"]
+        .iter()
+        .filter_map(|path| get(config, path)?.as_str().and_then(url_host))
+        .next();
+    if let (Some((v, url)), Some(site)) = (endpoint, site) {
+        if let Some(host) = url_host(url) {
+            let (bucket, own) = (registrable(&host), registrable(&site));
+            if bucket.is_some() && bucket == own {
+                let domain = own.unwrap_or_default();
+                out.push(
+                    Finding::warning(
+                        "deploy/storage-sibling-domain",
+                        format!("`[storage] endpoint` {host} is on {domain}, the site's own domain"),
+                    )
+                    .at(place(project, v))
+                    .note("a redirect sends the browser there; a page rendered on a sibling host can set cookies for the whole domain")
+                    .note("every non-image goes as an attachment, so nothing renders by design; keep the bucket on a domain of its own all the same")
+                    .help(format!(
+                        "serve the bucket from a domain the site does not share, such as the provider's own host, or set `downloads = \"proxy\"` under `[storage_routes]` in {file}"
+                    )),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The host of an `http://` or `https://` URL, lowercased, without a port.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?.trim_end_matches('.');
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The registrable domain of a host, by a rule short of the public suffix
+/// list: the last two labels, or three when the second-last is a common
+/// second-level label under a country code (`example.co.uk`). `None` for
+/// an address, `localhost` or a single label. A miss under a suffix the
+/// rule does not know is a warning too many, never one too few for a
+/// shared `example.com`.
+fn registrable(host: &str) -> Option<String> {
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return None;
+    }
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.len() < 2 {
+        return None;
+    }
+    let n = labels.len();
+    let country = labels[n - 1].len() == 2;
+    let second = ["co", "com", "net", "org", "ac", "gov", "edu"].contains(&labels[n - 2]);
+    let take = if country && second && n >= 3 { 3 } else { 2 };
+    Some(labels[n - take..].join("."))
+}
+
 /// `deploy/hsts`: whether a response over HTTPS carries
 /// `Strict-Transport-Security`.
 ///
@@ -1015,6 +1128,76 @@ secure = false
 [storage]
 secret = "development only: replace before anything is uploaded in anger"
 "#;
+
+    #[test]
+    fn a_redirecting_route_warns_about_clear_text_a_long_ttl_and_a_sibling_domain() {
+        let src = sources(&[]);
+        let picks = project(&["storage", "storage-s3", "storage-routes"]);
+        let run = |toml: &str| {
+            let config = Config::from_toml("shop", "production", toml).unwrap();
+            ids(&deploy(&picks, &config, &src, &|_| None, &[]))
+                .into_iter()
+                .filter(|id| id.starts_with("deploy/storage-"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let all = r#"
+[storage]
+endpoint = "http://files.shop.example.co.uk"
+
+[storage_routes]
+downloads = "redirect"
+signed_ttl = 7200
+
+[meta]
+base_url = "https://www.shop.example.co.uk/"
+"#;
+        assert_eq!(
+            run(all),
+            [
+                "deploy/storage-redirect-http",
+                "deploy/storage-signed-ttl",
+                "deploy/storage-sibling-domain"
+            ]
+        );
+        // Proxy: none of them. The URL never leaves the process.
+        assert!(run(&all.replace("\"redirect\"", "\"proxy\"")).is_empty());
+        // HTTPS on the provider's host, an hour, and another domain: none.
+        let fine = r#"
+[storage]
+endpoint = "https://acct.r2.cloudflarestorage.com"
+
+[storage_routes]
+downloads = "redirect"
+signed_ttl = 3600
+
+[sitemap]
+base_url = "https://shop.example"
+"#;
+        assert!(run(fine).is_empty(), "{:?}", run(fine));
+        // No endpoint (AWS) and no site address: nothing to compare.
+        assert!(run("[storage_routes]\ndownloads = \"redirect\"\n").is_empty());
+    }
+
+    #[test]
+    fn a_registrable_domain_is_the_last_two_labels_or_three_under_a_country() {
+        assert_eq!(
+            registrable("files.example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            registrable("a.b.example.co.uk").as_deref(),
+            Some("example.co.uk")
+        );
+        assert_eq!(registrable("example.de").as_deref(), Some("example.de"));
+        assert_eq!(registrable("localhost"), None);
+        assert_eq!(registrable("127.0.0.1"), None);
+        assert_eq!(
+            url_host("https://U:P@Files.Example.com:9000/x").as_deref(),
+            Some("files.example.com")
+        );
+        assert_eq!(url_host("ftp://x"), None);
+    }
 
     #[test]
     fn storage_on_a_local_disk_is_a_warning_and_storage_on_db_is_not() {

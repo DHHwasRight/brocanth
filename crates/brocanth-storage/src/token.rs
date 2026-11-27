@@ -233,6 +233,28 @@ impl FileTokens {
     /// # Errors
     /// See [`FileTokens::verify`].
     pub fn verify_at(&self, presented: &str, now: UnixTime) -> Result<ObjectKey, StorageError> {
+        self.verify_until_at(presented, now).map(|(key, _)| key)
+    }
+
+    /// Verifies a token, and answers the address it opens and the second
+    /// it expires at. A redirect reads the expiry, so the browser keeps the
+    /// redirect no longer than the token.
+    ///
+    /// # Errors
+    /// See [`FileTokens::verify`].
+    pub fn verify_until(&self, presented: &str) -> Result<(ObjectKey, UnixTime), StorageError> {
+        self.verify_until_at(presented, now())
+    }
+
+    /// [`FileTokens::verify_until`] as if the time were `now`.
+    ///
+    /// # Errors
+    /// See [`FileTokens::verify`].
+    pub fn verify_until_at(
+        &self,
+        presented: &str,
+        now: UnixTime,
+    ) -> Result<(ObjectKey, UnixTime), StorageError> {
         // A bound before any decoding, so a megabyte in a query string is
         // rejected by a comparison rather than by an allocator.
         if presented.len() > 256 {
@@ -267,7 +289,7 @@ impl FileTokens {
         if now >= expires_at {
             return Err(StorageError::InvalidToken);
         }
-        Ok(ObjectKey::from_bytes(address))
+        Ok((ObjectKey::from_bytes(address), expires_at))
     }
 
     fn mac(&self, payload: &[u8]) -> [u8; MAC_LEN] {

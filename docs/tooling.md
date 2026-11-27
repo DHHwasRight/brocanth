@@ -217,6 +217,9 @@ error[deploy/cookie-insecure]: `[auth] secure` is false, so the cookie also trav
 | `deploy/migrate` | warning | a module's `migrate` is true, or unset where it defaults to true |
 | `deploy/metrics-public` | warning | `/metrics` is on the main listener with no token |
 | `deploy/drain-delay` | warning | `/readyz` is on and `drain_delay_secs` is 0 |
+| `deploy/storage-redirect-http` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` is `http://`, so the signed URL travels in clear text |
+| `deploy/storage-signed-ttl` | warning | `[storage_routes] downloads` is `redirect` and `signed_ttl` is above 3600 seconds |
+| `deploy/storage-sibling-domain` | warning | `[storage_routes] downloads` is `redirect` and `[storage] endpoint` shares its registrable domain with the site's own address (`[meta] base_url`, `[sitemap] base_url` or `[feed] site_url`) |
 | `deploy/csrf-off` | error | the project has `sessions` or `auth`, and no `Csrf` hook is registered |
 | `deploy/hooks-not-run` | error | a hook is registered, and nothing in `src/` serves through `brocanth_server::serve` or `Bridge` |
 | `deploy/hsts` | warning | nothing in `src/` sets `Strict-Transport-Security` |

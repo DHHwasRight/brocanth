@@ -54,9 +54,16 @@ does not answer each stop the start with a `help:` line.
 **Metadata.** The media type is the object's `Content-Type`, the original
 name a metadata entry (`filename`). Postgres holds nothing for it.
 
-**Downloads.** `storage-routes` still proxies the bytes, so the headers that
-make a hostile upload harmless stay on the response. `Storage::signed_url`
-answers a URL that reads the object directly, for code that wants one.
+**Downloads.** `storage-routes` proxies the bytes by default, so the
+headers that make a hostile upload harmless stay on the response. With
+`downloads = "redirect"` under `[storage_routes]`, a download answers `307`
+to a signed URL instead: see
+[`storage-routes`](storage-routes.md#redirected-downloads).
+`Storage::signed_url` answers such a URL for code that wants one. It
+carries the type and the disposition inside its signature: an image inline,
+anything else as an attachment of type `application/octet-stream`. A new
+upload of a non-image also stores `Content-Disposition: attachment` on the
+object. Keep the bucket private.
 
 **Credentials.** A service-account key in JSON, read from a file with
 `--storage.credentials_file`, or none: then the application default

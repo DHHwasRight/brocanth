@@ -6,7 +6,7 @@
 //! | Request | Answer |
 //! |---|---|
 //! | `POST {path}`, `multipart/form-data` | the guard, then the `file` part stored; `303` to `return_to`, or `201` with the address |
-//! | `GET {path}/{address}?token=…` | the object, when the token opens that address |
+//! | `GET {path}/{address}?token=…` | the object, when the token opens that address; with `downloads = redirect`, a `307` to a signed URL of the bucket |
 //! | `GET {path}/{address}?token=…&thumb=300x200t` | a thumbnail of it, from the cache or rendered |
 //! | `GET {path}/{address}?token=…&thumb=300x200t&fmt=webp` | the thumbnail in a format [`RoutesConfig::formats`] lists |
 //! | `GET {path}/{address}` | `403`, unless the routes are `public` |
@@ -62,10 +62,27 @@
 //!   application counts references before it deletes.
 //! * **A name outside ASCII survives.** `Content-Disposition` carries an
 //!   ASCII `filename=` and the real name in `filename*=` (RFC 6266).
+//! * **A download may redirect to the bucket, when the project opts in.**
+//!   With [`Downloads::Redirect`], a `GET` with a valid token answers
+//!   `307` to a URL the store signs, and the bucket sends the bytes. The
+//!   URL carries the same rule the proxy follows, inside its signature: a
+//!   sniffed image inline as its type, anything else as an attachment of
+//!   type `application/octet-stream` ([`SignedGet::for_object`]). `HEAD`,
+//!   `?thumb=` and `&fmt=` keep proxying. The redirect holds
+//!   `Cache-Control: private` for at most half the URL's life, and
+//!   `Referrer-Policy: no-referrer`, so neither a cache nor a referrer
+//!   keeps the bearer URL. A store that cannot sign (a disk, Postgres)
+//!   refuses `Redirect` when the routes are built
+//!   (`docs/object-storage.md` §9.3, D28 to D34).
+//!
+//! [`SignedGet::for_object`]: crate::SignedGet::for_object
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use brocanth::plugin_api::PluginError;
 use brocanth::plugin_body::Body;
@@ -74,10 +91,10 @@ use brocanth_input::multipart::{self, Limits, Multipart};
 
 use crate::error::StorageError;
 use crate::key::ObjectKey;
-use crate::meta::{ContentType, ObjectInfo};
+use crate::meta::{attachment, ContentType, Filename, ObjectInfo};
 use crate::spec::{VariantFormat, VariantSpec};
 use crate::storage::Storage;
-use crate::token::{FileToken, FileTokens};
+use crate::token::{now, FileToken, FileTokens, UnixTime};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -116,7 +133,70 @@ pub struct RoutesConfig {
     pub csrf_field: String,
     /// The header the CSRF check reads: `[csrf] header`.
     pub csrf_header: String,
+    /// How a download is answered: the bytes from this process (the
+    /// default), or a redirect to a signed URL of the bucket.
+    pub downloads: Downloads,
+    /// How long a signed URL of a redirect lives. From one second to seven
+    /// days; [`DEFAULT_SIGNED_TTL`] by default. It is a bearer credential
+    /// nobody can revoke, so this is the leak window.
+    pub signed_ttl: Duration,
+    /// The `Content-Security-Policy` the application enforces, if any.
+    /// With [`Downloads::Redirect`], the start check refuses a policy whose
+    /// `img-src` does not allow the bucket's origin
+    /// ([`FileRoutes::check_signing`]).
+    pub csp: Option<String>,
 }
+
+/// How the download route answers a read (`docs/object-storage.md` D28).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Downloads {
+    /// Read the object and send it, with `nosniff` and, for a non-image,
+    /// `Content-Disposition: attachment` and `Content-Security-Policy:
+    /// sandbox`. Needs nothing from the store. The default.
+    #[default]
+    Proxy,
+    /// Answer `307` to a URL the store signs. The bytes do not pass through
+    /// this process, and the bucket answers a `Range`. Needs a store that
+    /// signs (S3, GCS), a private bucket, and an `img-src` that allows the
+    /// bucket's origin.
+    Redirect,
+}
+
+impl Downloads {
+    /// `proxy` or `redirect`.
+    ///
+    /// # Errors
+    /// Any other word, with a `help:` line.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "proxy" => Ok(Self::Proxy),
+            "redirect" => Ok(Self::Redirect),
+            other => Err(format!(
+                "[storage_routes] downloads is {other:?}, and it takes \"proxy\" or \"redirect\"\n\
+                 help: set `downloads` under [storage_routes] to \"proxy\" (the bytes pass through \
+                 the application) or \"redirect\" (a 307 to a signed URL of the bucket)"
+            )),
+        }
+    }
+
+    /// The setting's word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Redirect => "redirect",
+        }
+    }
+}
+
+/// How long a signed URL of a redirect lives by default: five minutes.
+pub const DEFAULT_SIGNED_TTL: Duration = Duration::from_secs(300);
+
+/// The longest a signed URL may live: seven days, the limit of S3 and GCS.
+pub const MAX_SIGNED_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The most signed URLs one set of routes keeps. Past it, the expired ones
+/// go; when none has expired, all go. A URL is about a kilobyte.
+const SIGNED_CACHE_ENTRIES: usize = 4096;
 
 /// The largest file by default: 2 MiB, well under the server's default
 /// request body cap of 16 MiB.
@@ -142,6 +222,9 @@ impl Default for RoutesConfig {
             dedupe: false,
             csrf_field: "_csrf_token".to_string(),
             csrf_header: "x-csrf-token".to_string(),
+            downloads: Downloads::Proxy,
+            signed_ttl: DEFAULT_SIGNED_TTL,
+            csp: None,
         }
     }
 }
@@ -208,6 +291,15 @@ struct Inner {
     tokens: FileTokens,
     config: RoutesConfig,
     guard: Box<dyn UploadGuard>,
+    /// Signed URLs by address, with when each was signed. One address has
+    /// one disposition, because the first upload owns the metadata, so the
+    /// address is the whole key. A hit gives the browser the same URL, so
+    /// its cache works across page views, and saves the GCS `signBlob`
+    /// call of a store with no key.
+    signed: Mutex<HashMap<ObjectKey, (String, Instant)>>,
+    /// The start check passed once. `/readyz` runs a check on each probe,
+    /// and a GCS store with no key would make a `signBlob` call each time.
+    signing_checked: AtomicBool,
 }
 
 /// The upload and download routes, as one request hook. Cheap to clone.
@@ -279,14 +371,77 @@ impl FileRoutes {
                  help: empty `formats`, or turn thumbnails on",
             ));
         }
+        if config.signed_ttl < Duration::from_secs(1) || config.signed_ttl > MAX_SIGNED_TTL {
+            return Err(PluginError::new(format!(
+                "[storage_routes] signed_ttl is {} seconds, outside 1 to {}, the life S3 and GCS allow a signed URL\n\
+                 help: set `signed_ttl` under [storage_routes] to a number of seconds in that window, such as 300",
+                config.signed_ttl.as_secs(),
+                MAX_SIGNED_TTL.as_secs()
+            )));
+        }
+        if config.downloads == Downloads::Redirect && !store.can_sign() {
+            return Err(PluginError::new(
+                "[storage_routes] downloads is \"redirect\", and the file store cannot sign a URL: a disk or Postgres store has no URL to redirect to\n\
+                 help: set `downloads = \"proxy\"` under [storage_routes], or move the files to a bucket with `brocanth add storage-s3` (or `storage-gcs`)",
+            ));
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 store,
                 tokens,
                 config,
                 guard: Box::new(guard),
+                signed: Mutex::new(HashMap::new()),
+                signing_checked: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// Whether a download redirects to a signed URL.
+    pub fn redirects(&self) -> bool {
+        self.inner.config.downloads == Downloads::Redirect
+    }
+
+    /// The start check of a redirecting route (`docs/object-storage.md`
+    /// D34): the store signs one URL, and an enforced
+    /// Content-Security-Policy allows the bucket's origin in `img-src`.
+    /// Register it with `Lifecycle::ready_when`, so the start fails before
+    /// the first image fails in a browser. With [`Downloads::Proxy`] it
+    /// answers `Ok` and sends nothing. Once it passed, it answers `Ok` and
+    /// signs nothing more.
+    ///
+    /// # Errors
+    /// What failed, with a `help:` line. A missing `img-src` source names
+    /// the value to add.
+    pub async fn check_signing(&self) -> Result<(), String> {
+        if !self.redirects() || self.inner.signing_checked.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let origin = match self.inner.store.signing_origin().await {
+            Ok(Some(origin)) => origin,
+            Ok(None) => {
+                return Err(
+                    "downloads is \"redirect\", and the file store signs no URL\n\
+                     help: set `downloads = \"proxy\"` under [storage_routes]"
+                        .to_string(),
+                )
+            }
+            Err(e) => {
+                return Err(format!(
+                    "downloads is \"redirect\", and the file store cannot sign a URL: {e}"
+                ))
+            }
+        };
+        if let Some(csp) = &self.inner.config.csp {
+            if !img_src_allows(csp, &origin) {
+                return Err(format!(
+                    "downloads is \"redirect\", so images come from {origin}, and the Content-Security-Policy `img-src` does not allow it: every redirected image would fail in the browser\n\
+                     help: add {origin:?} to `img-src`: under [security_headers.csp.allow], set img-src = [{origin:?}]"
+                ));
+            }
+        }
+        self.inner.signing_checked.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// The hook that lets a plain form's CSRF field reach the CSRF check.
@@ -415,9 +570,9 @@ impl FileRoutes {
         };
         let query = request.uri().query().unwrap_or("");
         let token = param(query, "token");
-        match token {
-            Some(token) => match self.inner.tokens.verify(token) {
-                Ok(opens) if opens == key => {}
+        let token_expires = match token {
+            Some(token) => match self.inner.tokens.verify_until(token) {
+                Ok((opens, expires)) if opens == key => Some(expires),
                 _ => {
                     return plain(
                         403,
@@ -425,9 +580,9 @@ impl FileRoutes {
                     )
                 }
             },
-            None if config.public => {}
+            None if config.public => None,
             None => return plain(403, "this file needs a link from the page that shows it"),
-        }
+        };
         let thumb = match param(query, "thumb") {
             None => None,
             Some(_) if !config.thumbnails => {
@@ -481,6 +636,12 @@ impl FileRoutes {
                 Err(e) => return plain(400, &e.to_string()),
             },
         };
+        // A redirect for a whole object read with GET. HEAD, a thumbnail
+        // and a conversion keep proxying (D30): a URL signed for GET
+        // refuses HEAD, and a thumbnail is small and this process's own.
+        if thumb.is_none() && self.redirects() && request.method() == http::Method::GET {
+            return self.redirect(&key, token_expires).await;
+        }
         let etag = match thumb {
             Some(spec) => format!("\"{}-{spec}\"", key.to_hex()),
             None => key.etag(),
@@ -518,11 +679,7 @@ impl FileRoutes {
                     Ok(bytes) => bytes,
                     Err(e) => return failed(&e),
                 };
-                (
-                    bytes,
-                    meta.content_type,
-                    meta.filename.map(|f| f.as_str().to_string()),
-                )
+                (bytes, meta.content_type, meta.filename)
             }
         };
         // A type that is not a sniffed image is the client's claim, so it is
@@ -550,11 +707,10 @@ impl FileRoutes {
         set(&mut answer, http::header::CACHE_CONTROL, &cache);
         set(&mut answer, http::header::X_CONTENT_TYPE_OPTIONS, "nosniff");
         if !content_type.is_safe_to_inline() {
-            let name = filename.unwrap_or_else(|| "download".to_string());
             set(
                 &mut answer,
                 http::header::CONTENT_DISPOSITION,
-                &content_disposition(&name),
+                &attachment(filename.as_ref()),
             );
             // Opened directly, it still runs nothing.
             set(
@@ -566,11 +722,67 @@ impl FileRoutes {
         answer
     }
 
+    /// `307` to a signed URL of the object (D29, D32).
+    async fn redirect(&self, key: &ObjectKey, token_expires: Option<UnixTime>) -> Response {
+        let ttl = self.inner.config.signed_ttl;
+        // A cached URL is at most half its life old, so a browser that
+        // keeps the redirect for the other half never follows a dead URL.
+        let half = ttl / 2;
+        let url = match self.cached(key, half) {
+            Some(url) => url,
+            None => match self.inner.store.signed_url(key, ttl).await {
+                Ok(Some(url)) => {
+                    self.remember(key, &url);
+                    url
+                }
+                // `new` refused a store that cannot sign.
+                Ok(None) => return plain(500, "the file store signs no URL"),
+                Err(e) => return failed(&e),
+            },
+        };
+        let mut max_age = half.as_secs();
+        if let Some(expires) = token_expires {
+            max_age = max_age.min(u64::try_from(expires.saturating_sub(now())).unwrap_or(0));
+        }
+        let mut answer = plain(307, "");
+        answer.headers_mut().remove(http::header::CONTENT_TYPE);
+        set(&mut answer, http::header::LOCATION, &url);
+        set(
+            &mut answer,
+            http::header::CACHE_CONTROL,
+            &format!("private, max-age={max_age}"),
+        );
+        // The URL is a bearer credential: no page the bucket's answer
+        // opens may learn it from a `Referer`.
+        set(&mut answer, http::header::REFERRER_POLICY, "no-referrer");
+        answer
+    }
+
+    fn cached(&self, key: &ObjectKey, fresh_for: Duration) -> Option<String> {
+        let signed = self.inner.signed.lock().ok()?;
+        let (url, at) = signed.get(key)?;
+        (at.elapsed() < fresh_for).then(|| url.clone())
+    }
+
+    fn remember(&self, key: &ObjectKey, url: &str) {
+        let Ok(mut signed) = self.inner.signed.lock() else {
+            return;
+        };
+        if signed.len() >= SIGNED_CACHE_ENTRIES {
+            let fresh_for = self.inner.config.signed_ttl / 2;
+            signed.retain(|_, (_, at)| at.elapsed() < fresh_for);
+            if signed.len() >= SIGNED_CACHE_ENTRIES {
+                signed.clear();
+            }
+        }
+        signed.insert(*key, (url.to_string(), Instant::now()));
+    }
+
     async fn variant(
         &self,
         key: &ObjectKey,
         spec: VariantSpec,
-    ) -> Result<(Vec<u8>, ContentType, Option<String>), Refusal> {
+    ) -> Result<(Vec<u8>, ContentType, Option<Filename>), Refusal> {
         #[cfg(feature = "variants")]
         {
             match crate::variants::derive_variant_with(
@@ -799,27 +1011,86 @@ fn sizes(specs: &[VariantSpec]) -> String {
         .join(", ")
 }
 
-/// `attachment` with the name twice (RFC 6266): `filename=` in ASCII, every
-/// other character as `_`, for an old client, and `filename*=` with the
-/// whole name, percent-encoded in UTF-8 (RFC 5987). The name is a
-/// [`Filename`](crate::Filename): no quote, no backslash, no control.
-fn content_disposition(name: &str) -> String {
-    let ascii: String = name
-        .chars()
-        .map(|c| if c.is_ascii() { c } else { '_' })
-        .collect();
-    if ascii == name {
-        return format!("attachment; filename=\"{name}\"");
-    }
-    let mut encoded = String::with_capacity(name.len() * 3);
-    for b in name.bytes() {
-        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
-            encoded.push(char::from(b));
-        } else {
-            encoded.push_str(&format!("%{b:02X}"));
+/// Whether a Content-Security-Policy lets an `<img>` load from `origin`
+/// (`scheme://host[:port]`): its `img-src`, or `default-src` without one,
+/// or no such directive at all. After a redirect a source's path is not
+/// compared (CSP 3), so only the scheme, the host and the port count.
+fn img_src_allows(policy: &str, origin: &str) -> bool {
+    let mut img = None;
+    let mut default = None;
+    for directive in policy.split(';') {
+        let mut words = directive.split_whitespace();
+        let Some(name) = words.next() else { continue };
+        let sources: Vec<&str> = words.collect();
+        if name.eq_ignore_ascii_case("img-src") && img.is_none() {
+            img = Some(sources);
+        } else if name.eq_ignore_ascii_case("default-src") && default.is_none() {
+            default = Some(sources);
         }
     }
-    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+    let Some(sources) = img.or(default) else {
+        return true;
+    };
+    sources.iter().any(|source| source_allows(source, origin))
+}
+
+/// One CSP source against an origin. `'self'` never matches: the bucket is
+/// another origin.
+fn source_allows(source: &str, origin: &str) -> bool {
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    let web = scheme == "http" || scheme == "https";
+    let source = source.to_ascii_lowercase();
+    if source == "*" {
+        return web;
+    }
+    if source.starts_with('\'') {
+        return false;
+    }
+    // A scheme matches itself, and `http` lets `https` through.
+    let scheme_ok = |s: &str| s == scheme || (s == "http" && scheme == "https");
+    if let Some(s) = source.strip_suffix(':') {
+        if !s.contains(['/', '.']) {
+            return scheme_ok(s);
+        }
+    }
+    let (source_scheme, rest) = match source.split_once("://") {
+        Some((s, rest)) => (Some(s), rest),
+        None => (None, source.as_str()),
+    };
+    match source_scheme {
+        Some(s) if !scheme_ok(s) => return false,
+        None if !web => return false,
+        _ => {}
+    }
+    let host_port = rest.split('/').next().unwrap_or("");
+    let (source_host, source_port) = split_port(host_port);
+    let (host, port) = split_port(authority);
+    let host_ok = match source_host.strip_prefix("*.") {
+        Some(parent) => host.len() > parent.len() + 1 && host.ends_with(&format!(".{parent}")),
+        None => source_host == host,
+    };
+    let default_port = if scheme == "https" { "443" } else { "80" };
+    let port = port.unwrap_or(default_port);
+    let port_ok = match source_port {
+        Some("*") => true,
+        Some(p) => p == port,
+        None => port == default_port,
+    };
+    host_ok && port_ok
+}
+
+/// `host:port` as its parts, when what follows the last `:` is a port.
+fn split_port(text: &str) -> (&str, Option<&str>) {
+    match text.rsplit_once(':') {
+        Some((host, port))
+            if port == "*" || (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            (host, Some(port))
+        }
+        _ => (text, None),
+    }
 }
 
 fn set(answer: &mut Response, name: http::HeaderName, value: &str) {
@@ -857,15 +1128,62 @@ mod tests {
     #[test]
     fn a_name_outside_ascii_goes_out_twice() {
         assert_eq!(
-            content_disposition("report.pdf"),
+            attachment(Filename::sanitise("report.pdf").as_ref()),
             "attachment; filename=\"report.pdf\""
         );
-        let header = content_disposition("résumé 2.pdf");
+        let header = attachment(Filename::sanitise("résumé 2.pdf").as_ref());
         assert_eq!(
             header,
             "attachment; filename=\"r_sum_ 2.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9%202.pdf"
         );
         assert!(http::HeaderValue::from_str(&header).is_ok());
+        assert_eq!(attachment(None), "attachment; filename=\"download\"");
+    }
+
+    #[test]
+    fn img_src_is_read_as_a_browser_reads_it() {
+        let bucket = "https://b.s3.eu-west-1.amazonaws.com";
+        // The default policy of `middleware-security-headers`.
+        let base = "default-src 'self'; img-src 'self' data:; object-src 'none'";
+        assert!(!img_src_allows(base, bucket));
+        assert!(img_src_allows(
+            &format!("default-src 'self'; img-src 'self' data: {bucket}"),
+            bucket
+        ));
+        // No img-src: default-src decides; neither: anything loads.
+        assert!(!img_src_allows("default-src 'self'", bucket));
+        assert!(img_src_allows("default-src https:", bucket));
+        assert!(img_src_allows("object-src 'none'", bucket));
+        // Wildcards, schemes, ports and paths.
+        assert!(img_src_allows("img-src *", bucket));
+        assert!(img_src_allows("img-src https://*.amazonaws.com", bucket));
+        assert!(!img_src_allows(
+            "img-src https://*.b.s3.eu-west-1.amazonaws.com",
+            bucket
+        ));
+        assert!(img_src_allows(
+            "img-src b.s3.eu-west-1.amazonaws.com",
+            bucket
+        ));
+        assert!(img_src_allows(
+            "img-src https://b.s3.eu-west-1.amazonaws.com/objects/",
+            bucket
+        ));
+        assert!(img_src_allows(
+            "img-src https://b.s3.eu-west-1.amazonaws.com:443",
+            bucket
+        ));
+        assert!(!img_src_allows(
+            "img-src https://b.s3.eu-west-1.amazonaws.com:8443",
+            bucket
+        ));
+        assert!(!img_src_allows("img-src http://other.example", bucket));
+        let minio = "http://localhost:9000";
+        assert!(img_src_allows("img-src http://localhost:9000", minio));
+        assert!(!img_src_allows("img-src http://localhost", minio));
+        assert!(img_src_allows("img-src http://localhost:*", minio));
+        assert!(!img_src_allows("img-src https://localhost:9000", minio));
+        assert!(!img_src_allows("img-src 'none'", minio));
     }
 
     #[test]

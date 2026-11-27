@@ -552,11 +552,14 @@ for new objects, but the address is then the only secret. `check
 
 What the emulators cannot prove:
 
-- fake-gcs-server does not check V4 signatures or expiry, and this design
-  did not confirm that it echoes the response overrides. The GCS test
-  checks the URL and the bytes, and asserts the headers only when the
-  emulator sends them. A real bucket proves the rest, once by hand,
-  before the owner accepts phase 2.
+- fake-gcs-server does not check V4 signatures or expiry, and it does not
+  echo the response overrides (checked on the pinned image, 2026-11-27).
+  The GCS test checks the URL and the bytes, and asserts the headers only
+  when the emulator sends them. A real bucket proves the rest, once by
+  hand, before the owner accepts phase 2.
+- fake-gcs-server drops `Content-Disposition` from an XML-API put, though
+  `object_store` sends it. So D31 is proven on MinIO only; the GCS run
+  skips that row.
 - The `signBlob` path needs real IAM.
 - MinIO proves SigV4 and the overrides. It does not prove AWS
   virtual-hosted URLs per region, or a custom endpoint.
@@ -567,14 +570,47 @@ What the emulators cannot prove:
 
 | Phase | Work | Hours |
 |---|---|---|
-| 1 | Library: `SignedGet`, `Bucket::signed_url` over `signed_url_opts`, rule D29 in `Storage::signed_url`, `Content-Disposition` on put (D31), `object_store` 0.14.2, conformance rows | 8-10 |
-| 2 | Redirect: `downloads` and `signed_ttl` in `FileRoutes` and in the routes generator (cloud only), D30, D32, D33, start check D34, `check --deploy` rules, golden `storage-s3-redirect` | 10-12 |
+| 1 | Library: `SignedGet`, `Bucket::signed_url` over `signed_url_opts`, rule D29 in `Storage::signed_url`, `Content-Disposition` on put (D31), `object_store` 0.14.2, conformance rows. **Done 2026-11-27.** | 8-10 |
+| 2 | Redirect: `downloads` and `signed_ttl` in `FileRoutes` and in the routes generator (cloud only), D30, D32, D33, start check D34, `check --deploy` rules, golden `storage-s3-redirect`. **Done 2026-11-27.** | 10-12 |
 | 3 | Resolver and CLI: `named` Kinds, `[named_bindings]`, `@name` in `add`, `remove`, `create`, `explain`, `check --deploy` per store | 14-18 |
 | 4 | Generator and library for names: `[storage.<name>]`, `NamedStores`, token keys per store, overlap check, routes and guards per store, `image::src_in`, golden `storage-named` | 14-18 |
 | 5 | Docs: this section into §0, ADR 14, `docs/modules/storage*.md`, AGENTS sections | 3 |
 | | Total | 49-61 |
 
 Phases 1 and 2 do not depend on phases 3 and 4. They ship first.
+
+**How phases 1 and 2 were built.** The decisions above hold. These are
+the smaller choices the code made, each with its reason:
+
+- `Storage` gains `can_sign` (sync) and `signing_origin` (async).
+  `FileRoutes::new` reads `can_sign` for D33, because `configure` cannot
+  await. `signing_origin` signs one URL for an address nothing is stored
+  at, with the attachment overrides, and answers its origin for D34.
+  `Storage::signed_url` reads the object's metadata first (one `head`), so
+  a missing object is `NotFound` and not a URL to a 404.
+- The signed-URL cache lives in `FileRoutes`, keyed by address. An address
+  has one disposition, because the first upload owns the metadata, so
+  the address is the whole key. A cached URL is served for at most
+  `signed_ttl / 2`, and the `307` is cached for at most the same, so a
+  browser never follows a dead URL. At 4096 entries the expired ones go.
+- The start check (D34) runs as a readiness check of `storage_routes`,
+  whatever `[storage] probe` says. It reads the policy that
+  `SecurityHeaders` now publishes on the services
+  (`SecurityHeadersConfig::enforced_csp`: none when the policy is off or
+  report-only). After `img-src` (or `default-src`) the source path is not
+  compared, as CSP 3 says for a redirect. Once it passed, it signs no
+  more: `/readyz` runs it on each probe, and GCS with no key would call
+  `signBlob` each time.
+- `check --deploy` reads the site's own address from `[meta] base_url`,
+  `[sitemap] base_url` or `[feed] site_url`; with none set, it cannot
+  compare and says nothing. The registrable domain is the last two labels,
+  or three under a country code with `co`, `com`, `net`, `org`, `ac`,
+  `gov` or `edu`. No public suffix list: a miss is one warning too many,
+  never one too few for a shared `example.com`.
+- The generator writes `downloads` and `signed_ttl` only with
+  `storage-s3` or `storage-gcs`, so every earlier golden is unchanged. The
+  shape `storage-s3-redirect` writes `downloads = "proxy"` (answer 2) and
+  the start check.
 
 ### 9.7 Questions answered by the owner
 

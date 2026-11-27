@@ -77,7 +77,7 @@
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
-use brocanth::plugin_api::{Plugin, PluginError};
+use brocanth::plugin_api::{Lifecycle, Plugin, PluginError};
 use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{
     BodyShape, HookRegistrar, HookSource, OnResponse, Request, RequestState, ResponseHead,
@@ -231,6 +231,18 @@ impl SecurityHeadersConfig {
     /// The reason, with what to change.
     pub fn check(&self) -> Result<(), String> {
         self.headers().map(|_| ())
+    }
+
+    /// The `Content-Security-Policy` a browser enforces, as the header
+    /// says it: `None` when the policy is off, report-only, or does not
+    /// render. A plugin that sends the browser to another origin reads it,
+    /// so it can refuse a start the policy would break: the file routes'
+    /// redirect to a bucket checks `img-src` (`docs/object-storage.md` D34).
+    pub fn enforced_csp(&self) -> Option<String> {
+        if !self.csp.enabled || self.csp.report_only {
+            return None;
+        }
+        self.csp.render(&self.frames).ok()
     }
 
     /// The headers every response gets, built once. HSTS is apart,
@@ -689,6 +701,15 @@ impl Plugin for SecurityHeaders {
     fn new(config: Self::Config) -> Self {
         Self { config }
     }
+
+    /// Publishes the configuration as a service, so a plugin whose answer
+    /// depends on the policy reads the policy this hook sends, not a copy
+    /// that can drift: the file routes check `img-src` with
+    /// [`SecurityHeadersConfig::enforced_csp`].
+    fn register(&mut self, lc: &mut Lifecycle<'_>) -> Result<(), PluginError> {
+        lc.services_mut().insert(self.config.clone());
+        Ok(())
+    }
 }
 
 impl HookSource for SecurityHeaders {
@@ -754,6 +775,21 @@ impl ResponseHook for Built {
 mod tests {
     use super::*;
     use brocanth::plugin_body::Body;
+
+    #[test]
+    fn the_enforced_policy_is_the_header_or_nothing() {
+        let config = SecurityHeadersConfig::default();
+        let csp = config.enforced_csp().expect("on by default");
+        assert!(csp.contains("img-src 'self' data:"), "{csp}");
+        let off = SecurityHeadersConfig::default().csp(Csp::off());
+        assert_eq!(off.enforced_csp(), None);
+        let report = SecurityHeadersConfig::default().csp(Csp::default().report_only());
+        assert_eq!(
+            report.enforced_csp(),
+            None,
+            "a report-only policy blocks nothing"
+        );
+    }
 
     fn request(uri: &str) -> Request {
         http::Request::builder()

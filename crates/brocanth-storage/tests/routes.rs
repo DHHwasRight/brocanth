@@ -14,7 +14,7 @@ use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest};
 use brocanth::plugin_order::{Order, Phase};
 use brocanth::routing::Verb;
 use brocanth_middleware::{Csrf, CsrfConfig};
-use brocanth_storage::routes::{FileRoutes, RoutesConfig};
+use brocanth_storage::routes::{Downloads, FileRoutes, RoutesConfig};
 use brocanth_storage::{
     FileTokenKey, FileTokens, LocalDisk, ObjectInfo, ObjectKey, Storage, VariantFormat, VariantSpec,
 };
@@ -100,6 +100,18 @@ fn tokens() -> FileTokens {
 fn rig_with(config: RoutesConfig, open: bool, csrf: CsrfConfig, off: &[&'static str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+    rig_over(dir, store, config, open, csrf, off)
+}
+
+/// A rig over a store the test built.
+fn rig_over(
+    dir: tempfile::TempDir,
+    store: Arc<dyn Storage>,
+    config: RoutesConfig,
+    open: bool,
+    csrf: CsrfConfig,
+    off: &[&'static str],
+) -> Rig {
     let tokens = tokens();
     let routes = FileRoutes::new(
         store.clone(),
@@ -1114,4 +1126,328 @@ fn srcset_lists_each_sized_thumbnail_with_its_width() {
              /files/{hex}?token={t}&thumb=600x600f&fmt=webp 600w"
         )
     );
+}
+
+// -- redirected downloads (docs/object-storage.md §9.3) -----------------
+
+/// A bucket on a disk that signs like a cloud: a URL on `https://bucket.test`
+/// with the overrides in its query and a counter, so a test sees how many
+/// URLs were signed.
+struct Signing {
+    disk: brocanth_storage::FsBucket,
+    signed: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl brocanth_storage::Bucket for Signing {
+    async fn put(
+        &self,
+        path: &brocanth_storage::ObjectPath,
+        body: brocanth_storage::Body,
+        options: brocanth_storage::PutOptions,
+    ) -> Result<brocanth_storage::ObjectHead, brocanth_storage::StorageError> {
+        self.disk.put(path, body, options).await
+    }
+
+    async fn get(
+        &self,
+        path: &brocanth_storage::ObjectPath,
+        range: Option<brocanth_storage::ByteRange>,
+    ) -> Result<brocanth_storage::GetObject, brocanth_storage::StorageError> {
+        self.disk.get(path, range).await
+    }
+
+    async fn head(
+        &self,
+        path: &brocanth_storage::ObjectPath,
+    ) -> Result<brocanth_storage::ObjectHead, brocanth_storage::StorageError> {
+        self.disk.head(path).await
+    }
+
+    async fn delete(
+        &self,
+        path: &brocanth_storage::ObjectPath,
+    ) -> Result<(), brocanth_storage::StorageError> {
+        self.disk.delete(path).await
+    }
+
+    async fn list(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<brocanth_storage::Listed>, brocanth_storage::StorageError> {
+        self.disk.list(prefix).await
+    }
+
+    async fn signed_url(
+        &self,
+        _method: brocanth_storage::SignedMethod,
+        path: &brocanth_storage::ObjectPath,
+        ttl: std::time::Duration,
+        overrides: &brocanth_storage::SignedGet,
+    ) -> Result<Option<String>, brocanth_storage::StorageError> {
+        let n = self
+            .signed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut url = format!("https://bucket.test/{path}?expires={}&n={n}", ttl.as_secs());
+        for (k, v) in overrides.query() {
+            url.push_str(&format!(
+                "&{k}={}",
+                v.replace(' ', "%20").replace('"', "%22")
+            ));
+        }
+        Ok(Some(url))
+    }
+
+    fn can_sign(&self) -> bool {
+        true
+    }
+
+    async fn probe(&self) -> Result<(), brocanth_storage::StorageError> {
+        Ok(())
+    }
+}
+
+struct Redirecting {
+    rig: Rig,
+    bucket: Arc<Signing>,
+}
+
+fn redirecting(config: RoutesConfig) -> Redirecting {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = Arc::new(Signing {
+        disk: brocanth_storage::FsBucket::open(dir.path()).unwrap(),
+        signed: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let store: Arc<dyn Storage> = Arc::new(brocanth_storage::ObjectStorage::new(bucket.clone()));
+    let config = RoutesConfig {
+        downloads: Downloads::Redirect,
+        ..config
+    };
+    let rig = rig_over(dir, store, config, true, CsrfConfig::default(), &[]);
+    Redirecting { rig, bucket }
+}
+
+fn signed_count(r: &Redirecting) -> usize {
+    r.bucket.signed.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn a_png_redirects_inline_and_anything_else_as_an_attachment() {
+    let r = redirecting(RoutesConfig::default());
+    let png = png(20, 20);
+    let key = block_on(r.rig.store.put(&png, &ObjectInfo::new())).unwrap();
+    let answer = get(&r.rig, &r.rig.routes.url(&key));
+    assert_eq!(answer.status(), 307, "{}", answer.text());
+    let to = answer.location().unwrap();
+    assert!(to.starts_with("https://bucket.test/objects/"), "{to}");
+    assert!(to.contains("response-content-type=image/png"), "{to}");
+    assert!(!to.contains("response-content-disposition"), "{to}");
+    assert_eq!(answer.header("referrer-policy"), Some("no-referrer"));
+    assert!(answer.body().is_empty());
+
+    for (name, declared, bytes) in [
+        (
+            "page.html",
+            "text/html",
+            &b"<html><script>alert(1)</script></html>"[..],
+        ),
+        (
+            "logo.svg",
+            "image/svg+xml",
+            &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>"[..],
+        ),
+    ] {
+        let about = ObjectInfo::new()
+            .with_filename(name)
+            .with_declared_type(declared);
+        let key = block_on(r.rig.store.put(bytes, &about)).unwrap();
+        let answer = get(&r.rig, &r.rig.routes.url(&key));
+        assert_eq!(answer.status(), 307, "{name}");
+        let to = answer.location().unwrap();
+        assert!(
+            to.contains("response-content-type=application/octet-stream"),
+            "{name}: {to}"
+        );
+        assert!(
+            to.contains(&format!(
+                "response-content-disposition=attachment;%20filename=%22{name}%22"
+            )),
+            "{name}: {to}"
+        );
+    }
+}
+
+#[test]
+fn head_and_thumbnails_keep_proxying() {
+    let r = redirecting(RoutesConfig::default());
+    let key = block_on(r.rig.store.put(&png(60, 40), &ObjectInfo::new())).unwrap();
+    let url = r.rig.routes.url(&key);
+    let head = (r.rig.send)(TestRequest::new(Verb::Head, url.clone()));
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.header("etag"), Some(key.etag().as_str()));
+    let thumb = get(&r.rig, &format!("{url}&thumb=150x150t"));
+    assert_eq!(thumb.status(), 200);
+    assert!(thumb.header("content-type").unwrap().starts_with("image/"));
+    assert_eq!(signed_count(&r), 0, "neither signs a URL");
+}
+
+#[test]
+fn a_redirect_is_kept_no_longer_than_the_token_or_half_the_url() {
+    let r = redirecting(RoutesConfig::default());
+    let key = block_on(r.rig.store.put(b"a document", &ObjectInfo::new())).unwrap();
+    // A token with 20 seconds left: the browser keeps the redirect 20 s at
+    // most, not the URL's 150.
+    let short = tokens().with_ttl(20).issue(&key);
+    let answer = get(
+        &r.rig,
+        &format!("/files/{}?token={}", key.to_hex(), short.as_str()),
+    );
+    assert_eq!(answer.status(), 307);
+    let cache = answer.header("cache-control").unwrap();
+    let age: u64 = cache
+        .strip_prefix("private, max-age=")
+        .unwrap_or_else(|| panic!("{cache}"))
+        .parse()
+        .unwrap();
+    assert!((18..=20).contains(&age), "{cache}");
+    // A long token: half the signed URL's life, 300 / 2.
+    let long = tokens().with_ttl(3600).issue(&key);
+    let answer = get(
+        &r.rig,
+        &format!("/files/{}?token={}", key.to_hex(), long.as_str()),
+    );
+    assert_eq!(answer.header("cache-control"), Some("private, max-age=150"));
+}
+
+#[test]
+fn a_signed_url_is_reused_for_half_its_life() {
+    let r = redirecting(RoutesConfig {
+        signed_ttl: std::time::Duration::from_secs(2),
+        ..RoutesConfig::default()
+    });
+    let key = block_on(r.rig.store.put(b"cache me", &ObjectInfo::new())).unwrap();
+    let url = r.rig.routes.url(&key);
+    let first = get(&r.rig, &url).location().unwrap().to_string();
+    let second = get(&r.rig, &url).location().unwrap().to_string();
+    assert_eq!(first, second, "the browser sees one URL");
+    assert_eq!(signed_count(&r), 1);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let third = get(&r.rig, &url).location().unwrap().to_string();
+    assert_ne!(first, third, "past half its life, a new URL");
+    assert_eq!(signed_count(&r), 2);
+}
+
+#[test]
+fn a_redirect_still_needs_a_token_and_answers_404_for_nothing() {
+    let r = redirecting(RoutesConfig::default());
+    let key = block_on(r.rig.store.put(b"guarded", &ObjectInfo::new())).unwrap();
+    assert_eq!(
+        get(&r.rig, &format!("/files/{}", key.to_hex())).status(),
+        403
+    );
+    let missing = ObjectKey::of(b"never stored");
+    assert_eq!(get(&r.rig, &r.rig.routes.url(&missing)).status(), 404);
+    assert_eq!(signed_count(&r), 0);
+}
+
+#[test]
+fn a_public_redirect_is_kept_for_half_the_url() {
+    let r = redirecting(RoutesConfig {
+        public: true,
+        ..RoutesConfig::default()
+    });
+    let key = block_on(r.rig.store.put(b"public", &ObjectInfo::new())).unwrap();
+    let answer = get(&r.rig, &format!("/files/{}", key.to_hex()));
+    assert_eq!(answer.status(), 307);
+    assert_eq!(answer.header("cache-control"), Some("private, max-age=150"));
+}
+
+#[test]
+fn redirect_on_a_store_that_cannot_sign_is_refused_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let disk: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+    let refused = FileRoutes::new(
+        disk,
+        tokens(),
+        RoutesConfig {
+            downloads: Downloads::Redirect,
+            ..RoutesConfig::default()
+        },
+        |_: &http::Request<Vec<u8>>, _: &brocanth::plugin_hooks::RequestState| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refused.contains("cannot sign") && refused.contains("help:") && refused.contains("proxy"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_signed_ttl_outside_one_second_to_seven_days_is_refused() {
+    for ttl in [0, 7 * 24 * 3600 + 1] {
+        let dir = tempfile::tempdir().unwrap();
+        let disk: Arc<dyn Storage> = Arc::new(LocalDisk::open(dir.path()).unwrap());
+        let refused = FileRoutes::new(
+            disk,
+            tokens(),
+            RoutesConfig {
+                signed_ttl: std::time::Duration::from_secs(ttl),
+                ..RoutesConfig::default()
+            },
+            |_: &http::Request<Vec<u8>>, _: &brocanth::plugin_hooks::RequestState| false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("signed_ttl") && refused.contains("help:"),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn downloads_takes_two_words() {
+    assert_eq!(Downloads::parse("proxy"), Ok(Downloads::Proxy));
+    assert_eq!(Downloads::parse("redirect"), Ok(Downloads::Redirect));
+    let said = Downloads::parse("redirect-images").unwrap_err();
+    assert!(said.contains("help:"), "{said}");
+}
+
+#[test]
+fn the_start_check_signs_and_names_the_img_src_to_add() {
+    // The default policy of `middleware-security-headers`.
+    let csp = "default-src 'self'; img-src 'self' data:; object-src 'none'";
+    let r = redirecting(RoutesConfig {
+        csp: Some(csp.to_string()),
+        ..RoutesConfig::default()
+    });
+    let said = block_on(r.rig.routes.check_signing()).unwrap_err();
+    assert!(
+        said.contains("https://bucket.test")
+            && said.contains("help:")
+            && said.contains("img-src = [\"https://bucket.test\"]"),
+        "{said}"
+    );
+    assert_eq!(signed_count(&r), 1, "the check signs one URL");
+
+    // The first `img-src` wins, as in a browser.
+    let r = redirecting(RoutesConfig {
+        csp: Some(format!("{csp}; img-src 'self' data: https://bucket.test")),
+        ..RoutesConfig::default()
+    });
+    assert!(block_on(r.rig.routes.check_signing()).is_err());
+    let r = redirecting(RoutesConfig {
+        csp: Some("default-src 'self'; img-src 'self' data: https://bucket.test".to_string()),
+        ..RoutesConfig::default()
+    });
+    assert_eq!(block_on(r.rig.routes.check_signing()), Ok(()));
+    assert_eq!(block_on(r.rig.routes.check_signing()), Ok(()));
+    assert_eq!(signed_count(&r), 1, "a passed check signs no more");
+    let r = redirecting(RoutesConfig::default());
+    assert_eq!(block_on(r.rig.routes.check_signing()), Ok(()), "no policy");
+
+    // A proxying route checks nothing.
+    let proxy = rig(RoutesConfig::default(), true);
+    assert_eq!(block_on(proxy.routes.check_signing()), Ok(()));
 }

@@ -934,6 +934,14 @@ impl Module for StorageRoutes {
             "image",
             "`&fmt=` converts a thumbnail to a format `formats` lists, and `max_pixels` caps the source",
         )
+        .adapts_to(
+            "storage-s3",
+            "`downloads` and `signed_ttl`: a download may redirect to a signed URL of the bucket",
+        )
+        .adapts_to(
+            "storage-gcs",
+            "`downloads` and `signed_ttl`: a download may redirect to a signed URL of the bucket",
+        )
         // An upload is a form post. Without the check, any page on any site
         // posts files here with the visitor's cookies. The routes also read
         // the check's field and header, so they keep no copy of either.
@@ -981,9 +989,17 @@ impl Module for StorageRoutes {
         let thumbnails = project.has("storage-thumbnails");
         // `image` needs `storage-thumbnails`, so it never comes alone.
         let image = thumbnails && project.has("image");
+        // `downloads` and `signed_ttl` only for a bucket: a disk or Postgres
+        // store cannot sign, so the setting would be a mistake there, and
+        // the disk and Postgres projects stay as they were
+        // (`docs/object-storage.md` §9.3). A module, not the `ObjectStore`
+        // provider: one provider holds the Kind, so the two say the same,
+        // and `uses::<ObjectStore>` would name the default store in the
+        // `adapted_to` of every project with routes.
+        let cloud = project.has("storage-s3") || project.has("storage-gcs");
         s.file(
             "src/plugins/storage_routes/mod.rs",
-            routes_rs(project, thumbnails, image),
+            routes_rs(project, thumbnails, image, cloud),
         );
         s.at(Slot::PluginsMod).line("pub mod storage_routes;");
         configurable_hooking(
@@ -997,9 +1013,13 @@ impl Module for StorageRoutes {
                 prelude: ROUTES_COMMENT.to_string(),
                 adjust: None,
             },
-            routes_settings(thumbnails, image),
+            routes_settings(thumbnails, image, cloud),
         );
-        s.at(Slot::AgentsSections).block(ROUTES_AGENTS.to_string());
+        let mut agents = ROUTES_AGENTS.to_string();
+        if cloud {
+            agents.push_str(ROUTES_AGENTS_REDIRECT);
+        }
+        s.at(Slot::AgentsSections).block(agents);
     }
 }
 
@@ -1276,7 +1296,14 @@ const ROUTES_AGENTS: &str = "\n\
     your policy allowed the read, and never log the URL. Do not write an\n\
     upload or download page beside these routes.\n";
 
-fn routes_settings(thumbnails: bool, image: bool) -> Vec<Setting> {
+const ROUTES_AGENTS_REDIRECT: &str = "\n\
+    `downloads = \"redirect\"` under `[storage_routes]` answers a download with\n\
+    a 307 to a signed URL of the bucket. Keep the bucket private: a public\n\
+    bucket serves every object to anyone who has its address. Add the\n\
+    bucket's origin to `img-src` under `[security_headers.csp.allow]`; the\n\
+    start names the value when it is missing.\n";
+
+fn routes_settings(thumbnails: bool, image: bool, cloud: bool) -> Vec<Setting> {
     let mut out = vec![
         Setting::integer(
             "max_bytes",
@@ -1335,6 +1362,32 @@ fn routes_settings(thumbnails: bool, image: bool) -> Vec<Setting> {
             ),
         );
     }
+    if cloud {
+        out.push(
+            Setting::text(
+                "downloads",
+                "proxy",
+                "How a download is answered: \"proxy\" or \"redirect\".",
+            )
+            .note(
+                "\"proxy\" sends the bytes from this process. \"redirect\" answers 307 to a URL\n\
+                 the bucket signs: an image inline, anything else as an attachment. It needs a\n\
+                 private bucket and the bucket's origin in the CSP img-src. HEAD and thumbnails\n\
+                 still go through this process.",
+            ),
+        );
+        out.push(
+            Setting::integer(
+                "signed_ttl",
+                300,
+                "Seconds a signed URL of a redirect lives, from 1 to 604800.",
+            )
+            .note(
+                "It cannot be revoked, so this is the leak window. A browser keeps the redirect\n\
+                 for at most half of it.",
+            ),
+        );
+    }
     out
 }
 
@@ -1348,10 +1401,21 @@ const IMAGE_FORMATS: &[&str] = &["webp", "jpeg"];
 /// but no page needs is refused.
 const IMAGE_MAX_PIXELS: i64 = 24_000_000;
 
-fn routes_rs(project: &Project, thumbnails: bool, image: bool) -> String {
+fn routes_rs(project: &Project, thumbnails: bool, image: bool, cloud: bool) -> String {
     let (derive, note) = settings_derive(project, "storage_routes");
     let pick = |off: &'static str, on: &'static str| if thumbnails { on } else { off };
+    let redirect = |on: &'static str, off: &'static str| if cloud { on } else { off };
     ROUTES_RS
+        .replace(
+            "@REDIRECT_DOC@",
+            redirect(REDIRECT_DOC, ""),
+        )
+        .replace("@REDIRECT_USE@", redirect("Downloads, ", ""))
+        .replace("@REDIRECT_FIELD@", redirect(REDIRECT_FIELD, ""))
+        .replace("@REDIRECT_DEFAULT@", redirect(REDIRECT_DEFAULT, ""))
+        .replace("@REDIRECT_PARSE@", redirect(REDIRECT_PARSE, ""))
+        .replace("@REDIRECT_CONFIG@", redirect(REDIRECT_CONFIG, ""))
+        .replace("@BUILD@", redirect(REDIRECT_BUILD, BUILD))
         .replace("@DERIVE@", &derive)
         .replace("@NOTE@", &note)
         .replace(
@@ -1397,6 +1461,55 @@ fn routes_rs(project: &Project, thumbnails: bool, image: bool) -> String {
         .replace("@PATH@", &module_ref("storage-routes", "path"))
         .replace("@PUBLIC@", &module_ref("storage-routes", "public"))
 }
+
+const REDIRECT_DOC: &str = "
+//!
+//! With `downloads = \"redirect\"`, `GET /files/{address}` answers 307 to a URL
+//! the bucket signs, which carries the type and the disposition inside its
+//! signature: an image inline, anything else as an attachment. The redirect
+//! is kept no longer than the token or half the URL's life, and sends no
+//! referrer. The start signs one URL, and refuses a Content-Security-Policy
+//! whose `img-src` does not allow the bucket.";
+
+const REDIRECT_FIELD: &str = "    /// How a download is answered: \"proxy\" or \"redirect\".
+    pub downloads: String,
+    /// Seconds a signed URL of a redirect lives.
+    pub signed_ttl: u64,
+";
+
+const REDIRECT_DEFAULT: &str = "            downloads: \"proxy\".to_string(),
+            signed_ttl: 300,
+";
+
+const REDIRECT_PARSE: &str = r#"        let downloads = Downloads::parse(&self.settings.downloads).map_err(PluginError::new)?;
+        // The policy the security headers send: a redirected image loads
+        // only when its `img-src` allows the bucket.
+        let csp = lc
+            .services()
+            .get::<brocanth_middleware::SecurityHeadersConfig>()
+            .and_then(|headers| headers.enforced_csp());
+"#;
+
+const REDIRECT_CONFIG: &str = "
+            downloads,
+            signed_ttl: std::time::Duration::from_secs(self.settings.signed_ttl),
+            csp,";
+
+const BUILD: &str = "        self.routes = Some(FileRoutes::new(store, tokens, config, Guard)?);\n";
+
+const REDIRECT_BUILD: &str = r#"        let routes = FileRoutes::new(store, tokens, config, Guard)?;
+        // `serve` awaits this once before it listens: a redirecting route
+        // signs one URL, so a key that cannot sign, or an `img-src` that
+        // blocks the bucket, stops the start with a `help:` line.
+        if routes.redirects() {
+            let check = routes.clone();
+            lc.ready_when(move || {
+                let check = check.clone();
+                async move { check.check_signing().await }
+            });
+        }
+        self.routes = Some(routes);
+"#;
 
 const THUMB_FIELD: &str = "    /// The only sizes `?thumb=` may ask for; any other is a 400.
     pub thumb_sizes: Vec<String>,
@@ -1476,7 +1589,7 @@ const ROUTES_RS: &str = r##"//! The upload and download routes, as this applicat
 //! let files = ctx.provided::<crate::plugins::storage::FileStore, _>().expect("dispatched");
 //! let token = files.tokens.issue(&key);
 //! let src = format!("/files/{}?token={}", key.to_hex(), token.as_str());
-//! ```
+//! ```@REDIRECT_DOC@
 
 use std::sync::Arc;
 
@@ -1485,7 +1598,7 @@ use brocanth::plugin_context::NoContext;
 use brocanth::plugin_hooks::{HookRegistrar, HookSource, OnAsyncRequest, Request, RequestState};
 use brocanth::plugin_order::{Order, Phase};
 use brocanth_middleware::CsrfConfig;
-use brocanth_storage::routes::{FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
+use brocanth_storage::routes::{@REDIRECT_USE@FileRoutes, GuardFuture, RoutesConfig, UploadGuard};
 use brocanth_storage::{FileTokens, Storage@SPEC_USE@};
 
 /// Whether this request may store a file.
@@ -1516,14 +1629,14 @@ pub struct Settings {
     pub max_bytes: usize,
     /// Store identical uploads once, at their content address.
     pub dedupe: bool,
-@THUMB_FIELD@}
+@THUMB_FIELD@@REDIRECT_FIELD@}
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_bytes: 2_097_152,
             dedupe: false,
-@THUMB_DEFAULT@        }
+@THUMB_DEFAULT@@REDIRECT_DEFAULT@        }
     }
 }
 
@@ -1569,7 +1682,7 @@ impl Plugin for StorageRoutes {
                  help: set `header` under [csrf], such as \"x-csrf-token\"",
             ));
         };
-@THUMB_PARSE@        let config = RoutesConfig {
+@THUMB_PARSE@@REDIRECT_PARSE@        let config = RoutesConfig {
             path: @PATH@.to_string(),
             max_bytes: self.settings.max_bytes,
             server_max_body: Some(crate::plugins::max_body().map_err(PluginError::new)?),
@@ -1577,11 +1690,10 @@ impl Plugin for StorageRoutes {
             @THUMBNAILS@
             dedupe: self.settings.dedupe,
             csrf_field: csrf.field.clone(),
-            csrf_header,
+            csrf_header,@REDIRECT_CONFIG@
             ..RoutesConfig::default()
         };
-        self.routes = Some(FileRoutes::new(store, tokens, config, Guard)?);
-        Ok(())
+@BUILD@        Ok(())
     }
 }
 
