@@ -128,6 +128,9 @@ What the project gets:
   store's key does not change.
 - Two stores at one location stop the start: the same directory, or the
   same endpoint, bucket and prefix.
+- A named S3 or GCS store may redirect its downloads to a signed URL,
+  with `downloads` and `signed_ttl` under `[storage_routes.<name>]`
+  ([`storage-routes`](storage-routes.md#named-stores)).
 - `check --deploy` runs `deploy/storage-local` per store, and names a named
   store on a disk.
 

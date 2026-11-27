@@ -58,7 +58,10 @@ name a metadata entry (`filename`). Postgres holds nothing for it.
 headers that make a hostile upload harmless stay on the response. With
 `downloads = "redirect"` under `[storage_routes]`, a download answers `307`
 to a signed URL instead: see
-[`storage-routes`](storage-routes.md#redirected-downloads).
+[`storage-routes`](storage-routes.md#redirected-downloads). As a named
+store (`storage-gcs@<name>`), the same settings sit under
+`[storage_routes.<name>]`, and the store's settings under
+`[storage.<name>]`, with no default bucket ([`storage`](storage.md#named-stores)).
 `Storage::signed_url` answers such a URL for code that wants one. It
 carries the type and the disposition inside its signature: an image inline,
 anything else as an attachment of type `application/octet-stream`. A new

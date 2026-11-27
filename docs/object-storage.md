@@ -1,7 +1,9 @@
 # Object storage: one abstraction, three backends
 
 Status: accepted (2026-11-25). Owner decision: 2026-11-24. ADR 13 in
-`PLAN.md` records the reversal of the §4 cut ("no S3").
+`PLAN.md` records the reversal of the §4 cut ("no S3"). §9, named stores
+and signed downloads, is built (2026-11-27): ADR 14 records it, and it
+replaces D6 and D16.
 
 Read first: `crates/brocanth-storage` (`storage.rs`, `local.rs`,
 `postgres.rs`, `deferred.rs`, `routes.rs`), `docs/module-capabilities.md`
@@ -16,7 +18,7 @@ Read first: `crates/brocanth-storage` (`storage.rs`, `local.rs`,
 | D3 | `LocalDisk` and `PgStorage` stay as they are and stay `Storage` backends. | No behaviour change for current projects: same files, same rows, same addresses. |
 | D4 | A Kind `ObjectStore`, runtime `dyn brocanth_storage::Storage`, cardinality one. | Callers never name a backend. Two stores in one project is a bug until a project shows a need (D6). |
 | D5 | Four provider modules: `storage-fs` (default), `storage-s3`, `storage-gcs`, `storage-db`. | One module per backend is what `brocanth explain`, `brocanth.toml` and `check --deploy` can see. |
-| D6 | Exactly one provider per project. No named bindings in v1. | The routes, the tokens and the thumbnails all read one store. A second bucket (public assets) is a value the application builds itself from the same crate. |
+| D6 | Exactly one provider per project. No named bindings in v1. **Replaced by D19 to D27 (§9).** | The routes, the tokens and the thumbnails all read one store. A second bucket (public assets) is a value the application builds itself from the same crate. |
 | D7 | The resolver learns a **default provider**: a Kind with several providers may name one with `Manifest::default_for::<K>()`. A requirement with no chosen provider adds it, and says so. | The `db` rule (add the single provider) does not reach a Kind with four providers. The owner chose the filesystem as the default. |
 | D8 | `brocanth add storage-s3` replaces the default provider; `brocanth remove storage-s3` puts the default back. | Swapping a backend is one command each way, and the selection never holds two stores. |
 | D9 | A project recorded before the Kind existed keeps its backend: `storage` with `db` reads as `storage-db`, without `db` as `storage-fs`. | Today `storage` + `db` keeps the bytes in Postgres. An `add` must not move them to a disk in silence. |
@@ -26,7 +28,7 @@ Read first: `crates/brocanth-storage` (`storage.rs`, `local.rs`,
 | D13 | No key in the config means the platform's credential chain (AWS env, web identity, instance role; GCS ADC, workload identity). | A deployed service on EKS, ECS, GKE or Cloud Run has no key to give, and should not have one. |
 | D14 | A bad config fails the start: empty `bucket` at `configure`, a missing bucket or a refused credential at the readiness check before bind. `probe = false` skips the network check. | The error comes at deploy, with a `help:` line, not at the first upload. The flag covers an offline start. |
 | D15 | Metadata (media type, original name) is object metadata on S3 and GCS, a sidecar on a disk, a column in Postgres. Postgres holds no new data. | Owner rule: Postgres only for metadata, and no second database. The object carries what it needs to be served. |
-| D16 | The download route keeps proxying the bytes. Signed URLs exist on the traits; the route does not redirect to one in v1. | The route sets `Content-Disposition`, `nosniff` and the CSP that make a hostile upload harmless. A redirect to a bucket loses them unless each URL carries response overrides; that is a design of its own. |
+| D16 | The download route keeps proxying the bytes. Signed URLs exist on the traits; the route does not redirect to one in v1. **Replaced by D28 to D34 (§9) for a store that opts in.** | The route sets `Content-Disposition`, `nosniff` and the CSP that make a hostile upload harmless. A redirect to a bucket loses them unless each URL carries response overrides; that is a design of its own. |
 | D17 | Streaming is in `Bucket` (put and get). `Storage` keeps `&[u8]` and `Vec<u8>`, and gains `get_range` and `signed_url`. | The HTTP edge reads a whole multipart body under `max_body_bytes` (16 MiB) before it calls the store, so a streaming `Storage` would stream nothing today. Code that moves large files uses the `Bucket` it builds. |
 | D18 | Tests: one conformance suite, run on every backend. Disk always; Postgres, MinIO and fake-gcs-server when their variable is set, like the Postgres tests. | The suite is the definition of a backend. A skip is loud. |
 
@@ -213,7 +215,7 @@ are.
 
 | Option | For | Against |
 |---|---|---|
-| **`object_store` 0.14** (Apache Arrow, MIT/Apache-2.0) | S3, GCS, Azure, local in one crate. Streaming put (multipart) and get, ranges, list, `PutMode::Create`, a `Signer` for S3 and GCS. Credential chains for both clouds. tokio and reqwest 0.13, which the workspace already links; `aws-lc-rs` is already in the lock. Used by DataFusion, Polars, delta-rs; released monthly. | No per-request response headers on a signed URL (D16 does not need them). |
+| **`object_store` 0.14** (Apache Arrow, MIT/Apache-2.0) | S3, GCS, Azure, local in one crate. Streaming put (multipart) and get, ranges, list, `PutMode::Create`, a `Signer` for S3 and GCS. Credential chains for both clouds. tokio and reqwest 0.13, which the workspace already links; `aws-lc-rs` is already in the lock. Used by DataFusion, Polars, delta-rs; released monthly. | None that counts. (v1 said a signed URL could carry no response headers. 0.14.2 signs response overrides on S3 and GCS: §9.2.) |
 | `aws-sdk-s3` + `google-cloud-storage` | Official. | Two SDKs, two HTTP stacks, two credential systems. `aws-sdk-s3` alone is the largest dependency tree on crates.io (smithy runtime, its own hyper client). The Google crate moved to gRPC. |
 | `rust-s3` | Small. | S3 only; a second crate for GCS anyway. |
 | `opendal` | Many services. | A larger abstraction of its own over ours; more surface than the four calls we need. |
@@ -318,8 +320,9 @@ an upload in parts (it has no XML multipart API). Real GCS has both.
 
 ## 9. Named stores and signed downloads
 
-Status: accepted (2026-11-27). The owner took every recommended answer
-in §9.7. It reverses D6 and D16. §0 to §8 stay as the record of v1.
+Status: accepted and built (2026-11-27). The owner took every
+recommended answer in §9.7. It reverses D6 and D16 (ADR 14 in `PLAN.md`).
+§0 to §8 stay as the record of v1. All five phases are done (§9.6).
 
 Two items from §8:
 
@@ -572,9 +575,9 @@ What the emulators cannot prove:
 |---|---|---|
 | 1 | Library: `SignedGet`, `Bucket::signed_url` over `signed_url_opts`, rule D29 in `Storage::signed_url`, `Content-Disposition` on put (D31), `object_store` 0.14.2, conformance rows. **Done 2026-11-27.** | 8-10 |
 | 2 | Redirect: `downloads` and `signed_ttl` in `FileRoutes` and in the routes generator (cloud only), D30, D32, D33, start check D34, `check --deploy` rules, golden `storage-s3-redirect`. **Done 2026-11-27.** | 10-12 |
-| 3 | Resolver and CLI: `named` Kinds, `[named_bindings]`, `@name` in `add`, `remove`, `create`, `explain`, `check --deploy` per store. **Done.** | 14-18 |
-| 4 | Generator and library for names: `[storage.<name>]`, `NamedStores`, token keys per store, overlap check, routes and guards per store, `image::src_in`, golden `storage-named`. **Done**, except `image::src_in`. | 14-18 |
-| 5 | Docs: this section into §0, ADR 14, `docs/modules/storage*.md`, AGENTS sections | 3 |
+| 3 | Resolver and CLI: `named` Kinds, `[named_bindings]`, `@name` in `add`, `remove`, `create`, `explain`, `check --deploy` per store. **Done 2026-11-27.** | 14-18 |
+| 4 | Generator and library for names: `[storage.<name>]`, `NamedStores`, token keys per store, overlap check, routes and guards per store, `image::src_in`, golden `storage-named`. The redirect of phase 2 per named store. **Done 2026-11-27.** | 14-18 |
+| 5 | Docs: this section into §0, ADR 14, `docs/modules/storage*.md`, AGENTS sections. **Done 2026-11-27.** | 3 |
 | | Total | 49-61 |
 
 Phases 1 and 2 do not depend on phases 3 and 4. They ship first.
@@ -637,12 +640,27 @@ the smaller choices the code made, each with its reason:
   `ProvidesContext<FileStore>`.
 - **Routes:** `brocanth_storage::named::AnyRoutes` runs the routes of each
   store as one hook, the named ones first. `FileRoutes` does not change.
-- **`downloads` per named store** takes `proxy` only. The redirect of
-  phase 2 plugs into `downloads()` in the generated
-  `src/plugins/storage_routes/mod.rs`, and sets it on the store's
-  `RoutesConfig`.
-- **Open:** `image::src_in(ctx, "<name>", ..)`. A named store's route path
-  is a run-time setting the image helper does not read yet.
+- **The redirect per store.** A named S3 or GCS store gets `downloads`
+  and `signed_ttl` under `[storage_routes.<name>]`. Its routes take the
+  default store's configuration with its own path, `public`, `max_bytes`,
+  `downloads`, `signed_ttl` and the enforced CSP. `FileRoutes::new` refuses
+  `redirect` on a store that cannot sign (D33), and each redirecting store
+  registers its own start check, so each bucket origin is checked against
+  `img-src` (D34). The messages name `[storage_routes.<name>]`. `check
+  --deploy` runs the three redirect warnings once per store.
+- **The default store's settings follow its own backend.** P2 wrote
+  `downloads` when the project had `storage-s3` or `storage-gcs`. With
+  names, `storage-s3` may be there only for `storage-s3@public`, so
+  `storage-routes` asks `Project::chosen`: `has`, less a module that is in
+  the project only as a named store's provider. It is `has` in a project
+  with no names, so no earlier golden moved. Not the `ObjectStore`
+  provider: `uses::<ObjectStore>` would add the default store to the
+  `adapted_to` of every project with routes.
+- **`image::src_in(ctx, "<name>", ..)`** reads the path a named store's
+  routes answer at. `storage-routes` publishes it on the store:
+  `NamedStore` gains `path`, set once at start, beside `store` and
+  `tokens`. `NamedStores::get(name)` is for a caller that holds the name
+  as text; a handler names the field.
 
 ### 9.7 Questions answered by the owner
 
