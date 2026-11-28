@@ -197,7 +197,11 @@ jobs:
           workspaces: |
             . -> target
             . -> target/generated
+      # Two shape workers: each has its own target directory of several
+      # gigabytes, and a standard runner has about 14 GB free.
       - run: mise run generated
+        env:
+          BROCANTH_SHAPES_JOBS: "2"
 
   embedded:
     name: embedded Postgres

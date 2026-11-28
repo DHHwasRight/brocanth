@@ -49,9 +49,11 @@ done
 """
 # Generated projects, built and tested: each crate test that calls
 # `brocanth_scaffold::testing::build`, then the CLI's golden shapes. This
-# takes many minutes. All projects use one target directory, so the framework
-# compiles once. The runs are sequential: two processes must not share that
-# directory.
+# takes many minutes. The crate tests use one target directory, so the
+# framework compiles once. They run one after another: two processes must not
+# share that directory. The golden shapes then build on
+# `BROCANTH_SHAPES_JOBS` workers (default: 2, or a third of the cores if that
+# is fewer): worker 0 in that directory, worker i in `<it>/w<i>`.
 [tasks.generated]
 run = """
 # Absolute: cargo runs in each project's own directory.

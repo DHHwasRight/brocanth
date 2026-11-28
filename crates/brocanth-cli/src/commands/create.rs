@@ -6859,8 +6859,11 @@ mod tests {
     /// A snapshot proves the generator wrote what it wrote yesterday, not
     /// that what it wrote compiles. Minutes, not milliseconds:
     /// `cargo test -p brocanth-cli --bin brocanth -- --ignored golden_shapes`.
-    /// `BROCANTH_SHAPES=default,admin` narrows it to those shapes. One
-    /// target directory serves every shape, so the dependencies build once.
+    /// `BROCANTH_SHAPES=default,admin` narrows it to those shapes.
+    /// `BROCANTH_SHAPES_JOBS=N` builds N shapes at a time (default: 2, or a
+    /// third of the cores if that is fewer). Each worker has its own target
+    /// directory and builds its shapes one after another there, so its
+    /// dependencies build once per worker.
     #[test]
     #[ignore = "runs cargo build and cargo test over generated applications"]
     fn the_golden_shapes_build_and_pass_their_own_tests() {
@@ -6877,35 +6880,73 @@ mod tests {
         // cannot fill the disk. `BROCANTH_SHAPES_KEEP=1` keeps them to debug.
         let _cleanup = TempDir(base.clone());
         // `BROCANTH_BUILD_TARGET`, as `brocanth_scaffold::testing::build`
-        // reads it: `mise run generated` builds the crates' projects and
-        // these shapes in one directory, so the framework compiles once.
+        // reads it: `mise run generated` builds the crates' projects there
+        // first, so the framework is already built. Worker 0 builds in that
+        // directory; worker `i` builds in `<target>/w<i>`, because cargo
+        // locks a target directory and two workers on one would take turns.
         let target = std::env::var_os("BROCANTH_BUILD_TARGET")
             .filter(|t| !t.is_empty())
             .map_or_else(|| base.join("target"), std::path::PathBuf::from);
-        let mut failed = Vec::new();
-        for (name, picks) in shapes() {
-            if wanted
-                .as_deref()
-                .is_some_and(|list| !list.split(',').any(|w| w == name))
-            {
-                continue;
-            }
+        let mut picked: Vec<_> = shapes()
+            .into_iter()
+            .filter(|(name, _)| {
+                wanted
+                    .as_deref()
+                    .is_none_or(|list| list.split(',').any(|w| w == *name))
+            })
+            .collect();
+        // The largest shapes first: `everything` alone takes minutes, and
+        // started last it ran on one worker while the others sat idle.
+        picked.sort_by_key(|(_, picks)| std::cmp::Reverse(picks.len()));
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let workers = std::env::var("BROCANTH_SHAPES_JOBS")
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            // Two by default: each worker's target directory takes several
+            // gigabytes, and four of them took 10 GB at the peak.
+            .unwrap_or_else(|| (cores / 3).min(2))
+            .clamp(1, picked.len().max(1));
+        // The build jobs are shared out, so N workers do not start N times
+        // as many compilers as the machine has cores.
+        let jobs = std::env::var("CARGO_BUILD_JOBS")
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(cores)
+            .div_euclid(workers)
+            .max(1);
+        let targets: Vec<std::path::PathBuf> = (0..workers)
+            .map(|i| match i {
+                0 => target.clone(),
+                i => target.join(format!("w{i}")),
+            })
+            .collect();
+        eprintln!(
+            "{} shapes on {workers} workers, {jobs} build jobs each",
+            picked.len()
+        );
+        let build = |worker: usize, (name, picks): &(&'static str, Vec<&'static str>)| {
+            let target = &targets[worker];
+            let started = std::time::Instant::now();
             let root = base.join(name);
             let _ = std::fs::remove_dir_all(&root);
             let a = Answers {
                 local: Some(brocanth.display().to_string()),
-                ..answers(&picks)
+                ..answers(picks)
             };
             for (path, contents) in scaffold(&a).expect("the modules agree") {
                 let full = root.join(&path);
                 std::fs::create_dir_all(full.parent().unwrap()).unwrap();
                 std::fs::write(&full, contents).unwrap();
             }
-            // Clippy as the project's own CI runs it, then its tests, then
-            // once more with a page that awaits and a page that streams: the
-            // generator writes only sync pages, and those two are what a
-            // developer adds next. The new pages change the route table, so
-            // after them only the streaming page's own test runs.
+            // The project's tests, then a page that awaits and a page that
+            // streams, then clippy as the project's own CI runs it, then the
+            // new pages' tests. The generator writes only sync pages, and
+            // those two are what a developer adds next. The new pages change
+            // the route table, so the full `test` runs before them, and after
+            // them only the streaming page's own test runs. Clippy runs once,
+            // after the pages: it checks every file the generator wrote, and
+            // the pages too. A clippy pass before `test` checked a subset of
+            // that and cost minutes per shape.
             //
             // With a database, a third page needs it, and its test runs with
             // no database reachable: the build must finish on the
@@ -6929,7 +6970,7 @@ mod tests {
             } else {
                 &[]
             };
-            for step in [lint, &["test"][..], &["async-page"][..], lint, streams] {
+            for step in [&["test"][..], &["async-page"][..], lint, streams] {
                 if step == ["async-page"] {
                     std::fs::write(root.join("src/pages/waits.rs"), ASYNC_PAGE).unwrap();
                     // With `i18n-routing`, a path without a locale answers
@@ -6982,7 +7023,8 @@ mod tests {
                     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
                 )
                 .args(step)
-                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_TARGET_DIR", target)
+                .env("CARGO_BUILD_JOBS", jobs.to_string())
                 .envs(closed_db.iter().copied())
                 .current_dir(&root)
                 .output()
@@ -6990,16 +7032,32 @@ mod tests {
                 if !output.status.success() {
                     // Both streams: cargo writes to stderr, and a failing
                     // test writes its panic to stdout.
-                    failed.push(format!(
+                    return Some(format!(
                         "{name}: cargo {}\n{}\n{}",
                         step.join(" "),
                         String::from_utf8_lossy(&output.stderr),
                         String::from_utf8_lossy(&output.stdout)
                     ));
-                    break;
                 }
             }
+            eprintln!("{name}: {}s", started.elapsed().as_secs());
+            // Passed: the project is not needed to debug anything.
+            if std::env::var_os("BROCANTH_SHAPES_KEEP").is_none() {
+                let _ = std::fs::remove_dir_all(&root);
+            }
+            None
+        };
+        // The other workers' directories go when the test ends, a failed
+        // run included: only `BROCANTH_BUILD_TARGET` itself is kept for the
+        // next run.
+        let _workers: Vec<TempDir> = targets[1..].iter().cloned().map(TempDir).collect();
+        for dir in &targets[1..] {
+            seed_target(&target, dir);
         }
+        let failed: Vec<String> = on_workers(workers, &picked, build)
+            .into_iter()
+            .flatten()
+            .collect();
         assert!(failed.is_empty(), "{}", failed.join("\n\n"));
     }
 
@@ -7043,6 +7101,41 @@ mod tests {
         let mut done = done.into_inner().expect("a worker panicked");
         done.sort_by_key(|(at, _)| *at);
         done.into_iter().map(|(_, out)| out).collect()
+    }
+
+    /// Gives a worker a target directory that starts from what `seed`
+    /// already built. On macOS the copy is a clone (APFS `clonefile`): it
+    /// takes seconds and no space until a file changes. Elsewhere the
+    /// directory starts empty, because a real copy costs gigabytes. A
+    /// directory that a run with `BROCANTH_SHAPES_KEEP` left is used as it
+    /// is. The other workers' directories inside `seed` are not copied.
+    fn seed_target(seed: &Path, dir: &Path) {
+        if dir.exists() {
+            return;
+        }
+        std::fs::create_dir_all(dir).expect("a worker's target directory");
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(seed) else {
+            return;
+        };
+        let worker_dir = |name: &str| {
+            name.strip_prefix('w')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        for entry in entries.flatten() {
+            if worker_dir(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            // A clone that fails leaves a partial copy that cargo builds
+            // over: it costs time, not correctness.
+            let _ = std::process::Command::new("cp")
+                .args(["-c", "-R"])
+                .arg(entry.path())
+                .arg(dir)
+                .status();
+        }
     }
 
     /// A page that holds the context across an `.await`.
