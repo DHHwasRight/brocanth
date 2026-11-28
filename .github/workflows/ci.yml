@@ -197,11 +197,12 @@ jobs:
           workspaces: |
             . -> target
             . -> target/generated
-      # Two shape workers: each has its own target directory of several
-      # gigabytes, and a standard runner has about 14 GB free.
+      # One shape worker: a standard runner has 4 cores, and a second
+      # worker builds the framework again in its own target directory.
+      # Measured: 2 workers took 47 min, against 37 to 39 with one.
       - run: mise run generated
         env:
-          BROCANTH_SHAPES_JOBS: "2"
+          BROCANTH_SHAPES_JOBS: "1"
 
   embedded:
     name: embedded Postgres
