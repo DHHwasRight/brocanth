@@ -49,7 +49,7 @@ For the whole workspace:
 
 ```
 cargo check --workspace --all-targets
-cargo test --workspace
+mise run test   # cargo nextest run --workspace, then the doctests
 ```
 
 A full workspace check also catches a class of failure a per-crate check
