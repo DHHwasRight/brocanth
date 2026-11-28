@@ -6585,9 +6585,12 @@ mod tests {
             eprintln!("skipped: rustfmt is not on PATH");
             return;
         }
-        let mut unformatted = Vec::new();
-        for (name, picks) in shapes() {
-            for (path, source) in written(&picks) {
+        // One shape per worker at a time, a worker per core: thousands of
+        // rustfmt runs one after another made this the slowest test.
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let per_shape = on_workers(cores, &shapes(), |_, (name, picks)| {
+            let mut unformatted = Vec::new();
+            for (path, source) in written(picks) {
                 if !path.ends_with(".rs") {
                     continue;
                 }
@@ -6627,7 +6630,9 @@ mod tests {
                     unformatted.push(format!("{name}: {path}"));
                 }
             }
-        }
+            unformatted
+        });
+        let unformatted: Vec<String> = per_shape.into_iter().flatten().collect();
         assert!(
             unformatted.is_empty(),
             "rustfmt rejects these:\n  {}",
@@ -7010,6 +7015,34 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Runs `work` over `items` on `workers` threads, each thread taking
+    /// the next item when it is free. `work` gets the worker's number, so a
+    /// worker can keep its own resources. The results come back in the
+    /// order of `items`.
+    fn on_workers<I: Sync, T: Send>(
+        workers: usize,
+        items: &[I],
+        work: impl Fn(usize, &I) -> T + Sync,
+    ) -> Vec<T> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let next = AtomicUsize::new(0);
+        let done = std::sync::Mutex::new(Vec::with_capacity(items.len()));
+        std::thread::scope(|s| {
+            for worker in 0..workers.clamp(1, items.len().max(1)) {
+                let (next, done, work) = (&next, &done, &work);
+                s.spawn(move || loop {
+                    let at = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(at) else { break };
+                    let out = work(worker, item);
+                    done.lock().expect("a worker panicked").push((at, out));
+                });
+            }
+        });
+        let mut done = done.into_inner().expect("a worker panicked");
+        done.sort_by_key(|(at, _)| *at);
+        done.into_iter().map(|(_, out)| out).collect()
     }
 
     /// A page that holds the context across an `.await`.

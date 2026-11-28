@@ -56,6 +56,8 @@
 //!   (to `brocanth-static`). Each is a candidate for a `scaffold` feature
 //!   of its crate.
 
+use std::collections::HashMap;
+
 use brocanth_scaffold::Module;
 
 pub mod ci;
@@ -328,11 +330,24 @@ fn extra() -> Vec<&'static dyn Module> {
 }
 
 /// The module with this key, if this CLI has one.
+///
+/// `ALL` is looked up through a map built once: `manifest()` builds a
+/// whole `Manifest` on each call, and a scan of `ALL` per lookup made
+/// generating the largest project take most of a minute.
 pub fn find(key: &str) -> Option<&'static dyn Module> {
+    static BY_KEY: std::sync::LazyLock<HashMap<&'static str, &'static dyn Module>> =
+        std::sync::LazyLock::new(|| {
+            let mut by_key = HashMap::new();
+            for m in ALL {
+                // The first module with a key wins, as in a scan.
+                by_key.entry(m.manifest().key).or_insert(*m);
+            }
+            by_key
+        });
     extra()
         .into_iter()
-        .chain(ALL.iter().copied())
         .find(|m| m.manifest().key == key)
+        .or_else(|| BY_KEY.get(key).copied())
 }
 
 /// Every key, in listing order. A key a test added and `ALL` lacks comes
