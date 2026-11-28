@@ -1,0 +1,41 @@
+# cargo-nextest settings (`mise run test`, CI). CLAUDE.md "Tests" explains
+# the groups.
+#
+# nextest runs each test in its own process. A lock held in one test
+# process (a `static Mutex`) no longer orders the tests, so every test set
+# that relies on one, or on tables only one test may touch at a time, runs
+# in a group with `max-threads = 1`. The overrides of the default profile
+# apply to every profile.
+#
+# Not here: `brocanth_scaffold::testing::build` with `BROCANTH_BUILD_TARGET`
+# builds one project at a time under a process-wide lock too. `mise run
+# generated` runs those tests with `cargo test`, one binary at a time, so
+# the lock holds. A group for them here would serialise the 140 `scaffold`
+# tests on every run (115 s) to guard a run that does not use nextest.
+
+[test-groups]
+# `brocanth-queue-postgres` clears and reads the shared `queue_*` tables.
+# Its tests take a process-wide lock (`SERIAL` in tests/postgres.rs) to run
+# one at a time.
+queue-postgres = { max-threads = 1 }
+# The embedded Postgres tests (`BROCANTH_EMBEDDED_TEST`). The first run
+# downloads one archive into one place, and each test starts a server.
+embedded-postgres = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(brocanth-queue-postgres) & binary(postgres)"
+test-group = "queue-postgres"
+
+[[profile.default.overrides]]
+filter = "package(brocanth-db) & binary(embedded)"
+test-group = "embedded-postgres"
+
+# CI: run every test, name each slow one, stop a test that hangs. The JUnit
+# file goes to target/nextest/ci/junit.xml.
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

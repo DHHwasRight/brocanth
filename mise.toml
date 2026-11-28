@@ -4,11 +4,19 @@
 # rustfmt and clippy: the gate runs both, and module tests pipe generated
 # code through rustfmt.
 rust = { version = "1.98", components = "rustfmt,clippy" }
+# The test runner (`mise run test`, CI). The aqua backend checks each
+# download against the release's own `.sha256` file; mise.lock pins the
+# hash per platform. Bump the version here, then run `mise lock` and check
+# the new hashes against the release's `.sha256` files.
+cargo-nextest = "0.9.152"
 
 [tasks.build]
 run = "cargo build --workspace"
+# nextest runs the tests in parallel, each in its own process; its groups
+# (.config/nextest.toml) serialise the tests that share state. It does not
+# run doctests, so cargo runs them after.
 [tasks.test]
-run = "cargo test --workspace"
+run = ["cargo nextest run --workspace", "cargo test --workspace --doc"]
 # The tests that start a real embedded Postgres. They skip when the archive
 # is not on the machine; this lets them download it once (GitHub, see
 # docs/modules/db-embedded.md). The second run bundles that archive into the

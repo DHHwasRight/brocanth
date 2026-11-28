@@ -60,8 +60,13 @@ jobs:
         with:
           shared-key: test
       # No database is set, so the Postgres tests skip; the `database` job
-      # runs them.
-      - run: cargo test --workspace --locked --no-fail-fast
+      # runs them. mise installs cargo-nextest from mise.toml, checked
+      # against the hash in mise.lock. nextest does not run doctests, so
+      # cargo runs them in their own step.
+      - name: tests
+        run: cargo nextest run --workspace --locked --profile ci
+      - name: doctests
+        run: cargo test --workspace --doc --locked --no-fail-fast
 
   scaffold:
     name: scaffold side of each module
@@ -119,6 +124,15 @@ jobs:
       # The object store conformance runs (docs/object-storage.md §7).
       BROCANTH_STORAGE_TEST_S3: http://minioadmin:minioadmin@localhost:9000/brocanth-test
       BROCANTH_STORAGE_TEST_GCS: http://localhost:4443/brocanth-test
+      # The crates whose tests read the variables above.
+      DB_CRATES: >-
+        brocanth-admin-model brocanth-analytics brocanth-audit
+        brocanth-auth brocanth-cache brocanth-cache-redis brocanth-db
+        brocanth-filters brocanth-flags brocanth-jobs brocanth-middleware
+        brocanth-migrate brocanth-model brocanth-oauth-client
+        brocanth-pagination brocanth-policy brocanth-policy-macros
+        brocanth-queue-postgres brocanth-resource brocanth-rls
+        brocanth-search brocanth-storage brocanth-webhooks
     steps:
       - uses: actions/checkout@v4
       # `zod` is a workspace dependency on ../zod (a sibling repository).
@@ -152,31 +166,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: database
-      # The crates whose tests read the variables above, each with every
-      # feature (the `postgres` tests of cache and storage sit behind
-      # one, and the S3 and GCS runs of storage behind `s3` and `gcs`). One process at a time: two processes on one database touch
-      # each other's jobs rows (CLAUDE.md "Tests"). The embedded Postgres
-      # tests skip without BROCANTH_EMBEDDED_TEST; the nightly job runs
-      # them.
+      # The crates in DB_CRATES, with every feature (the `postgres` tests
+      # of cache and storage sit behind one, and the S3 and GCS runs of
+      # storage behind `s3` and `gcs`).
+      # nextest runs them in parallel; the groups in .config/nextest.toml
+      # serialise the queue tests (CLAUDE.md "Tests"). The embedded
+      # Postgres tests skip without BROCANTH_EMBEDDED_TEST; the nightly job
+      # runs them.
       - name: database tests
-        shell: bash
-        run: |
-          failed=""
-          for c in brocanth-admin-model brocanth-analytics brocanth-audit \
-                   brocanth-auth brocanth-cache brocanth-cache-redis brocanth-db \
-                   brocanth-filters brocanth-flags brocanth-jobs brocanth-middleware \
-                   brocanth-migrate brocanth-model brocanth-oauth-client \
-                   brocanth-pagination brocanth-policy brocanth-policy-macros \
-                   brocanth-queue-postgres brocanth-resource brocanth-rls \
-                   brocanth-search brocanth-storage brocanth-webhooks; do
-            echo "::group::$c"
-            cargo test -p "$c" --all-features --locked --no-fail-fast || failed="$failed $c"
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then
-            echo "these crates failed:$failed" >&2
-            exit 1
-          fi
+        run: cargo nextest run --all-features --locked --profile ci $(printf -- '-p %s ' $DB_CRATES)
+      # The doctests of the same crates, with the same features.
+      - name: database doctests
+        run: cargo test --doc --all-features --locked --no-fail-fast $(printf -- '-p %s ' $DB_CRATES)
 
   generated:
     name: generated projects

@@ -20,17 +20,24 @@ Toolchain is pinned by `mise.toml` (Rust 1.98). Run through mise:
 
 ```
 mise run build   # cargo build --workspace
-mise run test    # cargo test --workspace
+mise run test    # cargo nextest run --workspace, then cargo test --workspace --doc
 mise run lint    # cargo clippy --all-targets -- -D warnings
 mise run ci      # all three
 ```
 
 Also run `cargo fmt --check` before a commit.
 
+`mise run test` uses cargo-nextest: it runs the tests in parallel, each in
+its own process (about 3 minutes, against 9 with `cargo test`). nextest
+does not run doctests, so the task runs them after with `cargo test
+--doc`. mise installs nextest from `mise.toml`; `mise.lock` pins its hash
+per platform. One crate: `cargo nextest run -p <crate>`.
+
 CI: `.github/workflows/ci.yml` runs the gate on a push to `main` and on
-each pull request: fmt, clippy (default and `--all-features`), `cargo test
---workspace`, `mise run scaffold`, and the database tests against Postgres
-16 and Redis 7 service containers, MinIO and a GCS emulator. `mise run generated` runs on a push to
+each pull request: fmt, clippy (default and `--all-features`), `cargo
+nextest run --workspace --profile ci` and the doctests, `mise run
+scaffold`, and the database tests against Postgres 16 and Redis 7 service
+containers, MinIO and a GCS emulator. `mise run generated` runs on a push to
 `main`, nightly and on demand, not on a pull request. `mise run embedded`
 runs nightly and on demand only: it downloads a Postgres archive.
 
@@ -53,20 +60,33 @@ runs nightly and on demand only: it downloads a Postgres archive.
   `tustvold/fake-gcs-server` by digest; copy the `docker run` lines from
   `.github/workflows/ci.yml`. Each run works under its own prefix.
 - Isolation differs per crate, and no rule covers them all:
-  - own schema: `brocanth-auth`, `brocanth-middleware` (rate limit), the
-    `brocanth-jobs` panel test and its migrate race test, and the two
+  - own schema: most crates, `brocanth-auth`, `brocanth-middleware` (rate
+    limit), every `brocanth-jobs` Postgres test, and the two
     `brocanth-cache` sweep tests (a sweep deletes expired rows table-wide).
   - a transaction that rolls back: `brocanth-model`.
   - shared tables, isolated by name: `brocanth-cache` (a namespace per
-    test), `brocanth-storage` (unique bytes per test, feature `postgres`)
-    and most `brocanth-jobs` tests (a queue name and token per test). They run in parallel and truncate nothing. Run one
-    `cargo test` process per database: queue-wide jobs operations of one
-    process touch the other's rows.
+    test) and `brocanth-storage` (unique bytes per test, feature
+    `postgres`). They run in parallel and truncate nothing.
   - shared `queue_*` tables, serialised: `brocanth-queue-postgres`. A
-    process-wide lock (`SERIAL`) runs its tests one at a time. A test
-    deletes only its own queue's rows, or clears the outbox under the
-    lock.
+    process-wide lock (`SERIAL`) runs its tests one at a time under `cargo
+    test`. A test deletes only its own queue's rows, or clears the outbox
+    under the lock.
   In a new test, create a schema. Never truncate a shared table.
+- nextest runs each test in its own process, so a process-wide lock such
+  as `SERIAL` orders nothing there. `.config/nextest.toml` puts each test
+  set that needs one at a time in a test group with `max-threads = 1`:
+  - `queue-postgres`: the `brocanth-queue-postgres` Postgres tests. Without
+    the group they fail: they clear and read the same `queue_*` tables.
+  - `embedded-postgres`: the `brocanth-db` embedded tests. The first run
+    downloads one archive into one place.
+  A new test set that relies on a process-wide lock or on shared rows
+  needs a group there. Give `brocanth-queue-postgres` its own database
+  (CI does): a `brocanth-jobs` worker on the same database can take the
+  archive sweep lock that a queue test waits for.
+- `brocanth_scaffold::testing::build` with `BROCANTH_BUILD_TARGET` builds one
+  project at a time under a process-wide lock. `mise run generated` runs
+  those tests with `cargo test`, one binary at a time; do not move them to
+  nextest without a group.
 - CLI golden files live in `crates/brocanth-cli/tests/golden/`. When the
   generator changes, run
   `BROCANTH_BLESS=1 cargo test -p brocanth-cli --bin brocanth -- generator_writes`
